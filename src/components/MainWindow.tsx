@@ -118,6 +118,14 @@ const SOUND_TYPES = [
   { id: "drum", name: "Drum", icon: "◎" },
 ];
 
+const INSTRUMENTS = [
+  { id: "drums", name: "Drums" },
+  { id: "electric-guitar", name: "Electric Guitar" },
+  { id: "acoustic-guitar", name: "Acoustic Guitar" },
+  { id: "bass", name: "Bass" },
+  { id: "piano", name: "Piano" },
+];
+
 const TIME_SIGNATURES = [
   { beats: 0, label: "Never" },
   { beats: 1, label: "Always" },
@@ -563,6 +571,150 @@ function MidiDeviceDropdown({
   );
 }
 
+// SVG icons for instrument dropdown
+const INSTRUMENT_ICONS: Record<string, JSX.Element> = {
+  drums: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <ellipse cx="12" cy="14" rx="10" ry="5" />
+      <ellipse cx="12" cy="14" rx="10" ry="5" fill="currentColor" opacity="0.08" />
+      <path d="M2 14v-4c0-2.76 4.48-5 10-5s10 2.24 10 5v4" />
+      <ellipse cx="12" cy="10" rx="10" ry="5" />
+      <line x1="6" y1="3" x2="10" y2="10" />
+      <line x1="18" y1="3" x2="14" y2="10" />
+      <circle cx="6" cy="2.5" r="1.5" fill="currentColor" />
+      <circle cx="18" cy="2.5" r="1.5" fill="currentColor" />
+    </svg>
+  ),
+  "electric-guitar": (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11.5 2L11 7l3-1 .5 4-3 1.5" />
+      <path d="M11.5 11.5c-1.5-.5-4 .5-5 2.5s-1.5 4-.5 5.5 3 2 4.5 1.5 3-2 3.5-4-.5-4.5-2.5-5.5z" />
+      <circle cx="10" cy="15.5" r="1" />
+      <circle cx="10" cy="18" r="1" />
+      <path d="M6.5 20.5L3 22" />
+    </svg>
+  ),
+  "acoustic-guitar": (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11.5 2L11 7l3-1 .5 4-3 1.5" />
+      <path d="M11.5 11.5c-1.5-.5-4 .5-5 2.5s-1.5 4-.5 5.5 3 2 4.5 1.5 3-2 3.5-4-.5-4.5-2.5-5.5z" />
+      <ellipse cx="10" cy="16.5" rx="2" ry="2.5" />
+      <path d="M6.5 20.5L3 22" />
+    </svg>
+  ),
+  bass: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 2L11.5 8l2.5-1 .5 4-3 1.5" />
+      <path d="M11.5 12.5c-2-.5-4.5 1-5.5 3.5s-.5 5 1 6 3.5 1 5 0 2.5-3 2.5-5-.5-4-3-4.5z" />
+      <line x1="9" y1="15" x2="9" y2="19" />
+      <path d="M6 21l-3 1.5" />
+    </svg>
+  ),
+  piano: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="4" width="20" height="16" rx="2" />
+      <rect x="2" y="4" width="20" height="16" rx="2" fill="currentColor" opacity="0.05" />
+      <line x1="6" y1="4" x2="6" y2="20" />
+      <line x1="10" y1="4" x2="10" y2="20" />
+      <line x1="14" y1="4" x2="14" y2="20" />
+      <line x1="18" y1="4" x2="18" y2="20" />
+      <rect x="5" y="4" width="2.5" height="10" rx="0.5" fill="currentColor" opacity="0.6" />
+      <rect x="8.5" y="4" width="2.5" height="10" rx="0.5" fill="currentColor" opacity="0.6" />
+      <rect x="13" y="4" width="2.5" height="10" rx="0.5" fill="currentColor" opacity="0.6" />
+      <rect x="16.5" y="4" width="2.5" height="10" rx="0.5" fill="currentColor" opacity="0.6" />
+    </svg>
+  ),
+};
+
+// Instrument dropdown for Practice Coach settings
+function InstrumentDropdown({
+  value,
+  onChange,
+  disabled = false,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  const selected = INSTRUMENTS.find((o) => o.id === value) || INSTRUMENTS[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const handleClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  return (
+    <div className={`instrument-dropdown ${open ? "open" : ""} ${disabled ? "disabled" : ""}`} ref={ref}>
+      <button
+        className="instrument-dropdown-trigger"
+        onClick={() => !disabled && setOpen((v) => !v)}
+        type="button"
+        disabled={disabled}
+      >
+        <span className="instrument-dropdown-value">
+          {INSTRUMENT_ICONS[selected.id]}
+          {selected.name}
+        </span>
+        <svg
+          className="instrument-dropdown-chevron"
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && (
+        <div className="instrument-dropdown-menu">
+          {INSTRUMENTS.map((inst) => (
+            <button
+              key={inst.id}
+              className={`instrument-dropdown-item ${inst.id === value ? "selected" : ""}`}
+              onClick={() => {
+                onChange(inst.id);
+                setOpen(false);
+              }}
+              type="button"
+            >
+              {inst.id === value && (
+                <svg
+                  className="instrument-dropdown-check"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              )}
+              <span className="instrument-dropdown-icon">{INSTRUMENT_ICONS[inst.id]}</span>
+              <span>{inst.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Custom themed dropdown for audio output device selection
 function AudioOutputDropdown({
   devices,
@@ -867,6 +1019,7 @@ export function MainWindow() {
   const [presetDirty, setPresetDirty] = useState(false);
   const [updateFeedback, setUpdateFeedback] = useState(false);
   const updateFeedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [instrument, setInstrument] = useState("electric-guitar");
 
   const session = useSession({
     evaluation,
@@ -877,6 +1030,7 @@ export function MainWindow() {
     presetName: activePreset?.name,
     voiceMode: coachVoiceMode,
     notifLevel: coachNotifLevel,
+    instrument,
   });
 
   const handleActivePresetChange = useCallback((preset: Preset | null, dirty: boolean) => {
@@ -1024,6 +1178,8 @@ export function MainWindow() {
       }
       const acu = await storeLoad<boolean>("autoCheckUpdates");
       if (acu !== undefined) setAutoCheckUpdates(acu);
+      const inst = await storeLoad<string>("instrument");
+      if (inst) setInstrument(inst);
 
       // Load audio output devices and saved selection
       const devices = await listAudioOutputDevices();
@@ -2561,6 +2717,20 @@ export function MainWindow() {
               </div>
               <div className="setting-row">
                 <div className="setting-label">
+                  <label>Instrument</label>
+                  <span className="setting-hint">Tunes detection and coaching</span>
+                </div>
+                <InstrumentDropdown
+                  value={instrument}
+                  onChange={(val) => {
+                    setInstrument(val);
+                    storeSave("instrument", val);
+                  }}
+                  disabled={coachBrainTier === "off"}
+                />
+              </div>
+              <div className="setting-row">
+                <div className="setting-label">
                   <label>Voice</label>
                   <span className="setting-hint">Audio feedback delivery</span>
                 </div>
@@ -2597,7 +2767,7 @@ export function MainWindow() {
                         <button
                           key={id}
                           className={`toggle-btn ${coachVoiceName === id ? "active" : ""}`}
-                          disabled={!downloaded}
+                          disabled={coachBrainTier === "off" || !downloaded}
                           title={downloaded ? name : `${name} — not downloaded`}
                           onClick={() => {
                             setCoachVoiceName(id);
@@ -3354,24 +3524,40 @@ export function MainWindow() {
           <div className="download-confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <h3 className="download-confirm-title">Download AI Model</h3>
             <div className="download-confirm-models">
-              <div className={`download-confirm-model${pendingDownloadTier === "standard" ? " download-confirm-model-selected" : ""}`}>
-                <div className="download-confirm-model-name">Standard</div>
-                <div className="download-confirm-model-name" style={{ fontWeight: 400, fontSize: 13 }}>Qwen 2.5 1.5B</div>
-                <div className="download-confirm-model-size">~1.1 GB download &middot; ~2 GB RAM</div>
-                <p className="download-confirm-model-detail">Good comments, solid Q&A, reliable timing decisions. Best for simple time signatures and moderate tempos.</p>
-                <button className="download-confirm-go" onClick={() => handleStartDownload("standard")}>
-                  Download Standard
-                </button>
-              </div>
-              <div className={`download-confirm-model${pendingDownloadTier === "full" ? " download-confirm-model-selected" : ""}`}>
-                <div className="download-confirm-model-name">Full</div>
-                <div className="download-confirm-model-name" style={{ fontWeight: 400, fontSize: 13 }}>Phi 3.5 Mini</div>
-                <div className="download-confirm-model-size">~2.4 GB download &middot; ~4 GB RAM</div>
-                <p className="download-confirm-model-detail">Best quality, most nuanced feedback, strongest Q&A. Handles complex patterns, fast tempos, and polyrhythms.</p>
-                <button className="download-confirm-go" onClick={() => handleStartDownload("full")}>
-                  Download Full
-                </button>
-              </div>
+              {(["standard", "full"] as const).map((tier) => {
+                const isInstalled = modelStatus?.brainReady && modelStatus.brainTier === tier;
+                const isTarget = pendingDownloadTier === tier;
+                return (
+                  <div key={tier} className={`download-confirm-model${isTarget ? " download-confirm-model-selected" : ""}${isInstalled ? " download-confirm-model-installed" : ""}`}>
+                    {isInstalled && <span className="download-confirm-installed-badge">Installed</span>}
+                    <div className="download-confirm-model-name">{tier === "standard" ? "Standard" : "Full"}</div>
+                    <div className="download-confirm-model-name" style={{ fontWeight: 400, fontSize: 13 }}>
+                      {tier === "standard" ? "Qwen 2.5 1.5B" : "Phi 3.5 Mini"}
+                    </div>
+                    <div className="download-confirm-model-size">
+                      {tier === "standard" ? "~1.1 GB download \u00b7 ~2 GB RAM" : "~2.4 GB download \u00b7 ~4 GB RAM"}
+                    </div>
+                    <p className="download-confirm-model-detail">
+                      {tier === "standard"
+                        ? "Good comments, solid Q&A, reliable timing decisions. Best for simple time signatures and moderate tempos."
+                        : "Best quality, most nuanced feedback, strongest Q&A. Handles complex patterns, fast tempos, and polyrhythms."}
+                    </p>
+                    {isInstalled ? (
+                      <button className="download-confirm-go download-confirm-go-installed" onClick={() => {
+                        setCoachBrainTier(tier);
+                        storeSave("coachBrainTier", tier);
+                        setPendingDownloadTier(null);
+                      }}>
+                        Use {tier === "standard" ? "Standard" : "Full"}
+                      </button>
+                    ) : (
+                      <button className="download-confirm-go" onClick={() => handleStartDownload(tier)}>
+                        Download {tier === "standard" ? "Standard" : "Full"}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
             <button className="download-confirm-cancel" onClick={() => setPendingDownloadTier(null)}>
               Cancel

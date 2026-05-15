@@ -15,9 +15,16 @@ interface UseSessionOptions {
   presetName?: string;
   voiceMode?: "silent" | "chime" | "voice";
   notifLevel?: "all" | "important" | "silent";
+  instrument?: string;
 }
 
-export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId, presetName, voiceMode = "silent", notifLevel = "all" }: UseSessionOptions) {
+export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId, presetName, voiceMode = "silent", notifLevel = "all", instrument = "electric-guitar" }: UseSessionOptions) {
+  const instrumentLabel = instrument === "drums" ? "drums/percussion"
+    : instrument === "electric-guitar" ? "electric guitar"
+    : instrument === "acoustic-guitar" ? "acoustic guitar"
+    : instrument === "bass" ? "bass guitar"
+    : instrument === "piano" ? "piano/keys"
+    : "general instrument";
   const [active, setActive] = useState(false);
   const [messages, setMessages] = useState<FeedMessage[]>([]);
   const [startedAt, setStartedAt] = useState<number | null>(null);
@@ -82,7 +89,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
           let comment = formatMiniReport(report);
           if (coachLoadedRef.current) {
             try {
-              const context = formatMiniReportContext(segmentBpm, timeSignature, accuracy, report);
+              const context = formatMiniReportContext(segmentBpm, timeSignature, accuracy, report, instrumentLabel);
               comment = await coachGenerate(context);
             } catch { /* fall back to template */ }
           }
@@ -101,7 +108,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       });
     }
     wasPlayingRef.current = isPlaying;
-  }, [isPlaying, active, timeSignature]);
+  }, [isPlaying, active, timeSignature, instrumentLabel]);
 
   // Real-time coaching: monitor beat feedback during active play
   const realtimeWindowRef = useRef<BeatFeedback[]>([]);
@@ -261,12 +268,12 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
             const presetSessions = history.filter((s) => s.presetId === presetId);
             if (presetSessions.length > 0) {
               const summary = compactPresetSummary(presetName ?? "", presetSessions);
-              context = `The player is starting a new session. Generate a brief, motivating greeting (1-2 sentences).\n\n${summary}\n\nReference their history to make it personal.`;
+              context = `The player is starting a new session. They play ${instrumentLabel}. Generate a brief, motivating greeting (1-2 sentences).\n\n${summary}\n\nReference their history to make it personal.`;
             } else {
-              context = `The player is starting a new session with preset "${presetName ?? "default"}" at ${playBpmRef.current} BPM. This is their first session${presetName ? ` with "${presetName}"` : ""}. Generate a brief, motivating greeting (1-2 sentences). Be warm and encouraging.`;
+              context = `The player is starting a new session with preset "${presetName ?? "default"}" at ${playBpmRef.current} BPM. They play ${instrumentLabel}. This is their first session${presetName ? ` with "${presetName}"` : ""}. Generate a brief, motivating greeting (1-2 sentences). Be warm and encouraging.`;
             }
           } else {
-            context = `The player is starting a free practice session at ${playBpmRef.current} BPM. Generate a brief, motivating greeting (1-2 sentences). Be warm and encouraging.`;
+            context = `The player is starting a free practice session at ${playBpmRef.current} BPM. They play ${instrumentLabel}. Generate a brief, motivating greeting (1-2 sentences). Be warm and encouraging.`;
           }
           if (context) {
             const greeting = await coachGenerate(context);
@@ -279,7 +286,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         } catch { /* keep template greeting */ }
       })();
     }
-  }, [active, evaluation, presetId, presetName, maybeSpeak]);
+  }, [active, evaluation, presetId, presetName, maybeSpeak, instrumentLabel]);
 
   const endSession = useCallback(async () => {
     if (!active) return;
@@ -332,7 +339,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       const durationSecs = Math.round((now - (startedAt ?? now)) / 1000);
       const accuracy = aggregated.totalBeats > 0
         ? Math.round((aggregated.hitsCount / aggregated.totalBeats) * 100) : 0;
-      const context = formatSessionContext(durationSecs, segments.length, aggregated.score, aggregated.grade, aggregated.totalBeats, accuracy, aggregated.meanDeviationMs, aggregated.longestStreak);
+      const context = formatSessionContext(durationSecs, segments.length, aggregated.score, aggregated.grade, aggregated.totalBeats, accuracy, aggregated.meanDeviationMs, aggregated.longestStreak, instrumentLabel);
       coachGenerate(context).then((summaryComment) => {
         setMessages((prev) => prev.map((m) =>
           m.id === endMsgId ? { ...m, content: summaryComment } : m
@@ -340,7 +347,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         maybeSpeak(summaryComment);
       }).catch(() => {});
     }
-  }, [active, evaluation, bpm, timeSignature, startedAt, presetId, presetName, maybeSpeak]);
+  }, [active, evaluation, bpm, timeSignature, startedAt, presetId, presetName, maybeSpeak, instrumentLabel]);
 
   // Chat: send a user question to the coach
   const sendChat = useCallback((question: string) => {
@@ -385,7 +392,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
             ).join("\n") + "\n"
           : "";
 
-        const context = `Current session data:\n${sessionData}${historyContext}${conversationContext}\nUser asks: ${question}\nAnswer concisely based only on the data above.`;
+        const context = `Current session data:\n${sessionData}\nInstrument: ${instrumentLabel}${historyContext}${conversationContext}\nUser asks: ${question}\nAnswer concisely based only on the data above.`;
         reply = await coachGenerate(context);
       } catch { /* use fallback */ }
 
@@ -398,7 +405,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       setMessages((prev) => [...prev, replyMsg]);
       maybeSpeak(reply);
     })();
-  }, [bpm, presetId, presetName, maybeSpeak]);
+  }, [bpm, presetId, presetName, maybeSpeak, instrumentLabel]);
 
   const clearMessages = useCallback(() => {
     setMessages([]);
@@ -430,19 +437,19 @@ function formatMiniReport(report: SessionReport): string {
 }
 
 /** Format context for the coach to generate a mini-report comment. */
-function formatMiniReportContext(bpm: number, timeSignature: number, accuracy: number, report: SessionReport): string {
+function formatMiniReportContext(bpm: number, timeSignature: number, accuracy: number, report: SessionReport, instrumentLabel: string): string {
   const pocket = report.meanDeviationMs < -5 ? "ahead of the beat (rushing)"
     : report.meanDeviationMs > 5 ? "behind the beat (dragging)"
     : "right on the beat";
   const style = report.gridCorrelation > 0.8 ? "structured exercise (high grid correlation)"
     : report.gridCorrelation > 0.3 ? "semi-structured playing (medium grid correlation)"
     : "free/improvisational playing (low grid correlation)";
-  return `The player just finished a passage. Generate a brief coaching comment.\nBPM: ${bpm}, Time signature: ${timeSignature}/4\nPlaying style: ${style}\nAccuracy: ${accuracy}% (${report.perfectCount} perfect, ${report.goodCount} good, ${report.okCount} ok, ${report.missCount} miss)\nTiming tendency: ${pocket} (avg ${report.meanDeviationMs.toFixed(1)}ms)\nLongest clean streak: ${report.longestStreak} beats`;
+  return `The player (${instrumentLabel}) just finished a passage. Generate a brief coaching comment.\nBPM: ${bpm}, Time signature: ${timeSignature}/4\nPlaying style: ${style}\nAccuracy: ${accuracy}% (${report.perfectCount} perfect, ${report.goodCount} good, ${report.okCount} ok, ${report.missCount} miss)\nTiming tendency: ${pocket} (avg ${report.meanDeviationMs.toFixed(1)}ms)\nLongest clean streak: ${report.longestStreak} beats`;
 }
 
 /** Format context for end-of-session summary. */
-function formatSessionContext(durationSecs: number, segmentCount: number, score: number, grade: string, totalBeats: number, accuracy: number, meanDeviation: number, longestStreak: number): string {
-  return `The player has ended their practice session. Generate a brief session summary.\nDuration: ${durationSecs} seconds, ${segmentCount} segment(s)\nOverall score: ${score}/100 (grade ${grade})\nTotal beats: ${totalBeats}, accuracy: ${accuracy}%\nTiming tendency: avg ${meanDeviation.toFixed(1)}ms deviation\nLongest clean streak: ${longestStreak} beats\nKeep it encouraging and suggest one specific thing to focus on next time.`;
+function formatSessionContext(durationSecs: number, segmentCount: number, score: number, grade: string, totalBeats: number, accuracy: number, meanDeviation: number, longestStreak: number, instrumentLabel: string): string {
+  return `The player (${instrumentLabel}) has ended their practice session. Generate a brief session summary.\nDuration: ${durationSecs} seconds, ${segmentCount} segment(s)\nOverall score: ${score}/100 (grade ${grade})\nTotal beats: ${totalBeats}, accuracy: ${accuracy}%\nTiming tendency: avg ${meanDeviation.toFixed(1)}ms deviation\nLongest clean streak: ${longestStreak} beats\nKeep it encouraging and suggest one specific thing to focus on next time.`;
 }
 
 

@@ -1934,6 +1934,33 @@
   border-radius: 10px;
   border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   background: color-mix(in srgb, var(--bg-primary) 50%, transparent);
+  position: relative;
+}
+
+.download-confirm-model-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.download-confirm-model-installed {
+  opacity: 0.55;
+}
+
+.download-confirm-model-installed.download-confirm-model-selected {
+  opacity: 1;
+}
+
+.download-confirm-installed-badge {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.1);
+  padding: 2px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
 }
 
 .download-confirm-model-name {
@@ -2002,6 +2029,17 @@
   color: var(--accent-text, white);
 }
 
+.download-confirm-go-installed {
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+
+.download-confirm-go-installed:hover {
+  background: color-mix(in srgb, var(--border) 30%, transparent);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
 .setting-control {
   display: flex;
   align-items: center;
@@ -2035,13 +2073,15 @@
 }
 
 .toggle-btn:disabled {
-  opacity: 0.35;
+  opacity: 0.3;
   cursor: not-allowed;
   pointer-events: none;
+  filter: grayscale(0.6);
 }
 
 .toggle-btn:disabled.active {
-  background: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  color: color-mix(in srgb, var(--accent-text, white) 50%, transparent);
 }
 
 .toggle-btn[data-tooltip] {
@@ -2503,6 +2543,141 @@
 
 .midi-dropdown-item:not(.selected) {
   padding-left: 32px; /* align with checked items */
+}
+
+/* =================== Instrument dropdown =================== */
+
+.instrument-dropdown {
+  position: relative;
+  min-width: 220px;
+}
+
+.instrument-dropdown.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.instrument-dropdown-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 14px;
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+
+.instrument-dropdown-trigger:disabled {
+  cursor: default;
+}
+
+.instrument-dropdown-trigger:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.instrument-dropdown.open .instrument-dropdown-trigger {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.instrument-dropdown-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instrument-dropdown-value svg {
+  flex-shrink: 0;
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+.instrument-dropdown-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 0.2s;
+}
+
+.instrument-dropdown.open .instrument-dropdown-chevron {
+  transform: rotate(180deg);
+}
+
+.instrument-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  width: max-content;
+  z-index: 100;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.4),
+    0 2px 8px rgba(0, 0, 0, 0.2);
+  animation: midi-dropdown-in 0.15s ease-out;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.instrument-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+
+.instrument-dropdown-item:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.instrument-dropdown-item.selected {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.instrument-dropdown-check {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.instrument-dropdown-icon {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.instrument-dropdown-item.selected .instrument-dropdown-icon svg {
+  color: var(--accent);
+}
+
+.instrument-dropdown-item:not(.selected) {
+  padding-left: 32px;
+}
+
+.instrument-dropdown-item:not(.selected) .instrument-dropdown-icon svg {
+  opacity: 0.5;
 }
 
 .midi-refresh-btn {

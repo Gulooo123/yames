@@ -36,6 +36,8 @@ and the data is only useful if someone interprets it well.
 - TTS with 3 Piper voices + chime mode
 - Adaptive drill (model-driven or heuristic tempo)
 - Async Tauri commands (no UI freeze)
+- Instrument selection (drums, guitar/bass, keys, other) in settings — passed
+  to all coach contexts (greetings, mini-reports, summaries, chat)
 
 ### Critical Problems
 
@@ -68,6 +70,57 @@ shallow.
 **6. Coach has no memory across sessions.**
 Greetings are generic. No awareness of past sessions, presets, or trends. The
 template engine doesn't understand context beyond the current moment.
+
+---
+
+## Instrument Awareness
+
+The user selects their instrument class in Settings. This single piece of
+metadata solves several of the hardest DSP and coaching problems cheaply.
+
+**Instrument classes:**
+
+| Class | ID | Key tuning differences |
+|-------|-----|----------------------|
+| Drums | `drums` | Tight refractory (fast rolls are real), high onset density expected, sharp transients |
+| Electric Guitar | `electric-guitar` | Chord strum merging, string noise / pickup hum tolerance |
+| Acoustic Guitar | `acoustic-guitar` | Chord strum merging, body resonance, string noise tolerance |
+| Bass | `bass` | Low-frequency onset detection, longer sustain, fewer spurious onsets |
+| Piano | `piano` | Clean transients, polyphonic chords, low spurious noise |
+
+**How instrument flows into DSP (D2, D3):**
+
+- **Refractory period (D2):** Drums use the tightest refractory (`max(15ms,
+  subdivision_interval × 0.25)`). Guitar/keys use standard formula. This
+  prevents suppressing legitimate fast rolls on drums while keeping guitar
+  cleaner.
+- **Chord/strum merging (D2):** Guitar and keys get an onset merge window:
+  multiple onsets within ~15ms are collapsed into a single "strum" or "chord"
+  event. Without this, a 6-string strum registers as 6 spurious onsets.
+  Drums do NOT merge — simultaneous hi-hat + snare are distinct hits.
+- **Spurious onset tolerance (D3b):** Drums naturally produce bleed (snare
+  sympathetic vibration, hi-hat wash). Guitar has string noise and fret buzz.
+  The onset_efficiency calculation applies an instrument-specific baseline:
+  drums allow ~1.3× expected onsets before penalty, guitar ~1.15×, keys ~1.0×.
+- **Amplitude profiles (D2):** Drums have the sharpest transients (highest
+  spectral flux). Voice/wind have softer onsets. The adaptive threshold
+  multiplier can be tuned per instrument class for better detection sensitivity.
+
+**How instrument flows into coaching (C1-C5):**
+
+- **Language:** "Lock in your right hand" (drums) vs "watch your picking
+  consistency" (guitar) vs "even out your touch" (keys). The instrument label
+  is included in every coach context string, so the LLM naturally adapts.
+  Template engine uses the label for greeting flavor text.
+- **Greetings:** "Let's work on that stick control" vs "Time to dial in
+  your picking." Instrument-specific warmth.
+- **Advice framing:** The model can suggest instrument-appropriate practice
+  strategies when it knows what the user plays.
+
+**Implementation status:** Instrument selection UI is shipped (settings toggle
+group, persisted via tauri-plugin-store). Instrument label is passed to all
+coach context strings (greetings, mini-reports, summaries, chat). DSP-side
+tuning (refractory, merging, tolerance) is part of D2/D3 implementation.
 
 ---
 
@@ -149,6 +202,8 @@ detection later, the formula is wrong again.
   At 200 BPM 16ths (75ms interval) → 26ms refractory (tight but real).
 - The 20ms floor is physics — no real instrument produces two distinct attacks
   faster than that.
+- **Instrument override:** Drums use tighter formula: `max(15ms, subdivision_interval
+  * 0.25)`. Fast rolls and ghost notes are legitimate playing, not noise.
 
 **Adaptive noise floor:**
 - Current: hardcoded RMS threshold of 0.01.
@@ -169,6 +224,13 @@ Most practice setups (headphones, audio interfaces) have zero click bleed.
 The case where it matters (laptop mic + laptop speakers) is the weakest
 evaluation setup anyway. The adaptive noise floor + amplitude threshold
 already filter most bleed. Revisit only if users report it as a problem.
+
+**Chord / strum merging (guitar & keys only):**
+When instrument is `guitar` or `keys`, multiple onsets within a ~15ms window
+are collapsed into a single event (the loudest onset is kept). A 6-string
+guitar strum produces 6 near-simultaneous transients — without merging, these
+register as 5 spurious onsets. Drums explicitly skip merging because
+simultaneous hi-hat + snare are distinct intentional hits.
 
 ### D3 — Scoring Architecture Overhaul
 
@@ -230,6 +292,10 @@ onset_efficiency = matched_onsets / total_detected_onsets
 - Double-strikes near the same beat: allow multiple onsets per beat, score
   only the best match. Additional onsets near the same beat are neutral
   (neither rewarded nor penalized). Only onsets far from ANY beat penalize.
+- **Instrument-aware baseline:** Drums naturally produce more onsets per beat
+  (bleed, sympathetic vibration). Apply an instrument-specific tolerance
+  multiplier to onset_efficiency: drums ~1.3×, guitar ~1.15×, keys ~1.0×,
+  other ~1.1×. This prevents unfairly penalizing instrument-specific noise.
 
 #### 3c. Interval-First Scoring
 
@@ -621,6 +687,19 @@ During drill ramps, BPM changes every few bars. The matching window must
 update immediately with the new BPM — if it lags even one beat, the first
 beat at the new tempo gets mis-scored. The expected_beats array must be
 regenerated (or interpolated) on each tempo change event, not on a timer.
+
+**17. Instrument change mid-session.**
+If the user changes instrument in settings during an active session, the DSP
+parameters (refractory, merging, tolerance) should update for the next segment,
+not retroactively. The current segment's scoring completes with the original
+instrument profile. Coach context picks up the new instrument immediately
+since it reads the current value on each query.
+
+**18. Instrument-specific test scenarios.**
+The test matrix (D3d) should include at least one instrument-specific scenario:
+e.g., "Guitar chord strum at 120 BPM — 6 near-simultaneous onsets per beat,
+all within 15ms, should merge to 1 and score 90+." Without this, the chord
+merging logic is untested.
 
 ---
 
