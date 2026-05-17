@@ -5,8 +5,7 @@
   flex-direction: column;
   gap: 16px;
   padding: 26px 4px 0;
-  flex: 1;
-  justify-content: center;
+  width: 100%;
 }
 
 .track-secondary-actions {
@@ -84,12 +83,15 @@
   border-radius: 50%;
 }
 
-/* Playing state */
+/* Playing state — fills the wrapper so the entire area is a tap target,
+ * with content vertically centered inside that area. */
 .track-playing {
   align-items: center;
   cursor: pointer;
   user-select: none;
   gap: 24px;
+  flex: 1;
+  justify-content: center;
 }
 
 .track-live-header {

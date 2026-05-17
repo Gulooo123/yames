@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use crate::session_log::PracticeSegment;
 use crate::timing::BeatFeedback;
 
 /// Accumulated session statistics from beat feedback events.
@@ -64,14 +65,33 @@ pub struct SessionReport {
 }
 
 /// Accumulates BeatFeedback events during a playing session.
+///
+/// Also tracks session start (UNIX seconds) and Signal-B-emitted
+/// `PracticeSegment`s so the D1 diagnostic log persistence path
+/// (`commands::stop_evaluation` → `session_log::save_log`) has
+/// everything it needs without piping the timing analyzer into the
+/// log builder directly.
 pub struct SessionAccumulator {
     feedbacks: Vec<BeatFeedback>,
+    /// UNIX seconds when the session started. `None` until
+    /// `mark_session_start` is called (`start_evaluation` sets this).
+    session_start_secs: Option<u64>,
+    /// Wall-clock ms (Unix epoch) of the session start. Used to derive
+    /// duration on save and to compute segment offsets in the diagnostic
+    /// log. `None` until `mark_session_start` is called.
+    session_start_ms: Option<u64>,
+    /// Practice segments produced by the D4 Signal-B trigger. Pushed
+    /// from the segment callback in `commands::start_evaluation`.
+    segments: Vec<PracticeSegment>,
 }
 
 impl SessionAccumulator {
     pub fn new() -> Self {
         Self {
             feedbacks: Vec::with_capacity(256),
+            session_start_secs: None,
+            session_start_ms: None,
+            segments: Vec::new(),
         }
     }
 
@@ -79,12 +99,48 @@ impl SessionAccumulator {
         self.feedbacks.push(fb);
     }
 
+    /// Stamp the session-start wall clock. Idempotent — only the first
+    /// call sticks. Call from `start_evaluation` after `clear()`.
+    pub fn mark_session_start(&mut self, secs: u64, ms: u64) {
+        if self.session_start_secs.is_none() {
+            self.session_start_secs = Some(secs);
+            self.session_start_ms = Some(ms);
+        }
+    }
+
+    pub fn push_segment(&mut self, seg: PracticeSegment) {
+        self.segments.push(seg);
+    }
+
     pub fn clear(&mut self) {
         self.feedbacks.clear();
+        self.segments.clear();
+        self.session_start_secs = None;
+        self.session_start_ms = None;
     }
 
     pub fn is_empty(&self) -> bool {
         self.feedbacks.is_empty()
+    }
+
+    /// Read-only access to accumulated feedbacks for the D1 log builder.
+    pub fn feedbacks(&self) -> &[BeatFeedback] {
+        &self.feedbacks
+    }
+
+    /// UNIX seconds when the session started, or `None` if never stamped.
+    pub fn session_start_secs(&self) -> Option<u64> {
+        self.session_start_secs
+    }
+
+    /// Wall-clock ms (Unix epoch) when the session started.
+    pub fn session_start_ms(&self) -> Option<u64> {
+        self.session_start_ms
+    }
+
+    /// Read-only access to accumulated segments for the D1 log builder.
+    pub fn segments(&self) -> &[PracticeSegment] {
+        &self.segments
     }
 
     /// Generate a session report from accumulated feedback.
@@ -230,8 +286,40 @@ impl SessionAccumulator {
         };
         let consistency_score = (1.0 - (std_deviation_ms / 50.0).min(1.0)).max(0.0);
 
-        let raw_score = hit_rate * 0.3 + accuracy_score * 0.5 + consistency_score * 0.2;
-        let score = (raw_score * 100.0).round() as u32;
+        // D4 — duration-weighted session score from segment results.
+        // The live DSP pipeline emits `PracticeSegment`s with their own
+        // four-component D3 scores; the plan-correct session score is
+        // `Σ(segment_score × segment_duration_ms) / Σ(segment_duration_ms)`
+        // so a 10-second warmup segment doesn't outweigh a 5-minute run.
+        // Fall back to the legacy `hit×0.3 + acc×0.5 + consist×0.2` only
+        // when no segments were recorded (e.g. drill-only sessions where
+        // the segment trigger never fired, or unit-test fixtures that
+        // push raw feedbacks).
+        //
+        // SCALE: `score_segment` returns a 0-100 score (the four
+        // components are weighted then `* 100.0` at the bottom of the
+        // function). `duration_weighted_session_score` preserves that
+        // scale — it just takes a weighted mean of values it doesn't
+        // care about. The legacy fallback, in contrast, is a sum of
+        // [0, 1] components so it needs an explicit `* 100.0` to land
+        // in the same range. Mixing the two scales caused v0.9's
+        // "Score 2636 / grade F" final report — segment path was being
+        // `* 100`'d twice. Branching the multiplier keeps both paths
+        // honest.
+        let score = if !self.segments.is_empty() {
+            let pairs: Vec<(f32, u64)> = self
+                .segments
+                .iter()
+                .map(|s| (s.score, s.end_ms.saturating_sub(s.start_ms)))
+                .collect();
+            crate::timing::duration_weighted_session_score(&pairs)
+                .round()
+                .clamp(0.0, 100.0) as u32
+        } else {
+            ((hit_rate * 0.3 + accuracy_score * 0.5 + consistency_score * 0.2) * 100.0)
+                .round()
+                .clamp(0.0, 100.0) as u32
+        };
 
         let grade = match score {
             95..=100 => "S",
@@ -409,3 +497,283 @@ fn generate_insights(
     insights.truncate(3);
     insights
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fb(classification: &str, deviation: f64, interval_err: f64, amp: f32) -> BeatFeedback {
+        BeatFeedback {
+            beat_index: 0,
+            deviation_ms: deviation,
+            interval_error_ms: interval_err,
+            classification: classification.to_string(),
+            amplitude: amp,
+            calibration_offset_ms: 0.0,
+            calibration_confidence: 1.0,
+            grid_correlation: 0.0,
+        }
+    }
+
+    #[test]
+    fn empty_session_grades_F() {
+        // Empty session: no hits, no misses, no scored beats.
+        // Score is non-zero because consistency_score = 1.0 trivially
+        // (no deviations means no variance penalty). Implementation detail —
+        // grade should still be F since score < 40.
+        let acc = SessionAccumulator::new();
+        let r = acc.report();
+        assert_eq!(r.total_beats, 0);
+        assert!(r.score < 40, "Empty session score should be < 40, got {}", r.score);
+        assert_eq!(r.grade, "F");
+    }
+
+    #[test]
+    fn all_perfect_hits_grade_S() {
+        let mut acc = SessionAccumulator::new();
+        for _ in 0..16 {
+            acc.push(fb("perfect", 2.0, 1.0, 0.5));
+        }
+        let r = acc.report();
+        assert_eq!(r.hits_count, 16);
+        assert_eq!(r.perfect_count, 16);
+        assert_eq!(r.miss_count, 0);
+        assert!(
+            r.score >= 95,
+            "All perfect hits should score >= 95, got {}",
+            r.score
+        );
+        assert_eq!(r.grade, "S");
+    }
+
+    #[test]
+    fn all_miss_grades_F() {
+        let mut acc = SessionAccumulator::new();
+        for _ in 0..16 {
+            acc.push(fb("miss", 0.0, 0.0, 0.0));
+        }
+        let r = acc.report();
+        assert_eq!(r.miss_count, 16);
+        assert_eq!(r.hits_count, 0);
+        assert_eq!(r.grade, "F");
+    }
+
+    #[test]
+    fn grade_bands_map_to_score_ranges() {
+        // Test the grade band logic by constructing reports with known
+        // perfect/good/ok/miss mixes
+        let cases = [
+            // (perfect, good, ok, miss, expected_grade_or_alternatives)
+            (16, 0, 0, 0, vec!["S"]),                  // all perfect = S
+            (12, 4, 0, 0, vec!["A", "S"]),             // mostly perfect
+            (8, 4, 4, 0, vec!["A", "B"]),              // mixed quality, no miss
+            (4, 4, 4, 4, vec!["B", "C", "D"]),          // balanced with miss
+        ];
+        for (p, g, o, m, expected) in cases {
+            let mut acc = SessionAccumulator::new();
+            for _ in 0..p {
+                acc.push(fb("perfect", 1.0, 1.0, 0.5));
+            }
+            for _ in 0..g {
+                acc.push(fb("good", 8.0, 5.0, 0.5));
+            }
+            for _ in 0..o {
+                acc.push(fb("ok", 20.0, 10.0, 0.5));
+            }
+            for _ in 0..m {
+                acc.push(fb("miss", 0.0, 0.0, 0.0));
+            }
+            let r = acc.report();
+            assert!(
+                expected.contains(&r.grade.as_str()),
+                "(p={}, g={}, o={}, m={}) score={} produced grade {:?}, expected one of {:?}",
+                p,
+                g,
+                o,
+                m,
+                r.score,
+                r.grade,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn skipped_beats_do_not_count_as_misses() {
+        let mut acc = SessionAccumulator::new();
+        for _ in 0..8 {
+            acc.push(fb("perfect", 1.0, 1.0, 0.5));
+        }
+        for _ in 0..8 {
+            acc.push(fb("skipped", 0.0, 0.0, 0.0));
+        }
+        let r = acc.report();
+        assert_eq!(r.perfect_count, 8);
+        assert_eq!(r.skipped_beats, 8);
+        assert_eq!(r.miss_count, 0);
+        // Score should be high since skipped don't deflate it
+        assert!(r.score >= 90, "score={}", r.score);
+    }
+
+    #[test]
+    fn longest_streak_counts_consecutive_non_miss() {
+        let mut acc = SessionAccumulator::new();
+        // 10 perfect, 1 miss, 5 perfect
+        for _ in 0..10 {
+            acc.push(fb("perfect", 1.0, 1.0, 0.5));
+        }
+        acc.push(fb("miss", 0.0, 0.0, 0.0));
+        for _ in 0..5 {
+            acc.push(fb("perfect", 1.0, 1.0, 0.5));
+        }
+        let r = acc.report();
+        assert_eq!(r.longest_streak, 10);
+    }
+
+    #[test]
+    fn mean_deviation_centers_on_zero_with_balanced_data() {
+        let mut acc = SessionAccumulator::new();
+        // Symmetric early/late
+        for _ in 0..5 {
+            acc.push(fb("good", -10.0, 5.0, 0.5));
+        }
+        for _ in 0..5 {
+            acc.push(fb("good", 10.0, 5.0, 0.5));
+        }
+        let r = acc.report();
+        assert!(
+            r.mean_deviation_ms.abs() < 0.01,
+            "Expected mean deviation ~ 0, got {}",
+            r.mean_deviation_ms
+        );
+    }
+
+    #[test]
+    fn generate_comment_handles_short_session() {
+        let comment = generate_comment("S", 100, 4);
+        assert!(comment.contains("Not enough data"));
+    }
+
+    #[test]
+    fn generate_comment_returns_grade_specific_text() {
+        let s = generate_comment("S", 100, 20);
+        let a = generate_comment("A", 90, 20);
+        let f = generate_comment("F", 30, 20);
+        assert_ne!(s, a);
+        assert_ne!(a, f);
+        assert_ne!(s, f);
+    }
+
+    // ---- D4 duration-weighted session score plumbing ----
+
+    /// Construct a `PracticeSegment` for the D4 plumbing tests.
+    ///
+    /// `score_0_1` is a readability convenience — call sites pass
+    /// `0.5`, `0.75`, etc. and this helper scales them to the
+    /// production 0–100 range that `score_segment` actually emits.
+    /// Keeping the call-site notation in `[0, 1]` mirrors the way the
+    /// plan talks about D3 sub-components; the on-the-wire `score`
+    /// field is 0–100 per the doc-comment in `session_log.rs`.
+    /// Component scores stay in `[0, 1]` because that's their actual
+    /// schema (see `ComponentScores` doc).
+    fn seg(start_ms: u64, end_ms: u64, score_0_1: f32) -> crate::session_log::PracticeSegment {
+        crate::session_log::PracticeSegment {
+            start_ms,
+            end_ms,
+            start_bpm: 120,
+            end_bpm: 120,
+            score: score_0_1 * 100.0,
+            component_scores: crate::session_log::ComponentScores {
+                interval_consistency: score_0_1,
+                grid_alignment: score_0_1,
+                hit_completeness: score_0_1,
+                onset_efficiency: score_0_1,
+            },
+            end_reason: crate::session_log::SegmentEndReason::SettingsChange,
+        }
+    }
+
+    #[test]
+    fn session_score_uses_segment_d4_weighting_when_segments_present() {
+        // Two segments: a short 0.5 score for 5s and a long 0.9 score
+        // for 55s. Legacy formula on the feedbacks alone would land
+        // somewhere mid-range; D4 weighting should land near 0.87
+        // (heavily biased toward the 55s segment).
+        let mut acc = SessionAccumulator::new();
+        for _ in 0..20 {
+            acc.push(fb("good", 10.0, 5.0, 0.5));
+        }
+        acc.push_segment(seg(0, 5_000, 0.50));
+        acc.push_segment(seg(5_000, 60_000, 0.90));
+        let r = acc.report();
+        // Σ(score×dur) / Σdur = (0.5×5000 + 0.9×55000) / 60000 ≈ 0.867
+        // → 87 after rounding ×100.
+        assert!(
+            (84..=89).contains(&r.score),
+            "D4-weighted score should land near 87, got {}",
+            r.score
+        );
+    }
+
+    #[test]
+    fn session_score_falls_back_to_legacy_when_no_segments() {
+        // No segments pushed — should hit the legacy 3-component path.
+        // 16 perfects → score >= 95.
+        let mut acc = SessionAccumulator::new();
+        for _ in 0..16 {
+            acc.push(fb("perfect", 1.0, 1.0, 0.5));
+        }
+        let r = acc.report();
+        assert!(
+            r.score >= 95,
+            "Legacy fallback should still grade all-perfect as S, got {}",
+            r.score
+        );
+    }
+
+    #[test]
+    fn session_score_d4_short_segment_doesnt_dominate_long_segment() {
+        // Regression guard for the very bug §"What's broken" called out:
+        // a 5-second perfect warmup should NOT make a 5-minute D-grade
+        // run look like a B.
+        let mut acc = SessionAccumulator::new();
+        acc.push_segment(seg(0, 5_000, 1.00)); // 5s perfect warmup
+        acc.push_segment(seg(5_000, 305_000, 0.40)); // 5min D-grade run
+        let r = acc.report();
+        // Weighted ≈ (1.0×5000 + 0.4×300000) / 305000 ≈ 0.410 → 41
+        assert!(
+            r.score <= 50,
+            "Long D-grade run should dominate; got {}",
+            r.score
+        );
+    }
+
+    #[test]
+    fn session_score_d4_handles_single_segment() {
+        let mut acc = SessionAccumulator::new();
+        acc.push_segment(seg(0, 60_000, 0.75));
+        let r = acc.report();
+        assert!(
+            (74..=76).contains(&r.score),
+            "Single 0.75 segment should score ~75, got {}",
+            r.score
+        );
+    }
+
+    #[test]
+    fn session_score_d4_handles_zero_duration_segments() {
+        // Defensive: a segment with end_ms < start_ms (clock skew?) or
+        // start==end shouldn't poison the aggregation.
+        let mut acc = SessionAccumulator::new();
+        acc.push_segment(seg(1_000, 1_000, 0.50)); // zero duration
+        acc.push_segment(seg(1_000, 31_000, 0.90)); // 30s real segment
+        let r = acc.report();
+        // 30s segment dominates; expect ~90.
+        assert!(
+            (88..=92).contains(&r.score),
+            "Zero-duration segment should not poison D4 weighting; got {}",
+            r.score
+        );
+    }
+}
+

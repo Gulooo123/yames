@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { load } from "@tauri-apps/plugin-store";
-import type { AppState, BeatEvent, SpeedRamp, Subdivision } from "./types";
+import type { AppState, BeatEvent, InstrumentId, SpeedRamp, Subdivision } from "./types";
 
 // Shared store instance (lazy singleton)
 let _store: Awaited<ReturnType<typeof load>> | null = null;
@@ -58,6 +58,17 @@ export async function setWidgetAlwaysOnTop(enabled: boolean): Promise<void> {
 
 export async function setTheme(theme: string): Promise<void> {
   return invoke("set_theme", { theme });
+}
+
+/**
+ * Update the player's instrument. The Rust backend swaps to the matching
+ * `InstrumentProfile` (D0): refractory floor, cluster window, onset cap,
+ * activity silence threshold, and coach vocabulary all update. Effective
+ * for the *next* DSP segment — current detection state is not rewound
+ * mid-segment.
+ */
+export async function setInstrument(instrument: InstrumentId): Promise<void> {
+  return invoke("set_instrument", { instrument });
 }
 
 export async function setVolume(volume: number): Promise<void> {
@@ -165,6 +176,83 @@ export async function setCalibrationOffset(offset: number): Promise<void> {
 
 export async function getCalibrationOffset(): Promise<number | null> {
   return invoke<number | null>("get_calibration_offset");
+}
+
+// ---------------------------------------------------------------------------
+// Per-instrument calibration cache (DSP plan §"Per-instrument calibration
+// cache"). The cache is read-mostly on the frontend — Settings renders a
+// "Calibrated for this device" hint plus a "Recalibrate" button that drops
+// the entry so the next session re-converges from scratch.
+// ---------------------------------------------------------------------------
+
+export interface CalibrationCacheEntry {
+  offsetMs: number;
+  confidence: number;
+  lastUpdatedSecs: number;
+}
+
+export interface CalibrationCachePair {
+  instrumentId: string;
+  deviceName: string;
+  entry: CalibrationCacheEntry;
+}
+
+// Rust serializes with snake_case for nested fields; map at the boundary so
+// the rest of the app uses camelCase consistently. Keeping this thin
+// adapter layer also lets us evolve the wire format without churning every
+// consumer.
+type RawEntry = {
+  offset_ms: number;
+  confidence: number;
+  last_updated_secs: number;
+};
+
+type RawPair = {
+  instrument_id: string;
+  device_name: string;
+  entry: RawEntry;
+};
+
+function adaptEntry(raw: RawEntry): CalibrationCacheEntry {
+  return {
+    offsetMs: raw.offset_ms,
+    confidence: raw.confidence,
+    lastUpdatedSecs: raw.last_updated_secs,
+  };
+}
+
+function adaptPair(raw: RawPair): CalibrationCachePair {
+  return {
+    instrumentId: raw.instrument_id,
+    deviceName: raw.device_name,
+    entry: adaptEntry(raw.entry),
+  };
+}
+
+export async function getCalibrationCacheEntry(
+  instrumentId: string,
+  deviceName: string | null,
+): Promise<CalibrationCacheEntry | null> {
+  const raw = await invoke<RawEntry | null>("get_calibration_cache_entry", {
+    instrumentId,
+    deviceName,
+  });
+  return raw ? adaptEntry(raw) : null;
+}
+
+export async function clearCalibrationCacheEntry(
+  instrumentId: string,
+  deviceName: string | null,
+): Promise<void> {
+  return invoke("clear_calibration_cache_entry", {
+    instrumentId,
+    deviceName,
+  });
+}
+
+export async function listCalibrationCache(): Promise<CalibrationCachePair[]> {
+  const raw = await invoke<RawPair[]>("list_calibration_cache");
+  return raw.map(adaptPair);
 }
 
 // Update checker — uses Tauri updater plugin for in-app updates
@@ -313,6 +401,22 @@ export async function getEvaluationState(): Promise<boolean> {
   return invoke<boolean>("get_evaluation_state");
 }
 
+/**
+ * D4 — Signal A: tell the timing analyzer that the user changed
+ * settings (BPM, preset, time signature, or instrument). The analyzer
+ * closes the open segment with `SegmentEndReason::SettingsChange` so
+ * the next run of play scores against a fresh segment. Per the plan,
+ * NO `practice-segment-ended` event fires for this — the JS coach
+ * speaks the boundary directly via a forced `boundary_signal_a`
+ * gatekeeper event.
+ *
+ * Safe to call when no evaluation is running (the analyzer's flag
+ * is cleared on `start_evaluation`).
+ */
+export async function notifySettingsChange(): Promise<void> {
+  return invoke("notify_settings_change");
+}
+
 export function onAudioSpectrum(callback: (spectrum: AudioSpectrum) => void) {
   return listen<AudioSpectrum>("audio-spectrum", (e) => callback(e.payload));
 }
@@ -320,6 +424,13 @@ export function onAudioSpectrum(callback: (spectrum: AudioSpectrum) => void) {
 export function onBeatFeedback(callback: (feedback: BeatFeedback) => void) {
   return listen<BeatFeedback>("beat-feedback", (e) => callback(e.payload));
 }
+
+// Note: the Rust side still emits `practice-segment-ended` (see
+// commands.rs::start_evaluation), but the JS coach drives mini-reports
+// off `isPlaying` falling-edge (see useSession.ts) and does not consume
+// this event. The emit is kept on the Rust side for the
+// SessionAccumulator side-effect (D1 log segments) and as a future
+// hook for richer signal-B handling. No JS binding intentionally.
 
 export async function getSessionReport(): Promise<SessionReport | null> {
   return invoke<SessionReport | null>("get_session_report");
@@ -348,6 +459,32 @@ export async function deleteSession(id: string): Promise<void> {
 
 export async function clearAllSessions(): Promise<void> {
   return invoke("clear_all_sessions");
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic Session Logs (D1)
+//
+// Heavier per-session JSON dumps written by the eval pipeline once
+// instrumentation is wired in (D2-D4). The shape mirrors `SessionLog`
+// in `src-tauri/src/session_log.rs`.
+// ---------------------------------------------------------------------------
+
+import type { SessionLog } from "./types";
+
+export async function listSessionLogs(): Promise<string[]> {
+  return invoke<string[]>("list_session_logs");
+}
+
+export async function getSessionLog(path: string): Promise<SessionLog> {
+  return invoke<SessionLog>("get_session_log", { path });
+}
+
+export async function exportSessionLogs(): Promise<string> {
+  return invoke<string>("export_session_logs");
+}
+
+export async function clearSessionLogs(): Promise<void> {
+  return invoke("clear_session_logs");
 }
 
 // ---------------------------------------------------------------------------
@@ -479,8 +616,30 @@ export async function loadCoachModel(): Promise<boolean> {
   return invoke<boolean>("load_coach_model");
 }
 
+/**
+ * Hard timeout for every LLM inference call, in milliseconds. Per the
+ * plan's C4 latency policy: "LLM call has a hard 3-second timeout.
+ * After 3s, ship the filled template directly. The user never waits
+ * for the model." The timeout is enforced here at the IPC layer so
+ * every caller inherits it without having to reimplement the race.
+ *
+ * On timeout, this rejects with `Error("coach_generate_timeout")` so
+ * call sites can catch and fall back to their template path (every
+ * existing call site already has a try/catch or `.catch(() => {})`).
+ */
+export const COACH_GENERATE_TIMEOUT_MS = 3_000;
+
 export async function coachGenerate(context: string): Promise<string> {
-  return invoke<string>("coach_generate", { context });
+  const call = invoke<string>("coach_generate", { context });
+  return await Promise.race([
+    call,
+    new Promise<string>((_, reject) => {
+      setTimeout(
+        () => reject(new Error("coach_generate_timeout")),
+        COACH_GENERATE_TIMEOUT_MS,
+      );
+    }),
+  ]);
 }
 
 export async function isCoachLoaded(): Promise<boolean> {
@@ -497,6 +656,15 @@ export async function ttsSpeak(text: string): Promise<void> {
 
 export async function ttsSetVoice(voice: string): Promise<void> {
   return invoke("tts_set_voice", { voice });
+}
+
+/**
+ * Set the coach voice playback volume (0.0..=1.0). Driven by the unified
+ * volume slider so the user can dial down the spoken feedback without
+ * touching the metronome gain.
+ */
+export async function ttsSetVolume(volume: number): Promise<void> {
+  return invoke("tts_set_volume", { volume });
 }
 
 export async function ttsListVoices(): Promise<[string, string][]> {

@@ -15,9 +15,17 @@
 
 /* Scrollable views */
 .main-content[data-view="drill"] .view-transition-wrapper,
-.main-content[data-view="settings"] .view-transition-wrapper,
-.main-content[data-view="track"] .view-transition-wrapper {
+.main-content[data-view="settings"] .view-transition-wrapper {
   justify-content: flex-start;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Pocket Check: center when content fits, top-align + scrollable when it
+ * overflows. `safe center` falls back to start alignment so overflow content
+ * stays reachable. */
+.main-content[data-view="track"] .view-transition-wrapper {
+  justify-content: safe center;
   overflow-y: auto;
   overflow-x: hidden;
 }

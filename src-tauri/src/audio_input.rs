@@ -7,6 +7,21 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
+/// Module-local dev-only logger. Expands to `println!` in debug builds
+/// (cargo run, vitest harness, tauri dev) and to nothing in release
+/// builds — so device-config / playback-config / first-callback /
+/// gain-change diagnostics are available during development without
+/// polluting stdout in the shipped desktop binary. Error paths still
+/// use bare `eprintln!` so genuine failures surface in production logs.
+macro_rules! audio_dbg {
+    ($($arg:tt)*) => {{
+        #[cfg(debug_assertions)]
+        {
+            println!($($arg)*);
+        }
+    }};
+}
+
 /// Known audio interface brand patterns for smart default detection.
 const INTERFACE_PATTERNS: &[&str] = &[
     "scarlett", "focusrite", "apollo", "motu", "audient", "presonus",
@@ -158,7 +173,7 @@ impl AudioInput {
         };
         let sr = config.sample_rate.0;
 
-        println!("[audio_input] device config: {}Hz, {}ch, {:?}", sr, in_channels, sample_format);
+        audio_dbg!("[audio_input] device config: {}Hz, {}ch, {:?}", sr, in_channels, sample_format);
 
         // Update sample rate and resize ring buffer
         {
@@ -287,6 +302,7 @@ impl AudioInput {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
     }
@@ -302,7 +318,7 @@ impl AudioInput {
 
     pub fn set_input_gain(&self, gain_linear: f32) {
         let clamped = gain_linear.clamp(0.0, 100.0); // 0 to +40dB ~ 100x
-        println!("[audio_input] set_input_gain: {:.2}x ({:.1} dB)", clamped, 20.0 * clamped.log10());
+        audio_dbg!("[audio_input] set_input_gain: {:.2}x ({:.1} dB)", clamped, 20.0 * clamped.log10());
         self.input_gain.store(clamped.to_bits(), Ordering::Relaxed);
     }
 
@@ -315,7 +331,7 @@ impl AudioInput {
             buf.clear();
             let sr = *self.sample_rate.lock().unwrap();
             buf.reserve(sr as usize * 10);
-            println!("[recording] started, sample_rate={}Hz", sr);
+            audio_dbg!("[recording] started, sample_rate={}Hz", sr);
         }
         self.is_recording.store(true, Ordering::SeqCst);
     }
@@ -329,11 +345,12 @@ impl AudioInput {
             std::mem::take(&mut *buf)
         };
         let duration = samples.len() as f32 / sr as f32;
-        println!("[recording] stopped, {} samples, {:.2}s @ {}Hz", samples.len(), duration, sr);
+        audio_dbg!("[recording] stopped, {} samples, {:.2}s @ {}Hz", samples.len(), duration, sr);
         *self.recorded_audio.lock().unwrap() = Some((samples, sr));
         duration
     }
 
+    #[allow(dead_code)]
     pub fn has_recording(&self) -> bool {
         self.recorded_audio.lock().unwrap().is_some()
     }
@@ -412,7 +429,7 @@ impl AudioInput {
             // stereo buffers, causing slow-mo when we divide by too many channels.
             let out_channels: usize = 2;
 
-            println!("[playback] recording: {} samples @ {}Hz, output: {}Hz {}ch {:?} (device reports {}ch)",
+            audio_dbg!("[playback] recording: {} samples @ {}Hz, output: {}Hz {}ch {:?} (device reports {}ch)",
                 samples.len(), rec_sr, out_sr, out_channels, out_format, default_config.channels());
 
             let config = StreamConfig {
@@ -456,7 +473,7 @@ impl AudioInput {
                         return;
                     }
                     if !logged_cb.swap(true, Ordering::Relaxed) {
-                        println!("[playback] first callback: data.len()={}, out_channels={}, frames={}",
+                        audio_dbg!("[playback] first callback: data.len()={}, out_channels={}, frames={}",
                             data.len(), out_channels, data.len() / out_channels);
                     }
                     let pos = cursor_for_cb.load(Ordering::Relaxed);
@@ -484,7 +501,7 @@ impl AudioInput {
                 Ok(s) => s,
                 Err(e) => {
                     let dev_channels = default_config.channels() as usize;
-                    println!("[playback] stereo stream failed ({}), retrying with {}ch", e, dev_channels);
+                    audio_dbg!("[playback] stereo stream failed ({}), retrying with {}ch", e, dev_channels);
                     if dev_channels == out_channels {
                         eprintln!("Failed to build output stream for playback: {}", e);
                         let _ = app_handle.emit("playback-finished", ());
@@ -563,6 +580,7 @@ impl AudioInput {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_playing_back(&self) -> bool {
         self.playback_alive.load(Ordering::SeqCst)
     }

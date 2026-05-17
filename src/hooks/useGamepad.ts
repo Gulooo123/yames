@@ -35,6 +35,13 @@ export function useGamepad({ onButtonPress, bindings, onAction, enabled = true }
   const rafId = useRef<number>(0);
 
   const poll = useCallback(() => {
+    // Guard for non-Chromium environments (happy-dom test runner,
+    // Firefox in private mode, locked-down WebViews) that don't ship
+    // the Gamepad API. Without this, `navigator.getGamepads()` throws
+    // and crashes the raf loop on every frame.
+    if (typeof navigator === "undefined" || typeof navigator.getGamepads !== "function") {
+      return;
+    }
     const gamepads = navigator.getGamepads();
     const nowPressed = new Set<string>();
 

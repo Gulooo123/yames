@@ -23,10 +23,41 @@ pub fn create_shared_tts() -> SharedTts {
     Arc::new(Mutex::new(TtsEngine::new()))
 }
 
+/// Tracks nested metronome-volume dims so two concurrent `tts_speak`
+/// calls don't clobber each other's "original volume" snapshot.
+///
+/// The TTS path used to capture `state.volume` directly at the top of
+/// `tts_speak`, dim it, then restore on completion. When a greeting
+/// rephrase was still playing and the first coach-tip's `tts_speak`
+/// landed, the tip's call would snapshot the ALREADY-DIMMED volume as
+/// its "original" — and on its restore the user's metronome stuck at
+/// 15% even after both speeches finished.
+///
+/// The dim counter records the live volume exactly once on the first
+/// dim and restores it only when the last concurrent dim releases.
+/// Behaves like an RAII reference count without giving up the simpler
+/// `lock().unwrap()` ergonomics that the rest of the command surface
+/// uses.
+#[derive(Debug, Default)]
+pub struct TtsDimState {
+    pub active_count: u32,
+    pub original_volume: Option<f32>,
+}
+
+pub type SharedTtsDim = Arc<Mutex<TtsDimState>>;
+
+pub fn create_shared_tts_dim() -> SharedTtsDim {
+    Arc::new(Mutex::new(TtsDimState::default()))
+}
+
 pub struct TtsEngine {
     voice: String,
     models_dir: Option<PathBuf>,
     speaking: bool,
+    /// Playback gain applied to `afplay` (0.0..=1.0). The unified volume
+    /// slider in the header writes here so the coach voice can be turned
+    /// down independently of the metronome.
+    volume: f32,
 }
 
 impl TtsEngine {
@@ -35,6 +66,7 @@ impl TtsEngine {
             voice: "lessac".to_string(),
             models_dir: None,
             speaking: false,
+            volume: 1.0,
         }
     }
 
@@ -47,15 +79,35 @@ impl TtsEngine {
         self.voice = voice.to_string();
     }
 
+    /// Not consumed today but kept for parity with `set_voice` — the JS layer
+    /// reads the active voice through the persisted settings store rather than
+    /// the engine, so this is a passive getter held for future tooling.
+    #[allow(dead_code)]
     pub fn get_voice(&self) -> &str {
         &self.voice
     }
 
+    /// Clamp to [0.0, 1.0] so a misbehaving caller can't push afplay
+    /// into negative or super-loud territory.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.0);
+    }
+
+    /// See `get_voice` — held for symmetry with `set_volume`.
+    #[allow(dead_code)]
+    pub fn get_volume(&self) -> f32 {
+        self.volume
+    }
+
+    /// Reserved for a future "interrupt-if-speaking" preflight gate. Today the
+    /// dim/coach pipeline manages overlap via the `TtsDimState` refcount.
+    #[allow(dead_code)]
     pub fn is_speaking(&self) -> bool {
         self.speaking
     }
 
     /// Check if Piper binary and the selected voice model are available.
+    #[allow(dead_code)]
     pub fn is_ready(&self) -> bool {
         if let Some(dir) = &self.models_dir {
             let piper = dir.join("piper").join("piper");
@@ -105,8 +157,13 @@ impl TtsEngine {
 
         match piper_result {
             Ok(status) if status.success() && tmp_wav.exists() => {
-                // Play the WAV file
+                // Play the WAV file. `afplay -v <gain>` accepts 0.0..1.0+
+                // (1.0 = no change). Anything below ~0.001 silences the
+                // clip entirely on macOS, which is what we want when the
+                // user pulls the slider all the way down.
                 let play_result = Command::new("afplay")
+                    .arg("-v")
+                    .arg(format!("{:.3}", self.volume))
                     .arg(&tmp_wav)
                     .output();
 
@@ -197,4 +254,172 @@ pub fn voice_model_urls() -> Vec<(&'static str, &'static str, &'static str)> {
             "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/medium/en_US-ryan-medium.onnx.json",
         ),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// TtsDimState — nested-dim coordination
+// ---------------------------------------------------------------------------
+//
+// The actual dim-and-restore logic lives in `commands::tts_speak` (it
+// also needs the AppState mutex to flip the volume). These helpers
+// model the same enter/exit transitions so the invariants can be
+// covered by unit tests without spinning up a Tauri runtime.
+
+/// Apply an enter-dim transition to a `TtsDimState`. Returns the live
+/// volume to dim TO when the call is the outermost dim (caller writes
+/// it back into AppState), or None when an outer dim is already
+/// holding the slot (in which case caller does NOT touch the volume).
+///
+/// Kept pure so tests can drive the state machine directly.
+pub fn dim_enter(dim: &mut TtsDimState, live_volume: f32) -> Option<f32> {
+    if dim.active_count == 0 {
+        dim.original_volume = Some(live_volume);
+        dim.active_count = dim.active_count.saturating_add(1);
+        Some((live_volume * 0.15).max(0.02))
+    } else {
+        dim.active_count = dim.active_count.saturating_add(1);
+        None
+    }
+}
+
+/// Apply an exit-dim transition. Returns the volume to RESTORE when
+/// this exit drains the counter to zero (caller writes it back); None
+/// when there are still outer dims active.
+pub fn dim_exit(dim: &mut TtsDimState) -> Option<f32> {
+    dim.active_count = dim.active_count.saturating_sub(1);
+    if dim.active_count == 0 {
+        dim.original_volume.take()
+    } else {
+        None
+    }
+}
+
+/// Called by `set_volume` when the user drags the metronome slider.
+/// When no TTS dim is active this is a no-op (caller writes the new
+/// value to AppState directly). When a dim IS active we also rewrite
+/// the captured "original" so the eventual `dim_exit` restores the
+/// user's NEW intent rather than the stale pre-TTS value.
+///
+/// Without this, dragging the slider during TTS lost the change: the
+/// dim_exit would write the stored original back over the user's
+/// adjustment a few seconds later, leaving the metronome at the
+/// pre-speech level.
+pub fn dim_user_set(dim: &mut TtsDimState, new_volume: f32) {
+    if dim.active_count > 0 {
+        dim.original_volume = Some(new_volume);
+    }
+}
+
+#[cfg(test)]
+mod tts_dim_tests {
+    use super::*;
+
+    #[test]
+    fn single_dim_records_and_restores_original() {
+        let mut dim = TtsDimState::default();
+        let dimmed = dim_enter(&mut dim, 0.8).expect("first dim must yield value");
+        assert!(dimmed < 0.8 && dimmed >= 0.02);
+        assert_eq!(dim.active_count, 1);
+        let restored = dim_exit(&mut dim).expect("last exit must yield original");
+        assert_eq!(restored, 0.8);
+        assert_eq!(dim.active_count, 0);
+    }
+
+    #[test]
+    fn nested_dim_does_not_clobber_original() {
+        let mut dim = TtsDimState::default();
+        // Outer dim — speaks the greeting at 0.8.
+        let outer = dim_enter(&mut dim, 0.8).expect("outer must dim");
+        assert!(outer < 0.8);
+        // Inner dim while outer still active. The live volume the
+        // caller sees here is the already-dimmed `outer`, which is
+        // EXACTLY the bug we're guarding against. The inner call
+        // must NOT touch the original snapshot or write to AppState.
+        let inner = dim_enter(&mut dim, outer);
+        assert!(inner.is_none(), "nested dim must not yield a write");
+        assert_eq!(dim.active_count, 2);
+        // Inner releases — still has outer holding the slot.
+        let restore_after_inner = dim_exit(&mut dim);
+        assert!(restore_after_inner.is_none(), "inner exit must not restore");
+        assert_eq!(dim.active_count, 1);
+        // Outer releases — restores the TRUE original (0.8), not the
+        // dimmed snapshot (0.12) that the buggy code would have
+        // captured on the inner enter.
+        let restore_after_outer = dim_exit(&mut dim).expect("outer exit must restore");
+        assert_eq!(restore_after_outer, 0.8);
+        assert_eq!(dim.active_count, 0);
+    }
+
+    #[test]
+    fn floor_clamps_at_002_for_very_quiet_metronomes() {
+        let mut dim = TtsDimState::default();
+        let dimmed = dim_enter(&mut dim, 0.05).expect("must yield");
+        // 0.05 * 0.15 = 0.0075 → floor to 0.02 so the dim doesn't
+        // silence the metronome entirely (the spoken cue still has a
+        // soft tick alongside it).
+        assert!((dimmed - 0.02).abs() < 1e-6);
+        dim_exit(&mut dim);
+    }
+
+    #[test]
+    fn three_way_overlap_only_outermost_restores() {
+        let mut dim = TtsDimState::default();
+        assert!(dim_enter(&mut dim, 0.6).is_some()); // outer
+        assert!(dim_enter(&mut dim, 0.09).is_none()); // mid
+        assert!(dim_enter(&mut dim, 0.09).is_none()); // inner
+        assert_eq!(dim.active_count, 3);
+        assert!(dim_exit(&mut dim).is_none());
+        assert!(dim_exit(&mut dim).is_none());
+        let restored = dim_exit(&mut dim).expect("last must restore");
+        assert_eq!(restored, 0.6);
+    }
+
+    #[test]
+    fn user_set_during_dim_updates_restoration_target() {
+        // User drags the metronome slider while a TTS speech is active.
+        // The eventual `dim_exit` must restore the user's NEW intent,
+        // not the stale pre-TTS value captured at `dim_enter`.
+        let mut dim = TtsDimState::default();
+        let _dimmed = dim_enter(&mut dim, 0.8).expect("initial dim");
+        // Mid-speech the user adjusts to 0.4.
+        dim_user_set(&mut dim, 0.4);
+        // TTS ends — restoration target now reflects the user's drag.
+        let restored = dim_exit(&mut dim).expect("dim_exit must yield");
+        assert!((restored - 0.4).abs() < 1e-6);
+        assert_eq!(dim.active_count, 0);
+    }
+
+    #[test]
+    fn user_set_without_dim_is_noop() {
+        // No dim active — the helper must not silently populate
+        // `original_volume` (a subsequent dim_enter would otherwise
+        // capture the user's "ambient" value and never restore on the
+        // first cold dim cycle, causing a stuck-volume bug on the
+        // next TTS speech).
+        let mut dim = TtsDimState::default();
+        dim_user_set(&mut dim, 0.4);
+        assert_eq!(dim.active_count, 0);
+        assert!(dim.original_volume.is_none());
+        // The next real dim cycle still captures the LIVE volume
+        // (passed in by tts_speak) — unaffected by the no-op user_set.
+        let dimmed = dim_enter(&mut dim, 0.9).expect("dim must yield");
+        assert!(dimmed < 0.9);
+        let restored = dim_exit(&mut dim).expect("restore");
+        assert!((restored - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn underflow_protected_by_saturating_sub() {
+        let mut dim = TtsDimState::default();
+        // No enters yet — exit must not panic and must not "restore"
+        // a value that was never captured.
+        assert!(dim_exit(&mut dim).is_none());
+        assert_eq!(dim.active_count, 0);
+        // Next enter behaves normally — the bogus exit didn't leave
+        // the state in a stuck position.
+        assert!(dim_enter(&mut dim, 0.5).is_some());
+        assert_eq!(dim.active_count, 1);
+        let restored = dim_exit(&mut dim).expect("normal restore");
+        assert_eq!(restored, 0.5);
+    }
 }

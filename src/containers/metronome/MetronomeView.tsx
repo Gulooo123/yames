@@ -1,0 +1,224 @@
+import type { Ref } from "react";
+import type { AppState, BeatEvent, Subdivision } from "../../types";
+import type { useEvaluation } from "../../hooks/useEvaluation";
+import { setSubdivision, setTimeSignature } from "../../ipc";
+import {
+  TIME_SIGNATURES,
+  getTempoMarking,
+  SUBDIVISION_NAMES,
+} from "../../constants/metronome";
+import { SubdivisionIcon } from "../../components/MetronomeIcons";
+import DriftMeter from "../../components/DriftMeter";
+
+type Evaluation = ReturnType<typeof useEvaluation>;
+
+interface MetronomeViewProps {
+  state: AppState;
+  currentBeat: BeatEvent | null;
+  evaluation: Evaluation;
+  beatsPerMeasure: number;
+  activeBeat: number;
+  activeSub: number;
+  isDownbeat: boolean;
+  sliderPercent: number;
+  tapActive: boolean;
+  tapCount: number;
+  tapPulse: boolean;
+  editingBpm: boolean;
+  bpmEditValue: string;
+  setBpmEditValue: (v: string) => void;
+  setEditingBpm: (v: boolean) => void;
+  bpmInputRef: Ref<HTMLInputElement>;
+  onTap: () => void;
+  onBpmChange: (v: number) => void;
+  onStartBpmEdit: () => void;
+  onCommitBpmEdit: () => void;
+}
+
+/**
+ * The main "Metronome" tab content — BPM display, tap button, slider, beat
+ * dots with subdivision sub-dots, optional drift meter when audio evaluation
+ * is enabled, and the subdivision + time-signature button rows.
+ *
+ * All beat/state values come from the parent (which owns `useMetronome`).
+ * Subdivision and time-signature buttons fire the IPC setters directly —
+ * keeping that wiring out of the parent.
+ */
+export function MetronomeView({
+  state,
+  currentBeat,
+  evaluation,
+  beatsPerMeasure,
+  activeBeat,
+  activeSub,
+  isDownbeat,
+  sliderPercent,
+  tapActive,
+  tapCount,
+  tapPulse,
+  editingBpm,
+  bpmEditValue,
+  setBpmEditValue,
+  setEditingBpm,
+  bpmInputRef,
+  onTap,
+  onBpmChange,
+  onStartBpmEdit,
+  onCommitBpmEdit,
+}: MetronomeViewProps) {
+  return (
+    <>
+      <section className="bpm-section">
+        <button
+          className={`tap-btn ${tapActive ? "active" : ""} ${tapPulse ? "pulse" : ""}`}
+          onClick={onTap}
+        >
+          TAP
+          {tapActive && tapCount >= 2 && (
+            <span className="tap-count">{tapCount} taps</span>
+          )}
+        </button>
+        <div className="bpm-display view-stagger-item" style={{ animationDelay: '0ms' }}>
+          <button
+            className="bpm-btn"
+            onClick={() => onBpmChange(state.bpm - 5)}
+          >
+            −
+          </button>
+          {editingBpm ? (
+            <input
+              ref={bpmInputRef}
+              type="text"
+              inputMode="numeric"
+              className="bpm-input"
+              value={bpmEditValue}
+              onChange={(e) =>
+                setBpmEditValue(e.target.value.replace(/\D/g, ""))
+              }
+              onBlur={onCommitBpmEdit}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") onCommitBpmEdit();
+                if (e.key === "Escape") setEditingBpm(false);
+              }}
+              autoFocus
+            />
+          ) : (
+            <span
+              className="bpm-input bpm-clickable"
+              onClick={onStartBpmEdit}
+            >
+              {state.bpm}
+            </span>
+          )}
+          <button
+            className="bpm-btn"
+            onClick={() => onBpmChange(state.bpm + 5)}
+          >
+            +
+          </button>
+        </div>
+        <div className="bpm-slider-wrap view-stagger-item" style={{ animationDelay: '40ms' }}>
+          <input
+            type="range"
+            className="bpm-slider"
+            min={20}
+            max={300}
+            value={state.bpm}
+            onChange={(e) => onBpmChange(parseInt(e.target.value))}
+            style={
+              {
+                "--slider-pct": `${sliderPercent}%`,
+              } as React.CSSProperties
+            }
+          />
+          <span className="tempo-marking">
+            {getTempoMarking(state.bpm)}
+          </span>
+        </div>
+      </section>
+
+      <section className="beat-section">
+        <div className="main-beat-dots">
+          {Array.from({ length: beatsPerMeasure }, (_, beatIdx) => {
+            const isBeatActive = activeBeat === beatIdx && isDownbeat;
+            const isBeatDownbeat = isBeatActive && beatIdx === 0;
+            const isAccentBeat =
+              state.timeSignature === 1 ||
+              (beatIdx === 0 && state.timeSignature >= 2);
+            // Feedback coloring when evaluation is active
+            const fb = evaluation.enabled && currentBeat
+              ? evaluation.dotFeedback.get(
+                  // Map sequential beat index to measure position
+                  currentBeat.beat - (activeBeat - beatIdx + beatsPerMeasure) % beatsPerMeasure
+                )
+              : undefined;
+            const feedbackClass = fb && isBeatActive
+              ? `feedback-${fb.classification}`
+              : "";
+            return (
+              <div key={beatIdx} className="main-dot-group" style={{ animationDelay: `${beatIdx * 40}ms` }}>
+                <div
+                  className={`main-dot ${isBeatActive ? "active" : ""} ${isBeatDownbeat ? "downbeat" : ""} ${isAccentBeat && isBeatActive ? "accent" : ""} ${feedbackClass}`}
+                />
+                {state.subdivision > 1 && (
+                  <div className="main-sub-dots">
+                    {Array.from(
+                      { length: state.subdivision - 1 },
+                      (_, subIdx) => (
+                        <div
+                          key={subIdx}
+                          className={`main-sub-dot ${
+                            activeBeat === beatIdx &&
+                            activeSub === subIdx + 1
+                              ? "active"
+                              : ""
+                          }`}
+                        />
+                      ),
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {evaluation.enabled && state.isPlaying && (
+          <DriftMeter
+            lastFeedback={evaluation.lastFeedback}
+            avgDeviation={evaluation.avgDeviation}
+            visible={evaluation.enabled && state.isPlaying}
+          />
+        )}
+      </section>
+
+      <div className="sub-row">
+        <span className="row-side-label">Subdiv</span>
+        {([1, 2, 3, 4, 5, 6] as Subdivision[]).map((sub, i) => (
+          <button
+            key={sub}
+            className={`sub-row-btn view-stagger-item ${state.subdivision === sub ? "active" : ""}`}
+            style={{ animationDelay: `${100 + i * 25}ms` }}
+            onClick={() => setSubdivision(sub)}
+            data-tooltip={SUBDIVISION_NAMES[sub]}
+          >
+            <SubdivisionIcon sub={sub} size={18} />
+          </button>
+        ))}
+      </div>
+
+      <div className="time-sig-row">
+        <span className="row-side-label">Meter</span>
+        {TIME_SIGNATURES.map((ts, i) => (
+          <button
+            key={ts.beats}
+            className={`time-sig-btn view-stagger-item ${state.timeSignature === ts.beats ? "active" : ""}`}
+            style={{ animationDelay: `${150 + i * 30}ms` }}
+            onClick={() => setTimeSignature(ts.beats)}
+          >
+            {ts.label}
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}

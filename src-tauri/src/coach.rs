@@ -38,6 +38,11 @@ impl CoachEngine {
 }
 
 /// System prompt that constrains the coach's behavior.
+/// Only referenced when the `coach-llm` feature is enabled (the
+/// inner `llm` module reaches for `super::SYSTEM_PROMPT` when building
+/// the prompt).  Tagged `dead_code`-allowed on the no-LLM path so the
+/// default-features build stays warning-clean.
+#[cfg_attr(not(feature = "coach-llm"), allow(dead_code))]
 pub const SYSTEM_PROMPT: &str = r#"You are a practice coach for a metronome app. You help musicians improve their timing and rhythm.
 
 Rules:
@@ -73,6 +78,13 @@ pub fn load_model(engine: &mut CoachEngine, model_path: &std::path::Path) -> Res
 }
 
 /// Generate a coaching comment from structured DSP data.
+///
+/// On the `coach-llm` path `engine.model` is the actual LLM handle.
+/// On the default (no-LLM) path the engine carries no state but the
+/// parameter is kept symmetric so callers don't have to feature-gate
+/// the call site — the underscore prefix silences the unused-var
+/// warning in that build.
+#[cfg_attr(not(feature = "coach-llm"), allow(unused_variables))]
 pub fn generate(engine: &CoachEngine, context: &str) -> Result<String, String> {
     #[cfg(feature = "coach-llm")]
     if let Some(ref model) = engine.model {
@@ -89,10 +101,36 @@ fn generate_template(context: &str) -> Result<String, String> {
     let accuracy = extract_metric(context, "Accuracy:").unwrap_or(0.0);
     let deviation = extract_metric(context, "avg").unwrap_or(0.0);
     let streak = extract_int(context, "Longest clean streak:").unwrap_or(0);
+    // The mini-report card shows a `ScoreRing` with the composite
+    // four-component score adjacent to the coach text. Surfacing the
+    // accuracy percent (`hits / (hits + miss)`) as the headline number
+    // in the template caused user-visible confusion in v0.9 — the
+    // circle would read "65" while the text said "Rough patch at 50%"
+    // and the two metrics looked contradictory. We now lead with the
+    // score so the text and the badge agree; accuracy still appears
+    // but as a secondary detail.
+    let score = extract_int(context, "Score:").unwrap_or(0);
 
     let is_summary = context.contains("ended their practice session");
     let is_chat = context.contains("User asks:");
-    let is_greeting = context.contains("starting a new session") || context.contains("starting a free practice");
+    // The JS side sends greetings as a `"Rephrase this practice-coach
+    // greeting..."` prompt with the rendered template embedded under
+    // `Original: "..."`. Match on that stable phrase so we recognise
+    // greetings regardless of whether the player has a preset, history,
+    // or is on the cold path.
+    let is_greeting = context.contains("practice-coach greeting");
+    // Real-time tips also arrive as a `"Rephrase this practice-coach
+    // observation..."` prompt with the gatekeeper-filled template
+    // under `Original: "..."`. Without this branch the rephrase falls
+    // through to `format_mini_report` — and since the rephrase prompt
+    // carries neither `Score:` nor `Accuracy:` fields, both extracts
+    // return 0 and the coach-tip lands as a hard-coded "Score 0 —
+    // right in the pocket. Ease the tempo down…" no matter what the
+    // gatekeeper actually said. We treat the template-fallback path
+    // for rephrases the same way as greetings: return the Original
+    // verbatim (the JS template is fully shippable without LLM help).
+    let is_rephrase_observation =
+        context.contains("Rephrase this practice-coach observation");
 
     if is_chat {
         // Extract the question
@@ -109,39 +147,81 @@ fn generate_template(context: &str) -> Result<String, String> {
         return Ok(format_greeting(context));
     }
 
+    if is_rephrase_observation {
+        return Ok(format_rephrase_observation(context));
+    }
+
     if is_summary {
         return Ok(format_session_summary(accuracy, deviation, streak));
     }
 
     // Mini-report
-    Ok(format_mini_report(accuracy, deviation, streak))
+    Ok(format_mini_report(score, accuracy, deviation, streak))
 }
 
-fn format_greeting(context: &str) -> String {
-    let has_history = context.contains("Sessions:");
-    let preset_name = context.lines()
-        .find(|l| l.starts_with("Preset:"))
-        .map(|l| l.trim_start_matches("Preset:").trim());
-
-    if let Some(name) = preset_name {
-        if has_history {
-            let trend = if context.contains("Trend: improving") {
-                "You've been improving — keep that momentum going!"
-            } else if context.contains("Trend: declining") {
-                "Let's get back on track today."
-            } else {
-                "Let's build on your progress."
-            };
-            format!("Back at \"{name}\" — {trend}")
-        } else {
-            format!("First session with \"{name}\" — let's see what you've got. Play when you're ready!")
-        }
-    } else {
-        "Free practice — play when you're ready and I'll keep an eye on your timing.".to_string()
+/// Template-fallback for the real-time rephrase prompt.
+///
+/// The JS-side gatekeeper has already filled a scenario-specific
+/// template (e.g. "{recentAccuracyPct}% — your kick is drifting.
+/// Lock the right foot to the click before the snare.") and embedded
+/// it under `Original: "..."`. Without an LLM we can't actually
+/// paraphrase, but the template is fully self-sufficient — return it
+/// verbatim so the coach voices the gatekeeper's intent rather than a
+/// generic mini-report placeholder.
+///
+/// Falls back to a short defensive opener if the Original block is
+/// missing (shouldn't happen — `buildRephrasePrompt` always emits one).
+fn format_rephrase_observation(context: &str) -> String {
+    if let Some(original) = extract_original_quote(context) {
+        return original;
     }
+    "Keep going — locked in on the click.".to_string()
 }
 
-fn format_mini_report(accuracy: f64, deviation: f64, streak: u32) -> String {
+/// Render a fallback greeting when the LLM rephrase isn't available.
+///
+/// The JS side already produced a context-aware, history-aware greeting
+/// (preset name, last score, target, downtrend handling, etc.) and
+/// embeds it in the rephrase prompt as `Original: "..."`. Without an
+/// LLM we can't actually rephrase, but the JS template is fully shippable
+/// on its own — return it verbatim so the user sees the same warm,
+/// specific message they'd get from the LLM.
+///
+/// If we can't find an `Original: "..."` block we fall through to a
+/// short, friendly default rather than the prior "Free practice — play
+/// when you're ready..." which felt too cold.
+fn format_greeting(context: &str) -> String {
+    if let Some(original) = extract_original_quote(context) {
+        return original;
+    }
+    // No Original block — emit a warm, generic opener. This branch
+    // shouldn't normally fire (the JS rephrase prompt always includes
+    // Original) but is defensive against future prompt-format drift.
+    "Hey — ready when you are. Hit play and I'll start picking up your timing.".to_string()
+}
+
+/// Extract the text inside the first `Original: "..."` block of the
+/// rephrase prompt. Returns None if the marker isn't present.
+fn extract_original_quote(context: &str) -> Option<String> {
+    let start = context.find("Original: \"")?;
+    let rest = &context[start + "Original: \"".len()..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Score-first mini-report template.
+///
+/// `score` is the composite four-component segment score (the same
+/// number shown in the `ScoreRing` adjacent to this text). Branching
+/// on `score` rather than `accuracy` means the wording reinforces the
+/// badge instead of contradicting it: a 65-score segment never reads
+/// as "Rough patch at 50%" again.
+///
+/// Accuracy still appears as a secondary detail in the mid-tier
+/// branches because it's the clearest "how many beats did you land"
+/// signal — just clearly labelled (`{accuracy}% hits`) so it doesn't
+/// look like a competing headline.
+fn format_mini_report(score: u32, accuracy: f64, deviation: f64, streak: u32) -> String {
     let timing = if deviation.abs() < 5.0 {
         "right in the pocket"
     } else if deviation < -5.0 {
@@ -150,16 +230,20 @@ fn format_mini_report(accuracy: f64, deviation: f64, streak: u32) -> String {
         "slightly behind the beat"
     };
 
-    if accuracy >= 90.0 {
+    if score >= 85 {
         if streak >= 16 {
-            format!("Solid run — {accuracy:.0}% accuracy, {timing}. {streak}-beat clean streak, nice consistency.")
+            format!("Score {score} — solid run, {timing}. {streak}-beat clean streak, nice consistency.")
         } else {
-            format!("Good accuracy at {accuracy:.0}%, {timing}. Keep pushing for longer clean streaks.")
+            format!("Score {score} — locked in, {timing}. Keep pushing for longer clean streaks.")
         }
-    } else if accuracy >= 70.0 {
-        format!("Decent run at {accuracy:.0}% accuracy. You're {timing} — try locking in with the click a bit more.")
+    } else if score >= 65 {
+        format!("Score {score} — {timing}. {accuracy:.0}% hits landed; lock in with the click a touch more.")
     } else {
-        format!("{accuracy:.0}% accuracy this round. Slow it down a few BPM and focus on clean hits before pushing tempo.")
+        // Real but rough — encourage adjustment without crushing the user.
+        // The JS-side segment-reportable gate already keeps super-thin
+        // segments out of this path, so we can stay specific without
+        // worrying about a "0%" segment landing here.
+        format!("Score {score} — {timing}. Ease the tempo down a touch and rebuild from a clean bar.")
     }
 }
 
@@ -167,25 +251,32 @@ fn format_session_summary(accuracy: f64, deviation: f64, streak: u32) -> String 
     let tendency = if deviation.abs() < 3.0 {
         "centered timing"
     } else if deviation < 0.0 {
-        "a tendency to rush"
+        "a slight rush"
     } else {
-        "a tendency to drag"
+        "a slight drag"
     };
 
+    // v0.10: the low-accuracy branch used to open with "Tough
+    // session…" which read as a verdict. This is a practice tool, not
+    // an exam — and a low accuracy reading is often a detection-
+    // sensitivity issue (under-counted onsets), not a "tough session."
+    // Reframed all three branches to lead with what's worth carrying
+    // forward instead of what fell short. The accuracy ladder still
+    // dispatches on the same thresholds so the wording tracks reality.
     if accuracy >= 85.0 {
         format!(
-            "Strong session — {accuracy:.0}% overall accuracy with {tendency}. \
-             Best streak was {streak} beats. Next time, try bumping the tempo up a notch."
+            "Locked in — {accuracy:.0}% accuracy with {tendency}. \
+             Best streak was {streak} beats. Try nudging the tempo up next time."
         )
     } else if accuracy >= 60.0 {
         format!(
-            "Solid practice at {accuracy:.0}% accuracy with {tendency}. \
-             Focus on the spots where you dropped off — consistency comes before speed."
+            "Good session — {accuracy:.0}% accuracy with {tendency}. \
+             Pick one passage that felt off and run it a few more times."
         )
     } else {
         format!(
-            "Tough session at {accuracy:.0}% accuracy. You had {tendency}. \
-             Consider dropping 5-10 BPM next time and building accuracy first."
+            "Plenty to build on — {tendency} with a {streak}-beat best streak. \
+             Try dropping the tempo a touch and locking in a clean bar."
         )
     }
 }
@@ -235,95 +326,15 @@ fn extract_int(text: &str, prefix: &str) -> Option<u32> {
         })
 }
 
-/// Format a mini-report context for the model.
-pub fn format_mini_report_context(
-    bpm: u16,
-    time_signature: u8,
-    accuracy_pct: f64,
-    mean_deviation_ms: f64,
-    perfect_count: u32,
-    good_count: u32,
-    ok_count: u32,
-    miss_count: u32,
-    longest_streak: u32,
-    grid_correlation: Option<f64>,
-) -> String {
-    let pocket = if mean_deviation_ms < -5.0 {
-        "ahead of the beat (rushing)"
-    } else if mean_deviation_ms > 5.0 {
-        "behind the beat (dragging)"
-    } else {
-        "right on the beat"
-    };
-
-    let style = match grid_correlation {
-        Some(gc) if gc > 0.8 => "structured exercise (high grid correlation)",
-        Some(gc) if gc > 0.3 => "semi-structured playing",
-        Some(_) => "free/improvised playing (low grid correlation)",
-        None => "unknown playing style",
-    };
-
-    format!(
-        "The player just finished a passage. Generate a brief coaching comment.\n\
-         BPM: {bpm}, Time signature: {time_signature}/4\n\
-         Playing style: {style}\n\
-         Accuracy: {accuracy_pct:.0}% ({perfect_count} perfect, {good_count} good, {ok_count} ok, {miss_count} miss)\n\
-         Timing tendency: {pocket} (avg {mean_deviation_ms:.1}ms)\n\
-         Longest clean streak: {longest_streak} beats"
-    )
-}
-
-/// Format an end-of-session context for the model.
-pub fn format_session_summary_context(
-    duration_secs: u64,
-    segment_count: usize,
-    overall_score: u32,
-    grade: &str,
-    total_beats: u32,
-    accuracy_pct: f64,
-    mean_deviation_ms: f64,
-    longest_streak: u32,
-) -> String {
-    format!(
-        "The player has ended their practice session. Generate a brief session summary.\n\
-         Duration: {duration_secs} seconds, {segment_count} segment(s)\n\
-         Overall score: {overall_score}/100 (grade {grade})\n\
-         Total beats: {total_beats}, accuracy: {accuracy_pct:.0}%\n\
-         Timing tendency: avg {mean_deviation_ms:.1}ms deviation\n\
-         Longest clean streak: {longest_streak} beats\n\
-         Keep it encouraging and suggest one specific thing to focus on next time."
-    )
-}
-
-/// Format a chat context for Q&A.
-pub fn format_chat_context(
-    session_data: &str,
-    preset_summary: Option<&str>,
-    conversation: &[(String, String)],
-    user_question: &str,
-) -> String {
-    let mut ctx = String::new();
-    ctx.push_str("Current session data:\n");
-    ctx.push_str(session_data);
-    ctx.push('\n');
-
-    if let Some(summary) = preset_summary {
-        ctx.push_str("\nPreset history:\n");
-        ctx.push_str(summary);
-        ctx.push('\n');
-    }
-
-    if !conversation.is_empty() {
-        ctx.push_str("\nConversation so far:\n");
-        for (role, content) in conversation {
-            ctx.push_str(&format!("{role}: {content}\n"));
-        }
-    }
-
-    ctx.push_str(&format!("\nUser asks: {user_question}\n"));
-    ctx.push_str("Answer concisely based only on the data above.");
-    ctx
-}
+// NOTE: `format_mini_report_context`, `format_session_summary_context`,
+// and `format_chat_context` used to live here as Rust-side formatters
+// for the LLM prompt. The JS layer now owns prompt assembly in
+// `src/hooks/useSession.ts` (`formatMiniReportContext`,
+// `formatSessionContext`, the chat literal in `sendChat`) — keeping
+// the formatting on the side that also owns gatekeeper context and
+// narrative state means there is exactly one source of truth for
+// "what goes into the LLM." Removed during the Step-4 house-cleaning
+// pass after they sat dead since the Phase-5 refactor.
 
 // ---------------------------------------------------------------------------
 // LLM backend (only compiled with coach-llm feature)

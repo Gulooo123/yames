@@ -5,7 +5,7 @@ PackageLocale: en-US
 Publisher: turutupa
 PublisherUrl: https://github.com/turutupa
 PackageName: Yames
-PackageUrl: https://turutupa.github.io/yames/
+PackageUrl: https://yames.app
 License: MIT
 LicenseUrl: https://github.com/turutupa/yames/blob/main/LICENSE
 ShortDescription: Yet Another Metronome Everyone Skips — musician-grade floating metronome

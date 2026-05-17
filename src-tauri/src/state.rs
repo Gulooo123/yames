@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
+use crate::instrument::Instrument;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeedRamp {
     #[serde(rename = "startBpm")]
@@ -78,6 +80,15 @@ pub struct AppState {
     pub time_signature: u8,
     #[serde(rename = "speedRamp")]
     pub speed_ramp: SpeedRamp,
+
+    /// Selected instrument. Drives onset-detection refractory floor,
+    /// chord-cluster window, spurious-onset cap, activity silence
+    /// threshold, and coach vocabulary. See `instrument.rs` (D0 of the
+    /// DSP & Coach plan).
+    ///
+    /// Defaults to `Other` until the user picks one — the first-launch
+    /// modal on the React side is responsible for prompting.
+    pub instrument: Instrument,
 }
 
 impl Default for AppState {
@@ -96,6 +107,7 @@ impl Default for AppState {
             sound_type: "click".to_string(),
             time_signature: 4,
             speed_ramp: SpeedRamp::default(),
+            instrument: Instrument::default(),
         }
     }
 }

@@ -1,8 +1,107 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { getSessionReport, getSessionHistory, saveSession, clearSession, coachGenerate, loadCoachModel, isCoachLoaded, ttsSpeak, onBeatFeedback, onAdaptiveEval, setAdaptiveDecision } from "../ipc";
+import { getSessionReport, getSessionHistory, saveSession, clearSession, coachGenerate, loadCoachModel, isCoachLoaded, ttsSpeak, onBeatFeedback, onAdaptiveEval, setAdaptiveDecision, notifySettingsChange, clearCalibrationCacheEntry } from "../ipc";
 import type { AdaptiveEvalRequest } from "../ipc";
-import type { BeatFeedback, FeedMessage, SessionReport, SessionSegment } from "../types";
+import type { BeatFeedback, FeedChip, FeedMessage, SessionReport, SessionSegment } from "../types";
 import type { useEvaluation } from "./useEvaluation";
+import { loadHistoryWithBudget, renderGreeting } from "../coach/greeting";
+import {
+  appendCoachUtterance,
+  appendInstrumentChange,
+  appendPresetChange,
+  appendSegmentEnd,
+  appendUserAction,
+  createNarrative,
+  formatForLLM,
+  type Narrative,
+} from "../coach/narrative";
+import {
+  detectRecurringIssues,
+  detectStaminaPattern,
+  formatPresetSummaryForLLM,
+  summarizePreset,
+} from "../coach/presetAwareness";
+import {
+  createGatekeeper,
+  evaluate as gatekeeperEvaluate,
+  resetCooldowns,
+  shouldDropForStaleness,
+  type GatekeeperEvent,
+  type GatekeeperState,
+  type ScenarioTag,
+} from "../coach/gatekeeper";
+import {
+  createShuffleState,
+  pickTemplate,
+  recordUtterance,
+  type ShuffleState,
+  type Severity,
+  type Vocabulary,
+} from "../coach/templates";
+import { TEMPLATE_CATALOG } from "../coach/templateCatalog";
+import {
+  answerChip,
+  loadRecentChipIds,
+  renderAffordanceLabel,
+  saveRecentChipIds,
+  selectChips,
+  type ChipContext,
+  type RecencyStorage,
+} from "../coach/chips";
+import {
+  createInterventionState,
+  pickIntervention,
+  recordIntervention,
+  type InterventionContext,
+  type InterventionRateState,
+  type SelectedIntervention,
+} from "../coach/interventions";
+import { accuracyPct, accuracyRatio, scoredBeats } from "../coach/reportStats";
+import { createSessionToken } from "../coach/sessionGuard";
+import { coachDebug } from "../coach/debug";
+
+// ─── Mini-report eligibility thresholds ──────────────────────────────
+// A segment must have at least this many beats elapsed before the coach
+// generates feedback. Below this we're still inside the "settle-in"
+// window and any commentary would be premature.
+const MIN_SEGMENT_BEATS_FOR_REPORT = 8;
+// A segment must also have at least this many real hits. A single
+// stray onset isn't enough evidence that the user was actually playing
+// — it could be a tap on the desk, a chair scrape, or a mic burst.
+const MIN_SEGMENT_HITS_FOR_REPORT = 3;
+// And the hit RATE must meet a floor. A segment of "1 hit in 200
+// missed beats" passes both thresholds above but is effectively noise
+// — the user wasn't really tracking the metronome. Letting it through
+// produces the worst coach moment possible: "0% accuracy this round.
+// Slow it down a few BPM and focus on clean hits before pushing
+// tempo." — which fires at session start when the metronome is ticking
+// but the user is just settling in. Below this rate, suppress entirely.
+const MIN_SEGMENT_HIT_RATE_FOR_REPORT = 0.2;
+
+// ── Realtime-tip evaluation window ──────────────────────────────────
+// The gatekeeper consumes the last N BeatFeedback entries when deciding
+// whether to comment. 32 is roughly two 4/4 bars at 4 beats per bar
+// times two evaluation cycles — enough to detect a trend without
+// over-smoothing single-beat anomalies. The ring is reset on every
+// session start (no cross-session bleed) — see endSession state reset.
+const REALTIME_WINDOW_BEATS = 32;
+// Cap how often the gatekeeper is consulted regardless of time sig.
+// In 7/8 (or other odd meters) two bars can be just 14 beats; without
+// this floor we'd evaluate too aggressively and burn the cooldown
+// budget. In 4/4 this is one evaluation per ~2 bars at 120 BPM.
+const MIN_BEATS_PER_EVAL_CHECK = 8;
+
+/** Returns true if a segment has enough activity to warrant a coach
+ *  comment / inclusion in session aggregation / save-to-history.
+ *  Three thresholds layered:
+ *    - enough beats elapsed (settle-in window passed)
+ *    - enough real hits (not a single stray onset)
+ *    - acceptable hit rate (user was really tracking, not just noise) */
+function isSegmentReportable(report: SessionReport): boolean {
+  if (scoredBeats(report) < MIN_SEGMENT_BEATS_FOR_REPORT) return false;
+  if (report.hitsCount < MIN_SEGMENT_HITS_FOR_REPORT) return false;
+  if (accuracyRatio(report) < MIN_SEGMENT_HIT_RATE_FOR_REPORT) return false;
+  return true;
+}
 
 type Evaluation = ReturnType<typeof useEvaluation>;
 
@@ -13,18 +112,42 @@ interface UseSessionOptions {
   timeSignature: number;
   presetId?: string;
   presetName?: string;
-  voiceMode?: "silent" | "chime" | "voice";
-  notifLevel?: "all" | "important" | "silent";
+  voiceMode?: "silent" | "voice";
+  /** C5 — user-tunable verbosity tier. Maps to the plan's "Silent /
+   *  Default / More" knob (voiceMode "silent" already covers the
+   *  Silent case, so this only widens or tightens what reaches TTS
+   *  on top of the existing spoken/written tier split).
+   *  - "default" → no changes; honours gatekeeper tier as-is.
+   *  - "more"    → written events with severity ≥ neutral get
+   *                promoted to spoken (more talkative coach).
+   *  Defaults to "default" if absent. */
+  coachVerbosity?: "less" | "default" | "more";
   instrument?: string;
+  /** Optional BPM setter so chip affordances can land tempo nudges
+   *  (e.g. "Drop to 130 BPM"). When absent, set-bpm affordances are
+   *  ignored — they still fire `kind: "set-bpm"` but the side-effect
+   *  is a no-op. The hook does NOT clamp or validate; the caller is
+   *  expected to delegate to the canonical `setBpm(...)` IPC. */
+  setBpm?: (bpm: number) => void;
 }
 
-export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId, presetName, voiceMode = "silent", notifLevel = "all", instrument = "electric-guitar" }: UseSessionOptions) {
+export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId, presetName, voiceMode = "silent", coachVerbosity = "default", instrument = "electric-guitar", setBpm }: UseSessionOptions) {
   const instrumentLabel = instrument === "drums" ? "drums/percussion"
     : instrument === "electric-guitar" ? "electric guitar"
     : instrument === "acoustic-guitar" ? "acoustic guitar"
     : instrument === "bass" ? "bass guitar"
     : instrument === "piano" ? "piano/keys"
     : "general instrument";
+  // Map the raw instrument string to the templates' `Vocabulary` type.
+  // Unknown instruments fall through to "generic" so the catalog still
+  // resolves a template via the generic fallback.
+  const vocab: Vocabulary =
+    instrument === "drums" ? "drums"
+    : instrument === "electric-guitar" ? "electric-guitar"
+    : instrument === "acoustic-guitar" ? "acoustic-guitar"
+    : instrument === "bass" ? "bass"
+    : instrument === "piano" ? "piano"
+    : "generic";
   const [active, setActive] = useState(false);
   const [messages, setMessages] = useState<FeedMessage[]>([]);
   const [startedAt, setStartedAt] = useState<number | null>(null);
@@ -36,21 +159,132 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
   const coachLoadedRef = useRef(false);
   const sessionIdRef = useRef(0);
   const messagesRef = useRef<FeedMessage[]>([]);
+  // ── activeRef: synchronous mirror of `active` ─────────────────
+  // React state updates are batched / async; async callbacks (LLM
+  // results, late event-listener firings) that close over a stale
+  // `active` boolean would speak/append after `endSession`. The ref
+  // is updated in the same effect that reads `active`, so callbacks
+  // can do a synchronous "is the session still alive?" check before
+  // calling `maybeSpeak(...)` or `setMessages(...)`.
+  const activeRef = useRef(false);
 
-  // Speak a comment if voice mode is active and urgency passes the notification filter
-  const maybeSpeak = useCallback((text: string, urgency: "urgent" | "normal" = "urgent") => {
-    if (voiceMode === "silent") return;
-    if (notifLevel === "silent") return;
-    if (notifLevel === "important" && urgency !== "urgent") return;
-    if (voiceMode === "voice") {
-      ttsSpeak(text).catch(() => {});
-    } else if (voiceMode === "chime") {
-      playChime(urgency === "urgent" ? 880 : 660);
-    }
-  }, [voiceMode, notifLevel]);
+  // ── C1: Session Narrative ─────────────────────────────────────
+  // Compact 2KB running log of the session arc. Seeded on
+  // startSession, appended on every segment-end / coach utterance /
+  // user action. Passed into the LLM context so the model has a
+  // structured view of what's happened (vs. only the latest metric
+  // snapshot).
+  const narrativeRef = useRef<Narrative | null>(null);
+
+  // ── C4: Gatekeeper state ──────────────────────────────────────
+  // Decides WHEN to speak and on which channel. Pure state machine —
+  // tied to session lifecycle (created in startSession, cleared in
+  // endSession).
+  const gatekeeperRef = useRef<GatekeeperState | null>(null);
+
+  // ── C5: Shuffle-bag + similarity ring state ───────────────────
+  // Keeps phrasing variety across the whole app run, not just per
+  // session — that way the player doesn't hear "you're rushing —
+  // 12ms early" twice in a row across two short sessions.
+  const shuffleStateRef = useRef<ShuffleState>(createShuffleState());
+
+  // ── Phase 5: intervention rate-limit state ────────────────────
+  // Tracks the recent intervention timestamps (5-min rate cap = 2)
+  // and per-id cooldowns. Pure in-memory state — interventions don't
+  // need to survive a session boundary; the next session gets a fresh
+  // slate and a fresh window. Reset on startSession.
+  const interventionStateRef = useRef<InterventionRateState>(createInterventionState());
+
+  // ── Phase 5: chip recency + prior-session score refs ──────────
+  // `prevSessionBestRef` snapshots the best score from the most-recent
+  // saved session for this preset (or globally if none) so chips like
+  // "compare-last-session" have a number to anchor against. It's
+  // refreshed on session start (so each new session sees the latest
+  // history) and is null until the first history fetch lands.
+  const prevSessionBestRef = useRef<number | undefined>(undefined);
+  // `chatInputFocusRef` is a callback ref the CoachCard can register so
+  // the chip "Ask something else…" can focus the input from inside the
+  // hook. We use a ref-to-a-callback (not a DOM ref) because the input
+  // lives in the CoachCard, not here — the card calls
+  // `registerChatFocus(fn)` when it mounts and the hook invokes the
+  // stored fn when an open-chat chip fires.
+  const chatInputFocusRef = useRef<(() => void) | null>(null);
+  const registerChatFocus = useCallback((fn: (() => void) | null) => {
+    chatInputFocusRef.current = fn;
+  }, []);
+
+  // ── D4 Signal A: settings-change tracking refs ────────────────
+  // Previous values used to detect BPM / preset / time-signature /
+  // instrument changes mid-session. Seeded on startSession so the
+  // first useEffect tick doesn't fire a false-positive boundary.
+  // These reflect the LAST COMMITTED state — i.e. the values at the
+  // moment the most recent `boundary_signal_a` event fired. They are
+  // NOT updated on every render so a burst of rapid changes (e.g.
+  // hammering -5 BPM six times) coalesces into a single event for
+  // the net change ("tempo down to 90 BPM") instead of six cards.
+  const prevBpmRef = useRef<number>(bpm);
+  const prevPresetIdRef = useRef<string | undefined>(presetId);
+  const prevTimeSignatureRef = useRef<number>(timeSignature);
+  const prevInstrumentRef = useRef<string>(instrument);
+  // Debounce timer used to coalesce config-change bursts. Each new
+  // change resets the timer; the gatekeeper fires once the user
+  // settles (no further changes for BOUNDARY_DEBOUNCE_MS).
+  const boundaryDebounceRef = useRef<number | null>(null);
+
+  // ── C4 first-4-beats hard rule: per-segment beat counter ──────
+  // Counts beats since the current segment started. Resets on
+  // session-start, on Signal A (settings change → new segment), and
+  // on play-stop→play-start transitions (Signal B → new segment).
+  // Fed into the gatekeeper as `ctx.beatsInSegment` so spoken events
+  // get demoted to written during the first 4 beats of every segment,
+  // per the plan's hard rule "No TTS during the first 4 beats of any
+  // segment (let the player settle in)."
+  const beatsInSegmentRef = useRef<number>(0);
+
+  // Speak a comment when voice mode is on. The notification-level
+  // selector was removed — the coach is either fully audible or fully
+  // silent. The `urgency` parameter is accepted for call-site clarity
+  // ("urgent" vs "normal") but does not gate playback any more.
+  const maybeSpeak = useCallback((text: string, _urgency: "urgent" | "normal" = "urgent") => {
+    if (voiceMode !== "voice") return;
+    ttsSpeak(text).catch(() => {});
+  }, [voiceMode]);
+
+  // ── Stable refs for values consumed by long-lived event listeners ──
+  // The beat-feedback listener (mounted once per active+isPlaying
+  // cycle) reads `vocab`, `instrumentLabel`, and `maybeSpeak`. If we
+  // listed these in the effect deps, every preset/instrument/voice
+  // change would tear down the Tauri listener and re-subscribe — and
+  // between teardown and re-mount there's a window where the OLD
+  // listener's callback (already in flight from Rust) fires with the
+  // PREVIOUS vocab/instrument. Routing through refs lets us shrink the
+  // effect deps to just lifecycle signals (active, isPlaying,
+  // timeSignature) while still letting the callback read the latest
+  // values.
+  const vocabRef = useRef(vocab);
+  useEffect(() => { vocabRef.current = vocab; }, [vocab]);
+  const instrumentLabelRef = useRef(instrumentLabel);
+  useEffect(() => { instrumentLabelRef.current = instrumentLabel; }, [instrumentLabel]);
+  const maybeSpeakRef = useRef(maybeSpeak);
+  useEffect(() => { maybeSpeakRef.current = maybeSpeak; }, [maybeSpeak]);
 
   // Keep messagesRef in sync for use in callbacks
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  // Keep activeRef in sync — see the ref's declaration site for the
+  // rationale (synchronous "is the session still alive?" check from
+  // async callbacks that close over stale state).
+  useEffect(() => { activeRef.current = active; }, [active]);
+
+  // Keep playBpmRef in sync on EVERY bpm change, not just the
+  // play-start rising edge. The previous "set only on rising edge"
+  // behaviour caused the gatekeeper to evaluate against stale BPM
+  // whenever the user adjusted tempo mid-play without stopping —
+  // emitting "rushing at 130" comments that landed AFTER the user
+  // had already moved to 145. The rising-edge handler still resets
+  // segmentStartRef and beatsInSegmentRef (those are segment-scoped,
+  // not playback-scoped).
+  useEffect(() => { playBpmRef.current = bpm; }, [bpm]);
 
   // Try to load the coach model once on mount
   useEffect(() => {
@@ -63,58 +297,193 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     });
   }, []);
 
-  // Track when play starts to capture bpm and segment start time
+  // Track when play starts to capture segment start time. `playBpmRef`
+  // is sync'd separately on every bpm change (see the dedicated effect
+  // above) — this handler only owns segment-scoped state.
   useEffect(() => {
     if (isPlaying && !wasPlayingRef.current) {
-      playBpmRef.current = bpm;
       segmentStartRef.current = Date.now();
+      // New playback start = new segment for the first-4-beats rule.
+      beatsInSegmentRef.current = 0;
     }
-  }, [isPlaying, bpm]);
+  }, [isPlaying]);
 
   // Auto mini-reports: when playback stops during an active session
   useEffect(() => {
     if (wasPlayingRef.current && !isPlaying && active) {
       const segmentBpm = playBpmRef.current;
-      const sid = sessionIdRef.current;
+      const token = createSessionToken(sessionIdRef, activeRef);
       getSessionReport().then(async (report) => {
-        // Discard if a new session started while this was in-flight
-        if (sid !== sessionIdRef.current) return;
-        if (report && (report.hitsCount + report.missCount) >= 8) {
+        // Discard if a new session started OR the session ended while
+        // `getSessionReport` was in-flight — would otherwise land a
+        // stale segment summary in the next session's feed.
+        if (token.isStaleOrInactive()) {
+          coachDebug("mini-report.discard-pre-llm", { capturedAt: token.capturedAt, current: sessionIdRef.current, active: activeRef.current });
+          return;
+        }
+        const reportable = report ? isSegmentReportable(report) : false;
+        if (report) {
+          const scored = scoredBeats(report);
+          const rate = accuracyRatio(report);
+          coachDebug("mini-report.check", {
+            scoredBeats: scored,
+            hits: report.hitsCount,
+            misses: report.missCount,
+            hitRate: +rate.toFixed(2),
+            score: report.score,
+            reportable,
+            gates: {
+              beats: `${scored}>=${MIN_SEGMENT_BEATS_FOR_REPORT}? ${scored >= MIN_SEGMENT_BEATS_FOR_REPORT}`,
+              hits: `${report.hitsCount}>=${MIN_SEGMENT_HITS_FOR_REPORT}? ${report.hitsCount >= MIN_SEGMENT_HITS_FOR_REPORT}`,
+              rate: `${scored > 0 ? rate.toFixed(2) : "n/a"}>=${MIN_SEGMENT_HIT_RATE_FOR_REPORT}? ${rate >= MIN_SEGMENT_HIT_RATE_FOR_REPORT}`,
+            },
+          });
+        } else {
+          coachDebug("mini-report.no-report-from-backend");
+        }
+        if (report && reportable) {
           const now = Date.now();
           segmentReportsRef.current.push({ report, bpm: segmentBpm, timeSignature, startTime: segmentStartRef.current, endTime: now });
 
-          // Generate coach comment (LLM or template-based)
-          const accuracy = report.totalBeats > 0
-            ? Math.round((report.hitsCount / report.totalBeats) * 100) : 0;
+          // Clear the Rust accumulator IMMEDIATELY — before the
+          // potentially multi-second LLM rephrase. If we wait until
+          // after `await coachGenerate(...)`, and the user starts a
+          // new exercise during the rephrase window, the next
+          // exercise's beats accumulate INTO the same accumulator and
+          // are wiped out when `clearSession()` finally fires. The
+          // second exercise's eventual `getSessionReport()` then
+          // either returns null (empty) or fails `isSegmentReportable`
+          // (too few scored beats), so no second mini-report ever
+          // emits. Captured + fixed 2026-05-16 — see "2 exercises,
+          // only 1 mini-report" report. Fire-and-forget is fine: the
+          // local `report` reference is the source of truth for the
+          // rest of this block.
+          clearSession();
+
+          // C1: log the segment-end into the narrative *before* coach
+          // generation so the LLM can see the segment summary in context.
+          if (narrativeRef.current) {
+            narrativeRef.current = appendSegmentEnd(
+              narrativeRef.current,
+              { score: report.score, bpm: segmentBpm, note: shortPocketNote(report) },
+              now,
+            );
+          }
+
+          // Generate coach comment (LLM or template-based).
+          // Accuracy uses SCORED beats (hits + misses) as the denominator
+          // — not totalBeats — so a session that started before the user
+          // picked up the instrument doesn't get a misleading "12%
+          // accuracy". See `src/coach/reportStats.ts`.
+          const accuracy = accuracyPct(report);
           let comment = formatMiniReport(report);
           if (coachLoadedRef.current) {
             try {
-              const context = formatMiniReportContext(segmentBpm, timeSignature, accuracy, report, instrumentLabel);
+              const context = formatMiniReportContext(
+                segmentBpm,
+                timeSignature,
+                accuracy,
+                report,
+                instrumentLabel,
+                narrativeRef.current ? formatForLLM(narrativeRef.current) : undefined,
+              );
               comment = await coachGenerate(context);
-            } catch { /* fall back to template */ }
+            } catch (err) {
+              // Fall back to template — but log so we can diagnose
+              // "the LLM stopped paraphrasing" instead of guessing.
+              coachDebug("mini-report.llm-error", String(err));
+            }
           }
 
-          const msg: FeedMessage = {
+          // Post-LLM staleness recheck — the rephrase at `coachGenerate`
+          // can take 200–2000 ms, and during that window the user might
+          // start a new session (sid bump) OR end the current one
+          // (activeRef flip). Both must be dropped — see
+          // src/coach/sessionGuard.ts for the unified predicate.
+          if (token.isStaleOrInactive()) {
+            coachDebug("mini-report.discard-post-llm", { capturedAt: token.capturedAt, current: sessionIdRef.current, active: activeRef.current });
+            return;
+          }
+
+          // Phase 5 — pick suggestion chips for the user to tap.
+          // The selector is deterministic given the context, so two
+          // identical-looking sessions show different chips because
+          // of recency tracking (chips shown last session are
+          // down-weighted by 0.7×). See `src/coach/chips.ts`.
+          const chips = buildChipsForMiniReport({
+            report,
+            bpm: segmentBpm,
+            timeSignature,
+            segments: segmentReportsRef.current,
+            previousSessionScore: prevSessionBestRef.current,
+          });
+
+          // The mini-report carries ONLY the coach's commentary on the
+          // segment (score circle + text). The follow-up question chips
+          // ride on a separate `chip-prompt` message right after it so
+          // the input affordance is visually distinct from the coach's
+          // content — see the `chip-prompt` rationale on
+          // `FeedMessageType` in `src/types.ts`. `now` is already
+          // bound above (at the segmentReportsRef push) so we reuse
+          // it here for a stable shared timestamp.
+          const reportTs = Date.now();
+          const reportMsg: FeedMessage = {
             id: crypto.randomUUID(),
             type: "mini-report",
-            timestamp: Date.now(),
+            timestamp: reportTs,
             content: comment,
             report,
             meta: { bpm: segmentBpm, timeSignature },
           };
-          setMessages((prev) => [...prev, msg]);
-          clearSession();
+          // Only emit a chip-prompt if the selector returned anything
+          // substantive. The Escape chip ("Ask something else…") was
+          // retired in v0.9 (the coach card pins a chat input to the
+          // bottom — the chip duplicated that affordance), so the
+          // selector now returns 0–3 substantive chips. An empty
+          // chip list means nothing to suggest — don't ship an empty
+          // bubble. See `selectChips` in `src/coach/chips.ts`.
+          const chipMsg: FeedMessage | null = chips.length > 0
+            ? {
+                id: crypto.randomUUID(),
+                type: "chip-prompt",
+                // +1 ms so the chip-prompt always sorts AFTER the
+                // mini-report when a consumer orders by timestamp.
+                timestamp: reportTs + 1,
+                content: "",
+                chips,
+              }
+            : null;
+          setMessages((prev) =>
+            chipMsg ? [...prev, reportMsg, chipMsg] : [...prev, reportMsg],
+          );
+          if (narrativeRef.current) {
+            narrativeRef.current = appendCoachUtterance(
+              narrativeRef.current,
+              comment,
+            );
+          }
+          // NOTE: `clearSession()` was called above, BEFORE the LLM
+          // rephrase, to keep the Rust accumulator from devouring the
+          // next exercise's data while this one's rephrase was in
+          // flight. See the rationale block at the call site.
         }
       });
     }
     wasPlayingRef.current = isPlaying;
   }, [isPlaying, active, timeSignature, instrumentLabel]);
 
-  // Real-time coaching: monitor beat feedback during active play
+  // Real-time coaching: monitor beat feedback during active play.
+  //
+  // Flow per evaluation tick (every ~2 bars):
+  //   1. C4 gatekeeper.evaluate(...) decides IF + WHICH scenario + WHICH channel.
+  //   2. C5 pickTemplate(...) fills a phrasing from the catalog (with
+  //      shuffle-bag variety + bigram similarity guard).
+  //   3. Optional LLM rephrase — sees the filled template as the
+  //      source-of-truth and is asked to rephrase preserving numbers.
+  //   4. Stale-drop guard: if the BPM has drifted >5 since the event
+  //      was tagged, drop the comment rather than landing stale info.
   const realtimeWindowRef = useRef<BeatFeedback[]>([]);
-  const lastCoachCommentRef = useRef<number>(0);
   const beatsSinceLastCheckRef = useRef<number>(0);
-  const bestStreakRef = useRef<number>(0);
 
   useEffect(() => {
     if (!active || !isPlaying) {
@@ -130,40 +499,224 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       if (cancelled) return;
       const window = realtimeWindowRef.current;
       window.push(fb);
-      if (window.length > 32) window.shift();
+      if (window.length > REALTIME_WINDOW_BEATS) window.shift();
       beatsSinceLastCheckRef.current++;
+      beatsInSegmentRef.current++;
 
-      // Check every 8 beats (roughly 2 bars in 4/4)
+      coachDebug("beat", {
+        idx: fb.beatIndex,
+        cls: fb.classification,
+        devMs: Math.round(fb.deviationMs),
+        amp: +fb.amplitude.toFixed(2),
+        conf: +fb.calibrationConfidence.toFixed(2),
+        winLen: window.length,
+        beatsInSeg: beatsInSegmentRef.current,
+        sinceCheck: beatsSinceLastCheckRef.current,
+      });
+
+      // Check every MIN_BEATS_PER_EVAL_CHECK beats or every 2 bars,
+      // whichever is larger. The gatekeeper has its own cooldown math
+      // so we can poll more frequently than the legacy 15s throttle
+      // without spamming.
       const barsWorth = timeSignature * 2;
-      if (beatsSinceLastCheckRef.current < Math.max(8, barsWorth)) return;
-
-      // Throttle: minimum 15 seconds between comments
-      const now = Date.now();
-      if (now - lastCoachCommentRef.current < 15_000) return;
-
-      const tip = analyzeRealtimeTrend(window, bestStreakRef.current);
-      if (!tip) return;
-
+      if (beatsSinceLastCheckRef.current < Math.max(MIN_BEATS_PER_EVAL_CHECK, barsWorth)) return;
       beatsSinceLastCheckRef.current = 0;
-      lastCoachCommentRef.current = now;
-      if (tip.streak > bestStreakRef.current) bestStreakRef.current = tip.streak;
 
-      // Generate coach comment (LLM or use the template)
+      const gk = gatekeeperRef.current;
+      if (!gk) {
+        coachDebug("gatekeeper.skip", "no-gatekeeper-yet");
+        return; // session not fully started yet
+      }
+
+      const now = Date.now();
+      coachDebug("gatekeeper.evaluate", {
+        bpm: playBpmRef.current,
+        winLen: window.length,
+        beatsInSeg: beatsInSegmentRef.current,
+      });
+      const { state: nextState, event } = gatekeeperEvaluate(gk, {
+        now,
+        bpm: playBpmRef.current,
+        window,
+        beatsInSegment: beatsInSegmentRef.current,
+      });
+      gatekeeperRef.current = nextState;
+      if (!event) {
+        coachDebug("gatekeeper.no-event", "all-detectors-passed-or-cooldown");
+        return;
+      }
+      coachDebug("gatekeeper.event", {
+        scenario: event.scenario,
+        tier: event.tier,
+        taggedBpm: event.taggedBpm,
+        ctx: event.context,
+      });
+
+      // Staleness guard — if BPM has drifted significantly since the
+      // event was tagged, drop it. Cheap belt-and-braces; in practice
+      // it's the drill-adaptive path that triggers this most.
+      if (
+        shouldDropForStaleness(event.taggedBpm, playBpmRef.current)
+      ) {
+        coachDebug("event.drop-stale", { taggedBpm: event.taggedBpm, currentBpm: playBpmRef.current });
+        return;
+      }
+
+      const severity = severityForEvent(event);
+      const template = pickTemplate(TEMPLATE_CATALOG, shuffleStateRef.current, {
+        vocab: vocabRef.current,
+        scenario: event.scenario,
+        severity,
+        context: event.context,
+      });
+      if (!template) {
+        coachDebug("event.drop-no-template", { scenario: event.scenario, severity, vocab: vocabRef.current });
+        return;
+      }
+
+      // Phase 5 — intervention layer. If the event matches an
+      // intervention (and rate-limits + cooldowns pass), we replace
+      // the template text with the intervention's "want to drop to X?"
+      // copy and attach an affordance button. The gatekeeper still
+      // owns WHEN to speak; the intervention layer only decides what
+      // affordance to attach. Returns null when no intervention fits —
+      // in which case the gatekeeper's template ships unchanged.
+      const intervention = pickInterventionForEvent(
+        event,
+        playBpmRef.current,
+        latestScoreFromWindow(realtimeWindowRef.current),
+        startedAt ?? Date.now(),
+        segmentReportsRef.current.length,
+        interventionStateRef.current,
+      );
+      if (intervention) {
+        // Record the intervention BEFORE we kick off the LLM async
+        // path so a concurrent event in the same tick can't push the
+        // rate-cap over.
+        interventionStateRef.current = recordIntervention(
+          interventionStateRef.current,
+          intervention.intervention.id,
+          Date.now(),
+        );
+        coachDebug("intervention.fire", {
+          id: intervention.intervention.id,
+          actionKind: intervention.action.kind,
+        });
+      }
+
+      coachDebug("event.emit", { tier: event.tier, severity, template: template.slice(0, 80) });
+
+      // Interventions always cross the TTS threshold per plan §
+      // "Intervention design rules". Force the urgency to "urgent"
+      // when an affordance is attached even if the gatekeeper's tier
+      // decision was "written".
+      const urgency: "urgent" | "normal" =
+        event.tier === "spoken" || intervention ? "urgent" : "normal";
+
+      // C5 — user-tunable verbosity.
+      //   "more"    → promotes written → spoken (more talkative).
+      //   "default" → honours gatekeeper tier verbatim.
+      //   "less"    → demotes spoken → written for non-urgent scenarios
+      //              ('check_in', 'fatigue', 'rest', 'preset_change').
+      //              Interventions still cross the TTS threshold —
+      //              they're action-bearing and silencing them would
+      //              defeat the affordance.
+      // "Silent" (voice off entirely) is enforced one layer down
+      // inside `maybeSpeak` (voiceMode check).
+      const verbosityPromotesToSpoken =
+        coachVerbosity === "more" && event.tier === "written" && !intervention;
+      const nonUrgentScenarios = new Set([
+        "check_in",
+        "fatigue",
+        "rest",
+        "preset_change",
+      ]);
+      const verbosityDemotesToWritten =
+        coachVerbosity === "less" &&
+        event.tier === "spoken" &&
+        !intervention &&
+        nonUrgentScenarios.has(event.scenario);
+      const effectivelySpoken =
+        (event.tier === "spoken" || intervention || verbosityPromotesToSpoken) &&
+        !verbosityDemotesToWritten;
+
+      // Capture the session id BEFORE kicking off the async LLM call.
+      // If the user ends the session (or starts a new one) while the
+      // rephrase is in-flight, we must drop the result rather than
+      // append a stale coach-tip to the next session's feed and speak
+      // it aloud — that's the same hazard guarded against in the
+      // mini-report / greeting / end-of-session paths, and the
+      // real-time path was previously missing the guard.
+      const token = createSessionToken(sessionIdRef, activeRef);
       const generateTip = async () => {
-        let comment = tip.template;
-        if (coachLoadedRef.current) {
+        // When an intervention fires the spoken/written copy comes
+        // from the intervention catalog — it's purpose-built ("want to
+        // drop to 140?") and shouldn't be paraphrased away. The
+        // gatekeeper's template still drives non-intervention events.
+        let comment = intervention ? intervention.text : template;
+        if (!intervention && coachLoadedRef.current) {
           try {
-            comment = await coachGenerate(tip.context);
-          } catch { /* fall back to template */ }
+            const narrativeBlock = narrativeRef.current
+              ? `\n${formatForLLM(narrativeRef.current)}\n`
+              : "";
+            const llmPrompt = buildRephrasePrompt({
+              template,
+              scenario: event.scenario,
+              context: event.context,
+              instrumentLabel: instrumentLabelRef.current,
+              narrativeBlock,
+            });
+            const rephrased = await coachGenerate(llmPrompt);
+            if (rephrased && rephrased.trim()) {
+              comment = rephrased.trim();
+              // Prime the similarity ring with the LLM rephrase too,
+              // so the next pick doesn't echo a line the user JUST
+              // heard verbatim.
+              recordUtterance(shuffleStateRef.current, comment);
+            }
+          } catch (err) {
+            // Fall back to the filled template — but surface the
+            // failure so we can tell "LLM crashed" apart from "LLM
+            // returned empty / blank rephrase."
+            coachDebug("realtime-tip.llm-error", String(err));
+          }
+        }
+        // Stale-session check: drop if either (a) a new session has
+        // started since the event was tagged (sid bump) or (b) the
+        // current session ended without restarting (activeRef flipped
+        // false). See src/coach/sessionGuard.ts for the predicate.
+        if (token.isStaleOrInactive()) {
+          coachDebug("realtime-tip.discard-stale-or-inactive", { capturedAt: token.capturedAt, current: sessionIdRef.current, active: activeRef.current });
+          return;
         }
         const msg: FeedMessage = {
           id: crypto.randomUUID(),
           type: "coach-tip",
           timestamp: Date.now(),
           content: comment,
+          ...(intervention && {
+            affordance: {
+              actionLabel: intervention.actionLabel,
+              action: intervention.action,
+              dismissLabel: intervention.dismissLabel,
+              interventionId: intervention.intervention.id,
+            },
+          }),
         };
         setMessages((prev) => [...prev, msg]);
-        maybeSpeak(comment, tip.urgency);
+        if (narrativeRef.current) {
+          narrativeRef.current = appendCoachUtterance(
+            narrativeRef.current,
+            comment,
+          );
+        }
+        // Only the spoken tier speaks aloud; written tier appears in
+        // the feed silently per the gatekeeper's channel decision.
+        // Interventions force-speak (see urgency above). "More"
+        // verbosity also promotes written → spoken.
+        if (effectivelySpoken) {
+          maybeSpeakRef.current(comment, urgency);
+        }
       };
       generateTip();
     }).then((fn) => {
@@ -175,7 +728,13 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       cancelled = true;
       unlisten?.();
     };
-  }, [active, isPlaying, timeSignature, maybeSpeak]);
+    // Deps intentionally shrunk to lifecycle signals only. `vocab`,
+    // `instrumentLabel`, and `maybeSpeak` are now routed through refs
+    // (declared above) so a preset/instrument/voice change doesn't
+    // tear down and re-subscribe the listener — avoiding the
+    // race-window where the in-flight callback closure runs with
+    // stale values while Rust unsubscribes.
+  }, [active, isPlaying, timeSignature]);
 
   // Adaptive drill: model-based tempo decisions
   useEffect(() => {
@@ -187,9 +746,15 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     onAdaptiveEval((req: AdaptiveEvalRequest) => {
       if (cancelled || !coachLoadedRef.current) return;
 
+      // Capture a token so the result is dropped if the session ends
+      // OR restarts mid-LLM-call — otherwise the next session's drill
+      // could absorb a stale tempo decision from the previous one
+      // (sid bump), or a just-ended session would still push a tempo
+      // decision to the engine (activeRef flip).
+      const token = createSessionToken(sessionIdRef, activeRef);
       const context = formatAdaptiveEvalContext(req);
       coachGenerate(context).then((response) => {
-        if (cancelled) return;
+        if (cancelled || token.isStaleOrInactive()) return;
         const decision = parseAdaptiveDecision(response);
         setAdaptiveDecision(decision).catch(() => {});
 
@@ -204,7 +769,13 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
             content: comment,
           };
           setMessages((prev) => [...prev, msg]);
-          maybeSpeak(comment, "normal");
+          if (narrativeRef.current) {
+            narrativeRef.current = appendCoachUtterance(
+              narrativeRef.current,
+              comment,
+            );
+          }
+          maybeSpeakRef.current(comment, "normal");
         }
       }).catch(() => {});
     }).then((fn) => {
@@ -216,21 +787,233 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       cancelled = true;
       unlisten?.();
     };
-  }, [active, maybeSpeak]);
+    // `maybeSpeak` is routed via `maybeSpeakRef` so voiceMode toggles
+    // don't churn this listener subscription.
+  }, [active]);
+
+  // ── D4 Signal A — settings change detection (debounced) ──────────
+  // Fires a FORCED gatekeeper event (`boundary_signal_a`) when the
+  // player changes BPM, preset, time signature, or instrument
+  // mid-session. Forced events bypass cooldowns and the streak
+  // suppression — the coach "always has something to say" when the
+  // config changes, per plan. Also notifies the Rust analyzer so the
+  // open segment closes cleanly (no `practice-segment-ended` event:
+  // SettingsChange goes via this Signal A path, not Signal B).
+  //
+  // Debounced: each change resets a timer; the gatekeeper only fires
+  // once the user settles (no further changes for BOUNDARY_DEBOUNCE_MS).
+  // This collapses a burst of -5/+5 BPM clicks into a single boundary
+  // event describing the NET change ("tempo down to 105 BPM") rather
+  // than spamming the feed with one card + one TTS per click.
+  useEffect(() => {
+    if (!active) {
+      // Sync refs while inactive so a config change before
+      // session-start doesn't trigger a phantom event on the first
+      // tick of the next session.
+      prevBpmRef.current = bpm;
+      prevPresetIdRef.current = presetId;
+      prevTimeSignatureRef.current = timeSignature;
+      prevInstrumentRef.current = instrument;
+      return;
+    }
+
+    // Compute net changes from last-committed state to current props.
+    // Note: we DO NOT commit prev*Ref here — that happens in the timer
+    // callback so rapid changes coalesce into a single boundary event.
+    const changes: { kind: string; from: string | number; to: string | number }[] = [];
+    if (prevBpmRef.current !== bpm) {
+      changes.push({
+        kind: bpm > prevBpmRef.current ? "bpm-up" : "bpm-down",
+        from: prevBpmRef.current,
+        to: bpm,
+      });
+    }
+    if (prevPresetIdRef.current !== presetId) {
+      changes.push({
+        kind: "preset",
+        from: prevPresetIdRef.current ?? "free play",
+        to: presetName ?? presetId ?? "free play",
+      });
+    }
+    if (prevTimeSignatureRef.current !== timeSignature) {
+      changes.push({
+        kind: "time-sig",
+        from: prevTimeSignatureRef.current,
+        to: timeSignature,
+      });
+    }
+    if (prevInstrumentRef.current !== instrument) {
+      changes.push({
+        kind: "instrument",
+        from: prevInstrumentRef.current,
+        to: instrument,
+      });
+    }
+    if (changes.length === 0) return;
+
+    // Debounce window — long enough to absorb rapid -5/+5 button mashing
+    // (~150-250ms click cadence) but short enough to feel responsive.
+    const BOUNDARY_DEBOUNCE_MS = 600;
+    // Snapshot current values into the closure so the timer fires with
+    // exactly the state observed when it was scheduled. Subsequent
+    // changes cancel + reschedule via the cleanup below, so closure
+    // staleness is not a concern.
+    const snapshot = { bpm, presetId, presetName, timeSignature, instrument };
+    const timerId = window.setTimeout(() => {
+      boundaryDebounceRef.current = null;
+
+      // Collapse to a single forced event using the most "salient"
+      // change. BPM beats preset beats time-sig beats instrument when
+      // multiple shift inside one debounce window (e.g. preset apply
+      // bumps both BPM and time-sig). The remaining changes are still
+      // surfaced through `{change}` copy below.
+      const priority = ["bpm-up", "bpm-down", "preset", "time-sig", "instrument"];
+      changes.sort((a, b) => priority.indexOf(a.kind) - priority.indexOf(b.kind));
+      const primary = changes[0];
+      const changeText = changes.map(formatChangeCopy).join("; ");
+
+      // Commit the new committed-state BEFORE firing the gatekeeper
+      // so any cascading effect re-runs see the post-commit state.
+      const presetChanged = changes.some((c) => c.kind === "preset");
+      prevBpmRef.current = snapshot.bpm;
+      prevPresetIdRef.current = snapshot.presetId;
+      prevTimeSignatureRef.current = snapshot.timeSignature;
+      prevInstrumentRef.current = snapshot.instrument;
+
+      // C1 narrative: log the preset change so the LLM sees the new
+      // exercise when rephrasing the next mini-report. We append BEFORE
+      // the gatekeeper / TTS path so any utterance prompts that consult
+      // the narrative see the new preset name as fresh context.
+      if (presetChanged && narrativeRef.current) {
+        narrativeRef.current = appendPresetChange(
+          narrativeRef.current,
+          snapshot.presetName ?? snapshot.presetId ?? "free play",
+        );
+      }
+
+      // C1 narrative: log instrument switches the same way preset
+      // changes are logged. Plan §"Mid-session instrument switch"
+      // calls for the coach to briefly acknowledge "Switched to piano —
+      // different vocabulary now." The narrative line gives the LLM
+      // that context for the next utterance and feeds the rephraser
+      // when scenarios fire in the new vocabulary.
+      const instrumentChanged = changes.some((c) => c.kind === "instrument");
+      if (instrumentChanged && narrativeRef.current) {
+        narrativeRef.current = appendInstrumentChange(
+          narrativeRef.current,
+          snapshot.instrument,
+        );
+      }
+
+      // Notify the Rust analyzer to close its open segment cleanly.
+      // Fire-and-forget — failure to notify (e.g. evaluation not
+      // running) is harmless. The JS side still speaks the boundary.
+      notifySettingsChange().catch(() => {});
+
+      const gk = gatekeeperRef.current;
+      if (!gk) return; // session not fully wired yet
+
+      const { state: nextState, event } = gatekeeperEvaluate(gk, {
+        now: Date.now(),
+        bpm: snapshot.bpm,
+        window: realtimeWindowRef.current,
+        beatsInSegment: beatsInSegmentRef.current,
+        force: {
+          scenario: "boundary_signal_a",
+          context: {
+            kind: primary.kind,
+            from: String(primary.from),
+            to: String(primary.to),
+            change: changeText,
+          },
+        },
+      });
+      gatekeeperRef.current = nextState;
+      // Signal A closes the previous segment and opens a new one.
+      // Reset the first-4-beats counter so the new segment's early
+      // observational events get suppressed per the plan's hard TTS rule.
+      beatsInSegmentRef.current = 0;
+      if (!event) return;
+
+      const severity = severityForEvent(event);
+      const template = pickTemplate(TEMPLATE_CATALOG, shuffleStateRef.current, {
+        vocab,
+        scenario: event.scenario,
+        severity,
+        context: event.context,
+      });
+      if (!template) return;
+
+      const msg: FeedMessage = {
+        id: crypto.randomUUID(),
+        type: "coach-tip",
+        timestamp: Date.now(),
+        content: template,
+        urgency: "urgent",
+      };
+      setMessages((prev) => [...prev, msg]);
+      if (narrativeRef.current) {
+        narrativeRef.current = appendCoachUtterance(narrativeRef.current, template);
+      }
+      // Signal A is always-spoken (per plan + gatekeeper ALWAYS_SPOKEN).
+      maybeSpeak(template, "urgent");
+    }, BOUNDARY_DEBOUNCE_MS);
+    boundaryDebounceRef.current = timerId;
+
+    // Cleanup: every effect re-run (= a newer change arrived) and
+    // unmount cancels the pending timer. This is what gives us the
+    // debouncing behavior — each new click extends the window.
+    return () => {
+      if (boundaryDebounceRef.current !== null) {
+        clearTimeout(boundaryDebounceRef.current);
+        boundaryDebounceRef.current = null;
+      }
+    };
+  }, [active, bpm, presetId, presetName, timeSignature, instrument, vocab, maybeSpeak]);
 
   const startSession = useCallback(async () => {
-    if (active) return;
+    if (active) {
+      coachDebug("startSession.noop-already-active");
+      return;
+    }
+    coachDebug("startSession", { bpm, presetId, presetName, timeSignature, instrument });
 
     // Bump session ID FIRST to invalidate any in-flight stale reports
     sessionIdRef.current++;
     segmentReportsRef.current = [];
-    bestStreakRef.current = 0;
-    lastCoachCommentRef.current = 0;
     wasPlayingRef.current = false; // prevent stale mini-report from previous session
     const now = Date.now();
+    // D4 Signal A — seed previous-value refs so the first effect tick
+    // after session-start doesn't fire a false-positive change event.
+    prevBpmRef.current = bpm;
+    prevPresetIdRef.current = presetId;
+    prevTimeSignatureRef.current = timeSignature;
+    prevInstrumentRef.current = instrument;
+    // Fresh segment for the first-4-beats hard rule. Counter ticks
+    // up in the onBeatFeedback handler; the gatekeeper demotes spoken
+    // events to written until it crosses FIRST_BEATS_TTS_FLOOR.
+    beatsInSegmentRef.current = 0;
+    // ── C4: Fresh gatekeeper per session ──────────────────────────
+    // Cooldown math is anchored to `sessionStartMs`; a new session
+    // gets a clean state machine. Shuffle-state intentionally PERSISTS
+    // across sessions so the user doesn't hear the same opening line
+    // twice in a row across two short sessions.
+    gatekeeperRef.current = createGatekeeper(now);
+    // Reset intervention rate state — a new session starts with no
+    // recent interventions and zero cooldowns. The rate cap window is
+    // intentionally per-session: a fresh practice attempt deserves a
+    // fresh affordance budget.
+    interventionStateRef.current = createInterventionState();
     setActive(true);
     setStartedAt(now);
     setCardOpen(true);
+
+    // Clear the feed synchronously BEFORE awaiting history. Without this,
+    // any messages from a prior session stay visible for up to 500ms
+    // while `loadHistoryWithBudget` races, producing a "stale state" flash
+    // where the user sees the previous session's tips and session-end card
+    // even though they just clicked Start on a new session.
+    setMessages([]);
 
     // Clear backend session data in background — don't block UI
     clearSession().catch(() => {});
@@ -240,60 +1023,164 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       loadCoachModel().then((ok) => { coachLoadedRef.current = ok; });
     }
 
-    // Show template greeting immediately — no freeze
+    // ── C2: Context-Aware Greetings ────────────────────────────
+    // Race session-history loading against a 500ms budget. If history
+    // arrives in time we pick from the 4-tier hierarchy; if not, we
+    // ship the tier-4 ("cold") greeting and DO NOT replace it once
+    // history finally arrives (avoids "greeting flicker" bug).
     const greetingId = crypto.randomUUID();
-    const templateGreeting = presetName
-      ? `Session started — ${presetName}. Play when you're ready.`
-      : "Session started. Play when you're ready.";
+    const history = await loadHistoryWithBudget(() => getSessionHistory());
+
+    // Phase 5 — pull the best score from the most-recent saved session
+    // (preset-matched when available) so chips like
+    // `compare-last-session` have a real number to anchor against.
+    // History is newest-first by convention. When no match exists the
+    // chip's `qualifies` predicate fails and the chip is dropped, so
+    // `undefined` here is the safe default.
+    prevSessionBestRef.current = pickPreviousSessionScore(history, presetId);
+
+    const greeting = renderGreeting({
+      presetId,
+      presetName,
+      bpm: playBpmRef.current,
+      history,
+      now,
+    });
+
+    // ── C1: Seed session narrative ────────────────────────────
+    // Compact 2KB running log of the session arc. Prefer a real
+    // prior-session summary when history is available; falls back to
+    // a generic note. The seed line is always preserved across
+    // truncation per the plan.
+    const priorSummary = buildPriorSummary(history, presetId, presetName);
+    narrativeRef.current = createNarrative({
+      bpm: playBpmRef.current,
+      presetId,
+      presetName,
+      priorSummary,
+      instrument: instrumentLabel,
+      now,
+    });
 
     setMessages([{
       id: greetingId,
       type: "session-start",
       timestamp: now,
-      content: templateGreeting,
+      content: greeting.text,
     }]);
+
+    // Show the template greeting in the feed immediately, but defer TTS
+    // until we know whether the LLM is going to rephrase it — otherwise
+    // we'd speak the template, then speak the rephrased version a moment
+    // later, and the user hears the greeting twice. When no LLM is
+    // loaded, speak the template right away since it's all we'll get.
+    if (!coachLoadedRef.current) {
+      maybeSpeak(greeting.text);
+    }
+
+    // Record the greeting as the first coach utterance in the narrative.
+    if (narrativeRef.current) {
+      narrativeRef.current = appendCoachUtterance(
+        narrativeRef.current,
+        greeting.text,
+        now,
+      );
+    }
 
     if (!evaluation.enabled) {
       evaluation.toggle();
     }
 
-    // Generate model greeting in the background, then patch the message
+    // LLM paraphrase path — the coach LLM (when available) gets the
+    // already-filled template + structured context and is asked to
+    // rephrase for variety while preserving every number. The plan
+    // calls this "LLM as paraphraser, never deciding what to say."
+    // If the model is unavailable or times out, the template greeting
+    // above ships as-is and is spoken via the fallback branches below.
     if (coachLoadedRef.current) {
-      const sid = sessionIdRef.current;
+      const token = createSessionToken(sessionIdRef, activeRef);
+      const tierGreeting = greeting; // capture for the closure
       (async () => {
         try {
-          let context: string | null = null;
-          if (presetId) {
-            const history = await getSessionHistory();
-            const presetSessions = history.filter((s) => s.presetId === presetId);
-            if (presetSessions.length > 0) {
-              const summary = compactPresetSummary(presetName ?? "", presetSessions);
-              context = `The player is starting a new session. They play ${instrumentLabel}. Generate a brief, motivating greeting (1-2 sentences).\n\n${summary}\n\nReference their history to make it personal.`;
-            } else {
-              context = `The player is starting a new session with preset "${presetName ?? "default"}" at ${playBpmRef.current} BPM. They play ${instrumentLabel}. This is their first session${presetName ? ` with "${presetName}"` : ""}. Generate a brief, motivating greeting (1-2 sentences). Be warm and encouraging.`;
-            }
+          // Tier-1 paraphrase keeps the rich structured context so the
+          // LLM has the same numbers to anchor on. Lower tiers feed a
+          // minimal hint.
+          let context: string;
+          if (tierGreeting.tier === "preset-with-history") {
+            context = `Rephrase this practice-coach greeting for a player of ${instrumentLabel} starting a session. Preserve every number and the preset name exactly. Keep it to 1-2 sentences, warm but specific.\n\nOriginal: "${tierGreeting.text}"\n\nStructured facts (do NOT add new ones):\n${JSON.stringify(tierGreeting.context, null, 2)}`;
           } else {
-            context = `The player is starting a free practice session at ${playBpmRef.current} BPM. They play ${instrumentLabel}. Generate a brief, motivating greeting (1-2 sentences). Be warm and encouraging.`;
+            context = `Rephrase this practice-coach greeting for a player of ${instrumentLabel}. Preserve every number; keep it warm and short (1-2 sentences).\n\nOriginal: "${tierGreeting.text}"`;
           }
-          if (context) {
-            const greeting = await coachGenerate(context);
-            if (sid !== sessionIdRef.current) return;
-            setMessages((prev) => prev.map((m) =>
-              m.id === greetingId ? { ...m, content: greeting } : m
-            ));
-            maybeSpeak(greeting);
+          const rephrased = await coachGenerate(context);
+          if (token.isStaleOrInactive()) return;
+          if (!rephrased || !rephrased.trim()) {
+            // LLM returned nothing useful — fall back to speaking the
+            // template greeting we've already shown in the feed.
+            maybeSpeak(tierGreeting.text);
+            return;
           }
-        } catch { /* keep template greeting */ }
+          setMessages((prev) => prev.map((m) =>
+            m.id === greetingId ? { ...m, content: rephrased } : m
+          ));
+          maybeSpeak(rephrased);
+          // Replace the template coach utterance with the LLM rephrase
+          // so downstream LLM calls see the actual greeting the user heard.
+          if (narrativeRef.current) {
+            narrativeRef.current = appendCoachUtterance(
+              narrativeRef.current,
+              rephrased,
+            );
+          }
+        } catch {
+          // LLM errored — fall back to the template greeting, but only
+          // if the session is still live (same sid AND still active).
+          if (!token.isStaleOrInactive()) {
+            maybeSpeak(tierGreeting.text);
+          }
+        }
       })();
     }
   }, [active, evaluation, presetId, presetName, maybeSpeak, instrumentLabel]);
 
   const endSession = useCallback(async () => {
-    if (!active) return;
+    if (!active) {
+      coachDebug("endSession.noop-not-active");
+      return;
+    }
+    coachDebug("endSession", { segments: segmentReportsRef.current.length });
+
+    // Flip activeRef synchronously so any in-flight async callback
+    // (mini-report LLM, realtime tip LLM, adaptive drill LLM, chat
+    // reply, late beat-feedback listener) can detect "session ended"
+    // before its setMessages / maybeSpeak fires. The React `active`
+    // state update batches asynchronously, so without this mirror
+    // late callbacks would close over a stale `active === true` and
+    // still append to the just-ended session's feed (or worse, speak).
+    // The end-of-session summary path is exempt — it INTENDS to fire
+    // post-endSession to patch the placeholder, so it uses the sid
+    // check (which only triggers on a NEW session, not on idle).
+    activeRef.current = false;
 
     const lastReport = await getSessionReport();
-    if (lastReport && (lastReport.hitsCount + lastReport.missCount) >= 8) {
-      segmentReportsRef.current.push({ report: lastReport, bpm, timeSignature, startTime: segmentStartRef.current, endTime: Date.now() });
+    if (lastReport) {
+      coachDebug("endSession.lastReport", {
+        scoredBeats: scoredBeats(lastReport),
+        hits: lastReport.hitsCount,
+        reportable: isSegmentReportable(lastReport),
+      });
+    } else {
+      coachDebug("endSession.no-last-report");
+    }
+    if (lastReport && isSegmentReportable(lastReport)) {
+      const endTime = Date.now();
+      segmentReportsRef.current.push({ report: lastReport, bpm, timeSignature, startTime: segmentStartRef.current, endTime });
+      if (narrativeRef.current) {
+        narrativeRef.current = appendSegmentEnd(
+          narrativeRef.current,
+          { score: lastReport.score, bpm, note: shortPocketNote(lastReport) },
+          endTime,
+        );
+      }
     }
 
     const now = Date.now();
@@ -321,8 +1208,10 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     setActive(false);
     setStartedAt(null);
 
-    // Save session
-    if (aggregated && (aggregated.hitsCount + aggregated.missCount) >= 8) {
+    // Save session — same gate as segment reportability. A session
+    // that aggregates to 0 real hits is noise (mic dropouts, accidental
+    // session start, etc.) and shouldn't pollute history.
+    if (aggregated && isSegmentReportable(aggregated)) {
       saveSession({
         id: crypto.randomUUID(),
         timestamp: startedAt ?? now,
@@ -336,16 +1225,73 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
 
     // Generate coach summary in the background, then patch the message
     if (aggregated && coachLoadedRef.current) {
+      // Capture a token so we can drop the result if the user starts
+      // a NEW session before the LLM call resolves. Without this guard,
+      // the old session's spoken summary leaks into the next session
+      // via maybeSpeak() and any narrative updates pollute the fresh
+      // narrative. NOTE: unlike every other site that uses
+      // `isStaleOrInactive()`, this path INTENDS to fire post-end (to
+      // patch the placeholder summary), so it deliberately uses the
+      // sid-only `isStale()` check — `activeRef` is already false here.
+      const token = createSessionToken(sessionIdRef);
       const durationSecs = Math.round((now - (startedAt ?? now)) / 1000);
-      const accuracy = aggregated.totalBeats > 0
-        ? Math.round((aggregated.hitsCount / aggregated.totalBeats) * 100) : 0;
-      const context = formatSessionContext(durationSecs, segments.length, aggregated.score, aggregated.grade, aggregated.totalBeats, accuracy, aggregated.meanDeviationMs, aggregated.longestStreak, instrumentLabel);
+      // Accuracy uses the scored-beat denominator (hits + miss), NOT
+      // totalBeats. Sessions with stretches of silence at the start or
+      // end accumulate "skipped" beats that deflate accuracy into
+      // nonsense if `totalBeats` is the denominator. Matches the Rust
+      // score and every other display surface — see `reportStats.ts`.
+      const accuracy = accuracyPct(aggregated);
+      const narrativeBlock = narrativeRef.current
+        ? formatForLLM(narrativeRef.current)
+        : undefined;
+      const context = formatSessionContext(
+        durationSecs,
+        segments.length,
+        aggregated.score,
+        aggregated.totalBeats,
+        accuracy,
+        aggregated.meanDeviationMs,
+        aggregated.longestStreak,
+        instrumentLabel,
+        narrativeBlock,
+      );
       coachGenerate(context).then((summaryComment) => {
+        if (token.isStale()) return;
         setMessages((prev) => prev.map((m) =>
           m.id === endMsgId ? { ...m, content: summaryComment } : m
         ));
+        if (narrativeRef.current) {
+          narrativeRef.current = appendCoachUtterance(
+            narrativeRef.current,
+            summaryComment,
+          );
+        }
         maybeSpeak(summaryComment);
       }).catch(() => {});
+    }
+
+    // ── Centralised state reset ────────────────────────────────────
+    // Every session-scoped ref returns to a clean slate so the next
+    // startSession doesn't inherit stale playback / segment / window
+    // state. Previously some of these reset inline on startSession
+    // and others reset via downstream effects; the split caused at
+    // least one fragility (realtimeWindowRef growing across sessions
+    // if the user ended without ever stopping playback first).
+    // Shuffle-state and chip-recency intentionally persist across
+    // sessions — see their declaration sites.
+    narrativeRef.current = null;
+    gatekeeperRef.current = null;
+    realtimeWindowRef.current = [];
+    beatsSinceLastCheckRef.current = 0;
+    beatsInSegmentRef.current = 0;
+    wasPlayingRef.current = false;
+    segmentStartRef.current = Date.now();
+    // Cancel any pending Signal A debounce — a config change committed
+    // post-endSession would fire boundary_signal_a against a null
+    // gatekeeper and panic the realtime path.
+    if (boundaryDebounceRef.current !== null) {
+      window.clearTimeout(boundaryDebounceRef.current);
+      boundaryDebounceRef.current = null;
     }
   }, [active, evaluation, bpm, timeSignature, startedAt, presetId, presetName, maybeSpeak, instrumentLabel]);
 
@@ -362,14 +1308,48 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     };
     setMessages((prev) => [...prev, userMsg]);
 
+    // Log the user's question in the narrative so the coach LLM sees
+    // recent chat turns inline with the session arc.
+    if (narrativeRef.current) {
+      narrativeRef.current = appendUserAction(
+        narrativeRef.current,
+        `User asked: "${question.trim()}"`,
+      );
+    }
+
+    // C4 cooldown reset — user engagement signal. The plan calls for
+    // a clean cooldown slate when the player types because they've
+    // told us they're listening. Trend confirmations and bestStreak
+    // are preserved.
+    if (gatekeeperRef.current) {
+      gatekeeperRef.current = resetCooldowns(
+        gatekeeperRef.current,
+        Date.now(),
+      );
+    }
+
+    // Capture a token so the reply is dropped if the user starts a new
+    // session before the LLM responds (sid bump) OR ends the session
+    // without restarting (activeRef flip). Without either guard, the
+    // answer to the OLD session's question would land in a new/ended
+    // feed (and be spoken aloud over silence or a fresh greeting).
+    const token = createSessionToken(sessionIdRef, activeRef);
+
     // Generate reply in background
     (async () => {
       const segments = segmentReportsRef.current;
       const aggregated = segments.length > 0 ? aggregateReports(segments.map(s => s.report)) : null;
-      const accuracy = aggregated && aggregated.totalBeats > 0
-        ? Math.round((aggregated.hitsCount / aggregated.totalBeats) * 100) : 0;
+      // Scored-beat denominator (not totalBeats) — same denominator as
+      // the Rust score and every other accuracy surface. See
+      // `src/coach/reportStats.ts` for the regression history.
+      const accuracy = aggregated ? accuracyPct(aggregated) : 0;
+      // v0.10: dropped `Grade:` from the chat session context. The UI
+      // no longer surfaces letter grades, so feeding them to the LLM
+      // just nudges it toward grade-flavoured language ("Tough
+      // session", "rough patch") which contradicts the warmer framing
+      // we're going for. Score (0-100) carries the same signal.
       const sessionData = aggregated
-        ? `BPM: ${bpm}, Accuracy: ${accuracy}%, Score: ${aggregated.score}, Grade: ${aggregated.grade}, Avg deviation: ${aggregated.meanDeviationMs.toFixed(1)}ms, Streak: ${aggregated.longestStreak}`
+        ? `BPM: ${bpm}, Accuracy: ${accuracy}%, Score: ${aggregated.score}, Avg deviation: ${aggregated.meanDeviationMs.toFixed(1)}ms, Streak: ${aggregated.longestStreak}`
         : "No session data yet.";
 
       let reply = "I don't have enough session data to answer that yet. Start playing and I'll have more to work with!";
@@ -378,9 +1358,14 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         if (presetId) {
           try {
             const history = await getSessionHistory();
-            const presetSessions = history.filter((s) => s.presetId === presetId);
-            if (presetSessions.length > 0) {
-              historyContext = "\n" + compactPresetSummary(presetName ?? "", presetSessions) + "\n";
+            const summary = summarizePreset(presetId, presetName, history);
+            if (summary.sessionCount > 0) {
+              const issues = detectRecurringIssues(summary);
+              const stamina = detectStaminaPattern(history, presetId);
+              historyContext =
+                "\n" +
+                formatPresetSummaryForLLM(summary, { ...issues, stamina }) +
+                "\n";
             }
           } catch { /* skip history */ }
         }
@@ -392,9 +1377,22 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
             ).join("\n") + "\n"
           : "";
 
-        const context = `Current session data:\n${sessionData}\nInstrument: ${instrumentLabel}${historyContext}${conversationContext}\nUser asks: ${question}\nAnswer concisely based only on the data above.`;
+        const narrativeBlock = narrativeRef.current
+          ? `\n${formatForLLM(narrativeRef.current)}\n`
+          : "";
+
+        const context = `Current session data:\n${sessionData}\nInstrument: ${instrumentLabel}${historyContext}${narrativeBlock}${conversationContext}\nUser asks: ${question}\nAnswer concisely based only on the data above.`;
         reply = await coachGenerate(context);
       } catch { /* use fallback */ }
+
+      // Drop stale chat replies — either the user is in a new session
+      // (sid bump, answer was generated against OLD context) or they
+      // ended without restarting (speaking the reply after the
+      // session-end card landed would be jarring).
+      if (token.isStaleOrInactive()) {
+        coachDebug("chat.discard-stale-or-inactive", { capturedAt: token.capturedAt, current: sessionIdRef.current, active: activeRef.current });
+        return;
+      }
 
       const replyMsg: FeedMessage = {
         id: crypto.randomUUID(),
@@ -403,9 +1401,162 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         content: reply,
       };
       setMessages((prev) => [...prev, replyMsg]);
+      if (narrativeRef.current) {
+        narrativeRef.current = appendCoachUtterance(
+          narrativeRef.current,
+          reply,
+        );
+      }
       maybeSpeak(reply);
     })();
   }, [bpm, presetId, presetName, maybeSpeak, instrumentLabel]);
+
+  /**
+   * Phase 5 — route a chip tap (or its follow-up affordance) into the feed.
+   *
+   * Three actions are supported:
+   *   - `answer`: appends a user-chat bubble (the chip label, so the
+   *     transcript reads naturally) and a coach-chat bubble (the
+   *     pre-resolved answer text). For LLM chips (`answer === null`)
+   *     the chip is routed into the existing chat pipeline so the
+   *     model gets to handle it.
+   *   - `set-bpm`: applies a delta to the current BPM via the optional
+   *     `setBpm` callback (no-op when not wired). The delta is clamped
+   *     to the metronome's safe range to mirror chip rendering.
+   *   - `open-chat`: focuses the input via the registered callback so
+   *     the user can type a free-form question.
+   *
+   * The chip pathway is the ONLY way LLM chips reach `sendChat` — the
+   * pre-built `chip.label` becomes the user's "question" so the model
+   * sees what the user actually clicked.
+   */
+  const handleChipAction = useCallback((action: {
+    kind: "answer" | "set-bpm" | "open-chat" | "take-break" | "clear-calibration" | "dismiss-affordance";
+    messageId?: string;
+    chip?: FeedChip;
+    bpmDelta?: number;
+    durationMs?: number;
+  }) => {
+    switch (action.kind) {
+      case "answer": {
+        const chip = action.chip;
+        if (!chip) return;
+        // User-chat bubble first so the transcript reads naturally.
+        const userMsg: FeedMessage = {
+          id: crypto.randomUUID(),
+          type: "user-chat",
+          timestamp: Date.now(),
+          content: chip.label,
+        };
+        setMessages((prev) => [...prev, userMsg]);
+        if (narrativeRef.current) {
+          narrativeRef.current = appendUserAction(
+            narrativeRef.current,
+            `User tapped: "${chip.label}"`,
+          );
+        }
+        if (chip.answer != null) {
+          // Canned / template-fill — answer was resolved at chip
+          // selection time. Land it immediately.
+          const coachMsg: FeedMessage = {
+            id: crypto.randomUUID(),
+            type: "coach-chat",
+            timestamp: Date.now(),
+            content: chip.answer,
+          };
+          setMessages((prev) => [...prev, coachMsg]);
+          if (narrativeRef.current) {
+            narrativeRef.current = appendCoachUtterance(
+              narrativeRef.current,
+              chip.answer,
+            );
+          }
+          maybeSpeak(chip.answer, "normal");
+        } else {
+          // LLM pathway — fall through to the chat pipeline so the
+          // model can handle the chip label as a question.
+          sendChatRef.current?.(chip.label);
+        }
+        break;
+      }
+      case "set-bpm": {
+        const delta = action.bpmDelta ?? 0;
+        if (delta === 0 || !setBpm) return;
+        const next = Math.max(20, Math.min(300, bpm + delta));
+        setBpm(next);
+        // Resolving an affordance hides the buttons but leaves the
+        // tip text in place. The intervention's rate-cap entry was
+        // already committed when the tip emitted, so accepting OR
+        // dismissing both just close the buttons.
+        if (action.messageId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === action.messageId ? { ...m, affordanceResolved: true } : m,
+            ),
+          );
+        }
+        break;
+      }
+      case "take-break": {
+        // For now, just resolve the affordance and log a coach
+        // utterance. The actual "30s rest timer" UX is a follow-up —
+        // wiring playback control through the session hook would
+        // require threading another callback, which we defer. The
+        // intervention text itself ("12 minutes in — pause for 30
+        // seconds?") is already in the feed and gives the player the
+        // intent; the affordance buttons go away on tap.
+        if (action.messageId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === action.messageId ? { ...m, affordanceResolved: true } : m,
+            ),
+          );
+        }
+        break;
+      }
+      case "clear-calibration": {
+        // Plan §"Initial 10" #6 — Calibration retry. Fired by the
+        // `calibration-retry` intervention on `low_confidence`. Clears
+        // the per-instrument cache entry so the next session's timing
+        // analyzer re-learns the offset from real onsets instead of
+        // re-seeding the bad value. Best-effort: if the cache call
+        // throws (e.g. IPC race during session-end), still close the
+        // affordance — the user already declared intent.
+        clearCalibrationCacheEntry(instrument, evaluation.selectedDevice ?? null)
+          .catch(() => {
+            // swallow — affordance still resolves
+          });
+        if (action.messageId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === action.messageId ? { ...m, affordanceResolved: true } : m,
+            ),
+          );
+        }
+        break;
+      }
+      case "dismiss-affordance": {
+        if (action.messageId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === action.messageId ? { ...m, affordanceResolved: true } : m,
+            ),
+          );
+        }
+        break;
+      }
+      case "open-chat": {
+        chatInputFocusRef.current?.();
+        break;
+      }
+    }
+  }, [bpm, setBpm, maybeSpeak, instrument, evaluation.selectedDevice]);
+
+  // `sendChatRef` lets `handleChipAction` reach `sendChat` without
+  // declaring a circular `useCallback` dependency (handleChipAction →
+  // sendChat → handleChipAction). The ref is patched on every render
+  // below.
+  const sendChatRef = useRef<((q: string) => void) | null>(null);
 
   const clearMessages = useCallback(() => {
     setMessages([]);
@@ -414,6 +1565,12 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
   const toggleCard = useCallback(() => {
     setCardOpen((v) => !v);
   }, []);
+
+  // Keep the chat-send ref in sync so chip LLM actions can route into
+  // it without forcing a circular hook dependency.
+  useEffect(() => {
+    sendChatRef.current = sendChat;
+  }, [sendChat]);
 
   return {
     active,
@@ -425,31 +1582,318 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     sendChat,
     clearMessages,
     toggleCard,
-    setCardOpen,
+    handleChipAction,
+    registerChatFocus,
   };
 }
 
+/**
+ * Phase 5 — derive a rough "current score" from the recent beat
+ * feedback window. This is intentionally a coarse approximation —
+ * the canonical score comes from `getSessionReport()` (Rust side),
+ * but that's only available after a segment ends. For mid-segment
+ * intervention checks we use the in-flight feedback window: roughly
+ * the proportion of "perfect" + "good" hits, scaled to 0–100.
+ *
+ * Returning 0 when the window is empty is correct — without data,
+ * intervention predicates fall through (e.g. BPM-drop requires score
+ * < 70 so an empty-window 0 would qualify; we guard against this at
+ * the call site by ALSO requiring `segments_completed >= 1` before
+ * BPM-drop fires).
+ */
+function latestScoreFromWindow(window: BeatFeedback[]): number {
+  if (window.length === 0) return 0;
+  const weight = (c: BeatFeedback["classification"]) =>
+    c === "perfect" ? 100 : c === "good" ? 80 : c === "ok" ? 50 : 0;
+  const total = window.reduce((sum, fb) => sum + weight(fb.classification), 0);
+  return Math.round(total / window.length);
+}
+
+/**
+ * Phase 5 — adapter from the gatekeeper event + live session state to
+ * the intervention selector. Kept thin: pure data assembly + delegate.
+ *
+ * The intervention layer is strictly additive — when it returns null
+ * the gatekeeper's template ships unchanged. When it returns a
+ * `SelectedIntervention` the caller replaces the template copy and
+ * attaches the affordance.
+ */
+function pickInterventionForEvent(
+  event: import("../coach/gatekeeper").GatekeeperEvent,
+  bpm: number,
+  score: number,
+  sessionStartMs: number,
+  segmentsCompleted: number,
+  state: InterventionRateState,
+): SelectedIntervention | null {
+  const now = Date.now();
+  const ctx: InterventionContext = {
+    bpm,
+    score,
+    sessionDurationMs: Math.max(0, now - sessionStartMs),
+    segmentsCompleted,
+  };
+  return pickIntervention(event, ctx, state, now);
+}
+
+/**
+ * Phase 5 — build the chip list for a mini-report.
+ *
+ * Wraps `selectChips` + `answerChip` so the call site in the
+ * mini-report effect stays compact. The selector is deterministic
+ * given the input context, so two identical sessions show different
+ * chips only because of recency tracking (chips shown last session are
+ * scored ×0.7). Recency state lives in localStorage so it persists
+ * across app restarts; the in-memory `recentIds` snapshot is the
+ * pre-mini-report set (chips chosen for THIS report are saved AFTER
+ * selection so they get penalized next time, not now).
+ *
+ * The returned list is the UI shape (`FeedChip[]`): chip id + label +
+ * resolved answer + optional affordance. The CoachCard never has to
+ * know about the `Chip` type — just renders what's here.
+ *
+ * Side effect: persists the selected chip ids via
+ * `saveRecentChipIds(...)` so next session's selector applies the
+ * recency penalty.
+ */
+function buildChipsForMiniReport(args: {
+  report: SessionReport;
+  bpm: number;
+  timeSignature: number;
+  segments: SessionSegment[];
+  previousSessionScore?: number;
+}): FeedChip[] {
+  const storage: RecencyStorage =
+    typeof window !== "undefined" && window.localStorage
+      ? window.localStorage
+      : { getItem: () => null, setItem: () => {} };
+
+  const recentIds = loadRecentChipIds(storage);
+
+  // Sustained-rushing / -dragging flags look at the most recent ≤3
+  // segments. We don't bother with a more sophisticated trend test here
+  // — the chip selector's contextBonus uses these as hints, not hard
+  // gates, and the gatekeeper already has the rigorous logic.
+  const recent = args.segments.slice(-3);
+  const allRushing = recent.length > 0 && recent.every((s) => s.report.meanDeviationMs < -5);
+  const allDragging = recent.length > 0 && recent.every((s) => s.report.meanDeviationMs > 5);
+
+  const ctx: ChipContext = {
+    report: args.report,
+    bpm: args.bpm,
+    timeSignature: args.timeSignature,
+    previousSessionScore: args.previousSessionScore,
+    segmentsCompleted: args.segments.length,
+    sustainedRushing: allRushing,
+    sustainedDragging: allDragging,
+    recentChipIds: recentIds,
+    segments: args.segments,
+  };
+
+  const selected = selectChips(ctx);
+
+  // Persist the new recency set BEFORE building the UI shape so a
+  // mid-render crash doesn't desync localStorage.
+  saveRecentChipIds(storage, selected.map((s) => s.chip.id));
+
+  return selected.map((sel) => {
+    const chip = sel.chip;
+    const answer = answerChip(chip, ctx);
+    const affordanceLabel = renderAffordanceLabel(chip, ctx);
+    return {
+      id: chip.id,
+      label: chip.label,
+      answer,
+      affordance: chip.followUp
+        ? {
+            label: affordanceLabel ?? chip.followUp.label,
+            action: chip.followUp.action,
+            bpmDelta: chip.followUp.bpmDelta,
+          }
+        : undefined,
+    };
+  });
+}
+
 function formatMiniReport(report: SessionReport): string {
-  const accuracy = report.totalBeats > 0
-    ? Math.round((report.hitsCount / report.totalBeats) * 100)
-    : 0;
+  // Accuracy uses scored beats (hits + misses), NOT totalBeats — see
+  // `src/coach/reportStats.ts` for the rationale. Keeping this string
+  // in sync with the Rust score depends on that denominator.
+  const accuracy = accuracyPct(report);
   return `Score ${report.score} · ${accuracy}% hits · avg ${Math.abs(report.meanDeviationMs).toFixed(1)}ms ${report.meanDeviationMs < 0 ? "early" : "late"}`;
 }
 
 /** Format context for the coach to generate a mini-report comment. */
-function formatMiniReportContext(bpm: number, timeSignature: number, accuracy: number, report: SessionReport, instrumentLabel: string): string {
+function formatMiniReportContext(
+  bpm: number,
+  timeSignature: number,
+  accuracy: number,
+  report: SessionReport,
+  instrumentLabel: string,
+  narrativeBlock?: string,
+): string {
   const pocket = report.meanDeviationMs < -5 ? "ahead of the beat (rushing)"
     : report.meanDeviationMs > 5 ? "behind the beat (dragging)"
     : "right on the beat";
   const style = report.gridCorrelation > 0.8 ? "structured exercise (high grid correlation)"
     : report.gridCorrelation > 0.3 ? "semi-structured playing (medium grid correlation)"
     : "free/improvisational playing (low grid correlation)";
-  return `The player (${instrumentLabel}) just finished a passage. Generate a brief coaching comment.\nBPM: ${bpm}, Time signature: ${timeSignature}/4\nPlaying style: ${style}\nAccuracy: ${accuracy}% (${report.perfectCount} perfect, ${report.goodCount} good, ${report.okCount} ok, ${report.missCount} miss)\nTiming tendency: ${pocket} (avg ${report.meanDeviationMs.toFixed(1)}ms)\nLongest clean streak: ${report.longestStreak} beats`;
+  const narrative = narrativeBlock ? `\n\n${narrativeBlock}` : "";
+
+  // Surface skipped-beat presence explicitly. If most metronome ticks
+  // had no detected onset, the player wasn't really "trying and
+  // missing" — they were warming up, talking, or playing too quietly
+  // to be heard. Without this hint, the LLM defaults to "rough patch"
+  // / "ease the tempo down" which feels accusatory and wrong.
+  const scored = scoredBeats(report);
+  const skipped = report.skippedBeats ?? Math.max(0, report.totalBeats - scored);
+  const presencePct = report.totalBeats > 0
+    ? Math.round((scored / report.totalBeats) * 100)
+    : 0;
+  // Threshold: if fewer than 60% of beats had any onset, frame the
+  // comment around "I'm only hearing some of your playing" not
+  // "rough patch."
+  const lowSignalHint = report.totalBeats > 8 && presencePct < 60
+    ? `\nIMPORTANT: only ${presencePct}% of beats had a detected onset (${skipped} skipped of ${report.totalBeats}). The player may have been warming up, not playing yet, or the input level may be too low — DO NOT say "rough patch" or "ease the tempo down." Acknowledge that you're not hearing many beats and ask them gently to check their input level or play a touch louder.`
+    : "";
+
+  // `Score:` MUST stay on its own line and lead the metric block —
+  // the Rust template-fallback parser (`coach.rs::extract_int`) keys
+  // off this exact prefix to surface the composite four-component
+  // score as the headline number in the no-LLM branch. Without it the
+  // template falls back to accuracy and the card reads "Rough patch at
+  // 50%" beside a score-65 badge (v0.9 bug). Keep this line stable
+  // unless you also update `format_mini_report` + its extractor.
+  //
+  // Plain integer (no `/100` suffix): `extract_int` greedily parses
+  // the first whitespace-separated token after the prefix and fails
+  // on `75/100`, which silently turned the score back into 0 in the
+  // wild. Keeping the value bare gives the parser something it can
+  // actually consume.
+  return `The player (${instrumentLabel}) just finished a passage. Generate a brief coaching comment.
+BPM: ${bpm}, Time signature: ${timeSignature}/4
+Score: ${report.score} out of 100
+Playing style: ${style}
+Accuracy: ${accuracy}% of attempted beats (${report.perfectCount} perfect, ${report.goodCount} good, ${report.okCount} ok, ${report.missCount} miss out of ${scored} attempted)
+Beats with detected onset: ${presencePct}% (${scored} of ${report.totalBeats} total ticks)
+Timing tendency: ${pocket} (avg ${report.meanDeviationMs.toFixed(1)}ms)
+Longest clean streak: ${report.longestStreak} beats${lowSignalHint}${narrative}`;
 }
 
 /** Format context for end-of-session summary. */
-function formatSessionContext(durationSecs: number, segmentCount: number, score: number, grade: string, totalBeats: number, accuracy: number, meanDeviation: number, longestStreak: number, instrumentLabel: string): string {
-  return `The player (${instrumentLabel}) has ended their practice session. Generate a brief session summary.\nDuration: ${durationSecs} seconds, ${segmentCount} segment(s)\nOverall score: ${score}/100 (grade ${grade})\nTotal beats: ${totalBeats}, accuracy: ${accuracy}%\nTiming tendency: avg ${meanDeviation.toFixed(1)}ms deviation\nLongest clean streak: ${longestStreak} beats\nKeep it encouraging and suggest one specific thing to focus on next time.`;
+function formatSessionContext(
+  durationSecs: number,
+  segmentCount: number,
+  score: number,
+  totalBeats: number,
+  accuracy: number,
+  meanDeviation: number,
+  longestStreak: number,
+  instrumentLabel: string,
+  narrativeBlock?: string,
+): string {
+  const narrative = narrativeBlock ? `\n\n${narrativeBlock}` : "";
+  // `Score:` and `Accuracy:` MUST stay capitalised and on their own
+  // lines — the Rust template-fallback parser
+  // (`coach.rs::extract_int` / `extract_metric`) keys off these exact
+  // prefixes via case-sensitive `str::contains`. v0.9 shipped this
+  // block with lowercase `score:`/`accuracy:` and the no-LLM session
+  // summary always read "Tough session at 0% accuracy" because both
+  // extractors fell back to 0. Keep these labels in lockstep with
+  // `formatMiniReportContext` above.
+  //
+  // The score line emits a bare integer (no `/100` suffix) for the
+  // same reason `formatMiniReportContext` does: `extract_int` greedy-
+  // parses the first whitespace-separated token after the prefix and
+  // chokes on `75/100`.
+  //
+  // v0.10: dropped `(grade X)` from the score line. The UI no longer
+  // surfaces letter grades (see `CoachFeedMessage.tsx` rationale) so
+  // pulling the letter into the LLM prompt would just push the model
+  // back toward grade-flavoured language ("Tough session", "rough
+  // patch") for the very players we're trying to encourage.
+  return `The player (${instrumentLabel}) has ended their practice session. Generate a brief, encouraging summary that names something specific to keep working on. Do NOT use letter grades or evaluative framing like "tough session" or "rough patch."
+Duration: ${durationSecs} seconds, ${segmentCount} segment(s)
+Score: ${score} out of 100
+Total beats: ${totalBeats}
+Accuracy: ${accuracy}% of attempted beats
+Timing tendency: avg ${meanDeviation.toFixed(1)}ms deviation
+Longest clean streak: ${longestStreak} beats${narrative}`;
+}
+
+/**
+ * Phase 5 — pick the previous session's score for chip context.
+ *
+ * Prefers a preset-matched session when one exists (so the user's
+ * "compare to last time" question lands on the SAME exercise), falling
+ * back to the most-recent session overall. Returns `undefined` when
+ * history is empty so the `compare-last-session` chip's `qualifies`
+ * predicate naturally filters it out — no special-casing in the
+ * selector required.
+ */
+function pickPreviousSessionScore(
+  history: import("../types").SavedSession[] | undefined,
+  presetId?: string,
+): number | undefined {
+  if (!history || history.length === 0) return undefined;
+  const sorted = [...history].sort((a, b) => b.timestamp - a.timestamp);
+  const candidate = presetId
+    ? sorted.find((s) => s.presetId === presetId) ?? sorted[0]
+    : sorted[0];
+  return candidate?.report.score;
+}
+
+/**
+ * Build a brief one-liner about the most recent session for the
+ * narrative session-start line, e.g. `"last session: 88% at 135 BPM"`.
+ * Prefers a preset-matched session when available so the seed line
+ * stays relevant for re-running the same exercise. When the preset
+ * has crossed the C3 minimum-data gate, augments with a recurring
+ * issue hint ("ceiling at 140 BPM").
+ */
+function buildPriorSummary(
+  history: import("../types").SavedSession[] | undefined,
+  presetId?: string,
+  presetName?: string,
+): string | undefined {
+  if (!history || history.length === 0) return undefined;
+  // Newest-first ordering matches existing storage convention.
+  const sorted = [...history].sort((a, b) => b.timestamp - a.timestamp);
+  const candidate = presetId
+    ? sorted.find((s) => s.presetId === presetId) ?? sorted[0]
+    : sorted[0];
+  if (!candidate) return undefined;
+  // Scored-beat denominator (hits + miss) — same as everywhere else.
+  // Returning `null` when no beats were scored suppresses the "%" frag
+  // rather than emitting "0% " for an empty session.
+  const scored = scoredBeats(candidate.report);
+  const acc = scored > 0 ? accuracyPct(candidate.report) : null;
+  const accFrag = acc != null ? `${acc}% ` : "";
+  let line = `last session: ${accFrag}at ${candidate.bpm} BPM, score ${candidate.report.score}`;
+  if (presetId) {
+    const summary = summarizePreset(presetId, presetName, history);
+    const issues = detectRecurringIssues(summary);
+    if (issues.bpmCeiling) {
+      line += `; preset ceiling ~${issues.bpmCeiling.bpmLow}-${issues.bpmCeiling.bpmHigh - 1} BPM`;
+    } else if (issues.timingTendency) {
+      line += `; tends to ${issues.timingTendency.direction}`;
+    }
+  }
+  return line;
+}
+
+/**
+ * Render a compact pocket note ("solid pocket", "rushed", "dragged")
+ * for embedding in the narrative `Segment N ended:` line. Returns an
+ * empty string when the deviation is unremarkable so the appended text
+ * stays tight.
+ */
+function shortPocketNote(report: SessionReport): string | undefined {
+  const dev = report.meanDeviationMs;
+  if (dev < -10) return "rushed";
+  if (dev > 10) return "dragged";
+  if (Math.abs(dev) <= 5 && report.longestStreak >= 16) return "solid pocket";
+  return undefined;
 }
 
 
@@ -480,8 +1924,9 @@ function aggregateReports(reports: SessionReport[]): SessionReport {
     if (r.gridCorrelation > 0) allGridCorrelations.push(r.gridCorrelation);
   }
 
-  const scored = hitsCount + missCount;
-  const hitRate = scored > 0 ? hitsCount / scored : 0;
+  // accuracyRatio() returns hits/(hits+miss) with a 0 floor when no
+  // beats were scored — matches the helper's contract in reportStats.ts.
+  const hitRate = accuracyRatio({ hitsCount, missCount });
 
   const meanDev = allDeviations.length > 0
     ? allDeviations.reduce((a, b) => a + b, 0) / allDeviations.length
@@ -536,148 +1981,83 @@ function aggregateReports(reports: SessionReport[]): SessionReport {
   };
 }
 
-/** Build a compacted preset summary from session history — small enough for model context. */
-function compactPresetSummary(presetName: string, sessions: { timestamp: number; bpm: number; report: { score: number; grade: string; meanDeviationMs: number; longestStreak: number; hitsCount: number; totalBeats: number } }[]): string {
-  if (sessions.length === 0) return "";
-  const count = sessions.length;
-  const firstTs = sessions[sessions.length - 1].timestamp;
-  const lastTs = sessions[0].timestamp;
-  const spanDays = Math.max(1, Math.round((lastTs - firstTs) / (1000 * 60 * 60 * 24)));
-  const bestScore = Math.max(...sessions.map((s) => s.report.score));
-  const maxBpm = Math.max(...sessions.map((s) => s.bpm));
-  const avgScore = Math.round(sessions.reduce((a, s) => a + s.report.score, 0) / count);
-  const last = sessions[0];
-  const lastAccuracy = last.report.totalBeats > 0 ? Math.round((last.report.hitsCount / last.report.totalBeats) * 100) : 0;
-
-  // Find comfortable BPM (highest BPM with >85% accuracy)
-  const comfortableBpm = sessions
-    .filter((s) => s.report.totalBeats > 0 && (s.report.hitsCount / s.report.totalBeats) > 0.85)
-    .reduce((max, s) => Math.max(max, s.bpm), 0);
-
-  // Trend: compare last 3 vs first 3
-  const recent = sessions.slice(0, Math.min(3, count));
-  const early = sessions.slice(Math.max(0, count - 3));
-  const recentAvg = recent.reduce((a, s) => a + s.report.score, 0) / recent.length;
-  const earlyAvg = early.reduce((a, s) => a + s.report.score, 0) / early.length;
-  const trend = recentAvg > earlyAvg + 5 ? "improving" : recentAvg < earlyAvg - 5 ? "declining" : "steady";
-
-  const daysSince = Math.round((Date.now() - lastTs) / (1000 * 60 * 60 * 24));
-  const lastAgo = daysSince === 0 ? "today" : daysSince === 1 ? "yesterday" : `${daysSince} days ago`;
-
-  return `Preset: ${presetName}\nSessions: ${count} over ${spanDays} day(s)\nBest score: ${bestScore}/100\nAvg score: ${avgScore}/100\nComfortable BPM: ${comfortableBpm || "N/A"} (>85% accuracy)\nMax BPM attempted: ${maxBpm}\nTrend: ${trend}\nLast session: ${lastAgo}, score ${last.report.score}/100 at ${last.bpm} BPM, ${lastAccuracy}% accuracy`;
+/**
+ * Map a gatekeeper event to one of the three template severities.
+ *
+ * Heuristic per the plan's "voice rules":
+ *   - Always-positive scenarios (personal best, recovery, milestones,
+ *     new band locked) → `encouragement`.
+ *   - Always-corrective scenarios (accuracy drop, fatigue) →
+ *     `correction`.
+ *   - Trend scenarios graduate: `neutral` while still being confirmed
+ *     in the written channel, `correction` once the gatekeeper has
+ *     promoted them to spoken (two consecutive confirmations).
+ *   - Everything else → `neutral`.
+ *
+ * Kept inline so changes to scenario→severity mapping live next to
+ * the wiring point rather than in a deep module.
+ */
+function severityForEvent(event: GatekeeperEvent): Severity {
+  switch (event.scenario) {
+    case "personal_best_streak":
+    case "recovery":
+    case "tempo_milestone":
+    case "new_band_locked":
+      return "encouragement";
+    case "accuracy_drop":
+    case "fatigue":
+      return "correction";
+    case "rushing_trend":
+    case "dragging_trend":
+      return event.tier === "spoken" ? "correction" : "neutral";
+    case "low_confidence":
+    case "check_in":
+    case "boundary_signal_a":
+    case "boundary_signal_b":
+    default:
+      return "neutral";
+  }
 }
 
-/** Analyze a sliding window of beat feedback for real-time coaching trends. */
-function analyzeRealtimeTrend(
-  window: BeatFeedback[],
-  prevBestStreak: number,
-): { template: string; context: string; urgency: "urgent" | "normal"; streak: number } | null {
-  if (window.length < 8) return null;
-
-  const hits = window.filter((fb) => fb.classification !== "miss" && fb.classification !== "skipped");
-  const misses = window.filter((fb) => fb.classification === "miss");
-  const hitRate = hits.length / window.length;
-
-  // Compute deviation stats from hits only
-  const deviations = hits.map((fb) => fb.deviationMs);
-  const meanDev = deviations.length > 0
-    ? deviations.reduce((a, b) => a + b, 0) / deviations.length : 0;
-
-  // Trend detection: compare first half vs second half of the window
-  const mid = Math.floor(deviations.length / 2);
-  const firstHalf = deviations.slice(0, mid);
-  const secondHalf = deviations.slice(mid);
-  const firstMean = firstHalf.length > 0 ? firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length : 0;
-  const secondMean = secondHalf.length > 0 ? secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length : 0;
-  const drift = secondMean - firstMean;
-
-  // Compute current streak of non-miss beats from the end
-  let streak = 0;
-  for (let i = window.length - 1; i >= 0; i--) {
-    if (window[i].classification === "miss") break;
-    if (window[i].classification !== "skipped") streak++;
-  }
-
-  // Priority 1: Significant rushing (urgent)
-  if (meanDev < -12 && drift < -3) {
-    return {
-      template: `You're rushing — average ${Math.abs(meanDev).toFixed(0)}ms early and still speeding up.`,
-      context: `The player is rushing during active play. Generate a brief coaching tip (1 sentence).\nAvg deviation: ${meanDev.toFixed(1)}ms (negative = early)\nDrift trend: getting ${Math.abs(drift).toFixed(1)}ms more early over the last ${window.length} beats\nHit rate: ${Math.round(hitRate * 100)}%\nBe direct but encouraging.`,
-      urgency: "urgent",
-      streak,
-    };
-  }
-
-  // Priority 2: Significant dragging (urgent)
-  if (meanDev > 12 && drift > 3) {
-    return {
-      template: `You're dragging — average ${meanDev.toFixed(0)}ms late and falling further behind.`,
-      context: `The player is dragging during active play. Generate a brief coaching tip (1 sentence).\nAvg deviation: ${meanDev.toFixed(1)}ms (positive = late)\nDrift trend: getting ${drift.toFixed(1)}ms more late over the last ${window.length} beats\nHit rate: ${Math.round(hitRate * 100)}%\nBe direct but encouraging.`,
-      urgency: "urgent",
-      streak,
-    };
-  }
-
-  // Priority 3: Accuracy drop (urgent)
-  if (hitRate < 0.5 && misses.length >= 3) {
-    return {
-      template: `Accuracy is dropping — ${misses.length} misses in the last ${window.length} beats. Consider slowing down.`,
-      context: `The player's accuracy has dropped significantly. Generate a brief coaching tip (1 sentence).\nHit rate: ${Math.round(hitRate * 100)}% over the last ${window.length} beats\nMisses: ${misses.length}\nAvg deviation: ${meanDev.toFixed(1)}ms\nSuggest slowing down or focusing. Be supportive.`,
-      urgency: "urgent",
-      streak,
-    };
-  }
-
-  // Priority 4: New personal best streak (urgent — positive)
-  if (streak >= 16 && streak > prevBestStreak && prevBestStreak >= 8) {
-    return {
-      template: `${streak} beats clean — new personal best streak! Keep it locked in.`,
-      context: `The player just hit a new personal best clean streak during this session. Generate a brief, celebratory coaching comment (1 sentence).\nCurrent streak: ${streak} beats without a miss\nPrevious best this session: ${prevBestStreak}\nKeep it short and motivating.`,
-      urgency: "urgent",
-      streak,
-    };
-  }
-
-  // Priority 5: Consistent good playing (normal — appears in feed silently)
-  if (hitRate > 0.85 && Math.abs(meanDev) < 8 && streak >= 12) {
-    return {
-      template: `Solid run — ${Math.round(hitRate * 100)}% accuracy, staying in the pocket.`,
-      context: `The player is playing consistently well. Generate a brief positive coaching note (1 sentence).\nHit rate: ${Math.round(hitRate * 100)}%\nAvg deviation: ${meanDev.toFixed(1)}ms\nCurrent streak: ${streak} beats\nKeep it brief, acknowledge the consistency.`,
-      urgency: "normal",
-      streak,
-    };
-  }
-
-  // Priority 6: Slight rushing or dragging tendency (normal)
-  if (Math.abs(meanDev) > 8 && hits.length >= 8) {
-    const tendency = meanDev < 0 ? "early" : "late";
-    return {
-      template: `You're sitting about ${Math.abs(meanDev).toFixed(0)}ms ${tendency} — not bad, just a gentle ${meanDev < 0 ? "rush" : "drag"}.`,
-      context: `The player has a slight timing tendency. Generate a brief observation (1 sentence).\nAvg deviation: ${meanDev.toFixed(1)}ms (${tendency})\nHit rate: ${Math.round(hitRate * 100)}%\nThis is a gentle note, not urgent. Be encouraging.`,
-      urgency: "normal",
-      streak,
-    };
-  }
-
-  return null;
-}
-
-/** Play a subtle notification chime using Web Audio API. */
-function playChime(freq: number = 880) {
-  try {
-    const ctx = new AudioContext();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = "sine";
-    osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0.15, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.3);
-    osc.onended = () => ctx.close();
-  } catch { /* audio context not available */ }
+/**
+ * Build the LLM rephrase prompt. The model never decides WHAT to say
+ * — it only rephrases the filled template for variety, preserving
+ * every number and the scenario's intent.
+ *
+ * NOTE: We deliberately do NOT pass the structured `context` JSON to
+ * the model. Local LLMs ignore key names and grab the most prominent
+ * number — e.g. `{"priorOffsetMs": 0}` got interpreted as "0%
+ * accuracy" and rephrased into a hallucinated "Rough patch at 0% —
+ * ease the tempo down a touch and rebuild from a clean bar." The
+ * template already contains every number the player needs; feeding
+ * the model fewer signals = fewer ways for it to invent things.
+ *
+ * The narrative block is kept because it's free-form prose the model
+ * can use for context-aware phrasing (e.g. acknowledging a previous
+ * segment), and it doesn't carry stray ambiguous numbers.
+ */
+function buildRephrasePrompt(args: {
+  template: string;
+  scenario: ScenarioTag;
+  /**
+   * Deliberately unused at the moment — see the function doc comment.
+   * Kept in the type so callers (and future iterations of this
+   * function) don't have to thread the value through again if we
+   * decide to re-introduce it via a safer formatting strategy.
+   */
+  context?: Record<string, number | string | boolean>;
+  instrumentLabel: string;
+  narrativeBlock: string;
+}): string {
+  return [
+    `Rephrase this practice-coach observation for a player of ${args.instrumentLabel}.`,
+    `Scenario: ${args.scenario}. Keep it 1 sentence, conversational, instrument-appropriate.`,
+    `Preserve EVERY number from the original exactly. DO NOT invent new percentages, facts, or advice.`,
+    `If you cannot rephrase while preserving every number, return the original verbatim.`,
+    ``,
+    `Original: "${args.template}"`,
+    args.narrativeBlock,
+  ].join("\n");
 }
 
 /** Format context for the coach model to make an adaptive drill decision. */
@@ -688,6 +2068,30 @@ function formatAdaptiveEvalContext(req: AdaptiveEvalRequest): string {
     : `${req.currentBpm} of ${req.targetBpm} BPM target (${Math.round(((req.currentBpm - req.startBpm) / Math.max(1, req.targetBpm - req.startBpm)) * 100)}% progress)`;
 
   return `You are coaching a drill session. The player just finished a round. Decide the next tempo change.\n\nCurrent BPM: ${req.currentBpm}\nStart BPM: ${req.startBpm}\nProgress: ${progress}\nAccuracy last round: ${req.accuracyPct}%\nAggressiveness: ${req.aggressiveness}\nStep number: ${req.currentStep}\n\nBased on the accuracy and aggressiveness setting, should the tempo go UP, HOLD, or DOWN?\nReply with exactly one word on the first line: UP, HOLD, or DOWN.\nOptionally add a brief coaching comment on the second line (1 sentence max).`;
+}
+
+/**
+ * D4 Signal A — render a Signal-A change description used in the
+ * `{change}` template placeholder. Kept human-readable: the coach
+ * voice speaks the result verbatim, e.g. "tempo up to 140 BPM" or
+ * "loading Practice Riff #3". Falls back to a generic "config
+ * changed" for unrecognised kinds so the template still resolves.
+ */
+function formatChangeCopy(c: { kind: string; from: string | number; to: string | number }): string {
+  switch (c.kind) {
+    case "bpm-up":
+      return `tempo up to ${c.to} BPM`;
+    case "bpm-down":
+      return `tempo down to ${c.to} BPM`;
+    case "preset":
+      return c.to === "free play" ? "preset cleared" : `loading "${c.to}"`;
+    case "time-sig":
+      return `time signature ${c.to}/4`;
+    case "instrument":
+      return `switching to ${c.to}`;
+    default:
+      return "config changed";
+  }
 }
 
 /** Parse the model's adaptive decision response. */

@@ -5813,6 +5813,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-store",
  "tauri-plugin-updater",
+ "tokio",
 ]
 
 [[package]]

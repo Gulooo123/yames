@@ -1,0 +1,5 @@
+[install]
+# Walmart corporate network blocks .tgz downloads from registry.npmjs.org
+# via the WAF ("Block Types From Download Media Type Blocklist").
+# Use the internal Proximity proxy registry which mirrors npmjs.org.
+registry = "https://npme.walmart.com"

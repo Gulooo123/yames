@@ -1,16 +1,27 @@
 use crate::audio_input::{AudioDevice, SharedAudioInput};
 use crate::coach::SharedCoachEngine;
 use crate::engine::MetronomeEngine;
+use crate::instrument::Instrument;
 use crate::midi::{MidiBinding, MidiDeviceInfo, MidiMsgType, SharedMidi};
-use crate::onset::SharedOnsetDetector;
+use crate::onset::{SharedOnsetDetector, SharedTempoContext};
 use crate::session::{SessionReport, SharedSessionAccumulator};
 use crate::state::{AppState, SharedState};
 use crate::timing::SharedTimingAnalyzer;
-use crate::tts::SharedTts;
+use crate::tts::{SharedTts, SharedTtsDim};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub struct EngineState(pub Mutex<MetronomeEngine>);
+
+/// Snapshot the current AppState and emit it on the `state-changed`
+/// event. Lock is dropped before the emit so the (synchronous-but-not-
+/// instant) serde serialization can't block any other thread waiting on
+/// the same mutex. Mirrors the emit-after-drop pattern used throughout
+/// the metronome tick thread in `engine.rs`.
+fn emit_state_changed(state: &SharedState, app_handle: &AppHandle) {
+    let snapshot = state.lock().unwrap().clone();
+    let _ = app_handle.emit("state-changed", &snapshot);
+}
 
 /// Persist the current AppState to the store (minus is_playing which is transient).
 fn persist_state(state: &SharedState, app_handle: &AppHandle) {
@@ -38,6 +49,7 @@ fn persist_state(state: &SharedState, app_handle: &AppHandle) {
             "mode": s.speed_ramp.mode,
             "cyclic": s.speed_ramp.cyclic,
         }));
+        store.set("instrument", serde_json::json!(s.instrument.id()));
     }
 }
 
@@ -47,24 +59,40 @@ pub fn get_state(state: State<SharedState>) -> AppState {
 }
 
 #[tauri::command]
-pub fn set_bpm(bpm: u16, state: State<SharedState>, app_handle: AppHandle) {
+pub fn set_bpm(
+    bpm: u16,
+    state: State<SharedState>,
+    tempo_ctx: State<SharedTempoContext>,
+    app_handle: AppHandle,
+) {
     let clamped = bpm.clamp(20, 300);
     {
         let mut s = state.lock().unwrap();
         s.bpm = clamped;
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    // D2 — keep the onset detector's live tempo view in sync so its
+    // adaptive refractory window tracks the current grid immediately
+    // (no need to wait for the next start_evaluation).
+    tempo_ctx.set_bpm(clamped);
+    emit_state_changed(&state, &app_handle);
     persist_state(&state, &app_handle);
 }
 
 #[tauri::command]
-pub fn set_subdivision(subdivision: u8, state: State<SharedState>, app_handle: AppHandle) {
+pub fn set_subdivision(
+    subdivision: u8,
+    state: State<SharedState>,
+    tempo_ctx: State<SharedTempoContext>,
+    app_handle: AppHandle,
+) {
     let valid = subdivision.clamp(1, 6);
     {
         let mut s = state.lock().unwrap();
         s.subdivision = valid;
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    // D2 — mirror into the shared tempo context (see set_bpm).
+    tempo_ctx.set_subdivision(valid);
+    emit_state_changed(&state, &app_handle);
     persist_state(&state, &app_handle);
 }
 
@@ -91,7 +119,7 @@ pub fn toggle_playback(
         s.is_playing = true;
     }
 
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
 }
 
 #[tauri::command]
@@ -113,7 +141,7 @@ pub fn set_playing(
         s.is_playing = false;
     }
 
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
 }
 
 #[tauri::command]
@@ -122,7 +150,7 @@ pub fn set_widget_mode(mode: String, state: State<SharedState>, app_handle: AppH
         let mut s = state.lock().unwrap();
         s.mode = mode;
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
     persist_state(&state, &app_handle);
 }
 
@@ -135,7 +163,7 @@ pub fn set_always_on_top(enabled: bool, state: State<SharedState>, app_handle: A
     if let Some(main_win) = app_handle.get_webview_window("main") {
         let _ = main_win.set_always_on_top(enabled);
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
     persist_state(&state, &app_handle);
 }
 
@@ -148,7 +176,7 @@ pub fn set_widget_always_on_top(enabled: bool, state: State<SharedState>, app_ha
     if let Some(float_win) = app_handle.get_webview_window("floating") {
         let _ = float_win.set_always_on_top(enabled);
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
     persist_state(&state, &app_handle);
 }
 
@@ -189,18 +217,48 @@ pub fn set_theme(theme: String, state: State<SharedState>, app_handle: AppHandle
         let mut s = state.lock().unwrap();
         s.theme = theme;
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
+    persist_state(&state, &app_handle);
+}
+
+/// Update the selected instrument. Accepts the kebab-case ids used by the
+/// React dropdown (`"drums"`, `"electric-guitar"`, …); unknown ids fall
+/// back to `Instrument::Other` for forward compatibility.
+///
+/// The new instrument's `InstrumentProfile` becomes effective for the
+/// *next* DSP segment — current detection-loop state is not rewound mid-
+/// segment (per the plan's "multi-instrument users" rule).
+#[tauri::command]
+pub fn set_instrument(instrument: String, state: State<SharedState>, app_handle: AppHandle) {
+    {
+        let mut s = state.lock().unwrap();
+        s.instrument = Instrument::from_id(&instrument);
+    }
+    emit_state_changed(&state, &app_handle);
     persist_state(&state, &app_handle);
 }
 
 #[tauri::command]
-pub fn set_volume(volume: f32, state: State<SharedState>, app_handle: AppHandle) {
+pub fn set_volume(
+    volume: f32,
+    state: State<SharedState>,
+    dim_state: State<SharedTtsDim>,
+    app_handle: AppHandle,
+) {
     let clamped = volume.clamp(0.0, 1.0);
     {
+        // Hold `dim` first to match the lock order used in `tts_speak`
+        // (dim → state). If a TTS dim is currently active, `dim_user_set`
+        // updates the captured "original" so the eventual `dim_exit`
+        // restores the user's NEW intent instead of the stale pre-TTS
+        // value — otherwise dragging the slider mid-speech got stomped
+        // when the speech ended.
+        let mut dim = dim_state.lock().unwrap();
         let mut s = state.lock().unwrap();
+        crate::tts::dim_user_set(&mut dim, clamped);
         s.volume = clamped;
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
     persist_state(&state, &app_handle);
 }
 
@@ -222,7 +280,7 @@ pub fn set_sound_type(sound_type: String, state: State<SharedState>, app_handle:
         let mut s = state.lock().unwrap();
         s.sound_type = valid;
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
     persist_state(&state, &app_handle);
 }
 
@@ -236,7 +294,7 @@ pub fn set_time_signature(time_signature: u8, state: State<SharedState>, app_han
         let mut s = state.lock().unwrap();
         s.time_signature = valid;
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
     persist_state(&state, &app_handle);
 }
 
@@ -275,7 +333,7 @@ pub fn configure_speed_ramp(
             _ => "moderate".to_string(),
         };
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
     persist_state(&state, &app_handle);
 }
 
@@ -301,7 +359,7 @@ pub fn start_speed_ramp(
         let mut engine = engine_state.0.lock().unwrap();
         engine.start(state.inner().clone(), app_handle.clone());
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
 }
 
 #[tauri::command]
@@ -329,7 +387,7 @@ pub fn start_speed_ramp_from(
         let mut engine = engine_state.0.lock().unwrap();
         engine.start(state.inner().clone(), app_handle.clone());
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
 }
 
 #[tauri::command]
@@ -347,7 +405,7 @@ pub fn stop_speed_ramp(
         let mut engine = engine_state.0.lock().unwrap();
         engine.stop();
     }
-    let _ = app_handle.emit("state-changed", &*state.lock().unwrap());
+    emit_state_changed(&state, &app_handle);
 }
 
 #[tauri::command]
@@ -402,6 +460,53 @@ pub fn get_calibration_offset(app_handle: AppHandle) -> Option<f64> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Per-instrument calibration cache commands (DSP plan §"Per-instrument
+// calibration cache"). The cache itself is owned by `SharedCalibrationCache`
+// state; these commands surface read / clear / list operations to the UI so
+// users can inspect what's been calibrated and force a recalibration when
+// hardware changes mid-TTL.
+// ---------------------------------------------------------------------------
+
+/// Returns the cached calibration entry for the current `(instrument,
+/// device)` pair (or `None`). Used by the Settings UI to render a
+/// "Calibrated for this gear" hint.
+#[tauri::command]
+pub fn get_calibration_cache_entry(
+    instrument_id: String,
+    device_name: Option<String>,
+    cal_cache: State<'_, crate::calibration_cache::SharedCalibrationCache>,
+) -> Option<crate::calibration_cache::CalibrationEntry> {
+    let key = device_name.unwrap_or_else(|| "default".to_string());
+    cal_cache.lock().unwrap().lookup(&instrument_id, &key).cloned()
+}
+
+/// Forget the cached calibration for one `(instrument, device)` pair
+/// — wired to the "Recalibrate" button. The next evaluation session
+/// for the pair re-converges from cold.
+#[tauri::command]
+pub fn clear_calibration_cache_entry(
+    instrument_id: String,
+    device_name: Option<String>,
+    cal_cache: State<'_, crate::calibration_cache::SharedCalibrationCache>,
+    app_handle: AppHandle,
+) {
+    let key = device_name.unwrap_or_else(|| "default".to_string());
+    let mut cache = cal_cache.lock().unwrap();
+    cache.clear(&instrument_id, &key);
+    crate::calibration_cache::persist_to_store(&cache, &app_handle);
+}
+
+/// Snapshot every cached entry. Used by support tooling and Settings'
+/// "show me what's cached" dev panel (not surfaced yet but cheap to
+/// expose now so we don't need a future schema migration).
+#[tauri::command]
+pub fn list_calibration_cache(
+    cal_cache: State<'_, crate::calibration_cache::SharedCalibrationCache>,
+) -> Vec<crate::calibration_cache::CachedPair> {
+    cal_cache.lock().unwrap().entries.clone()
 }
 
 #[tauri::command]
@@ -596,6 +701,9 @@ pub async fn start_evaluation(
     session_acc: State<'_, SharedSessionAccumulator>,
     engine_state: State<'_, EngineState>,
     midi: State<'_, SharedMidi>,
+    state: State<'_, SharedState>,
+    tempo_ctx: State<'_, SharedTempoContext>,
+    cal_cache: State<'_, crate::calibration_cache::SharedCalibrationCache>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
     // Stop any existing evaluation first (idempotent — prevents deadlock if called twice)
@@ -609,8 +717,17 @@ pub async fn start_evaluation(
     let mut ai = audio_input.lock().unwrap();
     ai.start(device_name.as_deref(), app_handle.clone())?;
 
-    // Clear previous session data
-    session_acc.lock().unwrap().clear();
+    // Clear previous session data + stamp the session start so the D1
+    // diagnostic log (saved at stop) has a stable epoch.
+    {
+        let mut acc = session_acc.lock().unwrap();
+        acc.clear();
+        let (secs, ms) = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_secs(), d.as_millis() as u64))
+            .unwrap_or((0, 0));
+        acc.mark_session_start(secs, ms);
+    }
 
     // Get adaptive score handle from engine for real-time accuracy updates
     let adaptive_score = {
@@ -625,34 +742,133 @@ pub async fn start_evaluation(
     let recent_hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::with_capacity(32)));
     let recent_hits_for_timing = recent_hits.clone();
     let adaptive_score_for_timing = adaptive_score;
+    // D4 — snapshot profile + instrument id for the timing analyzer so
+    // its activity state machine uses the right pause tolerance and the
+    // Signal-B segment-end events know which instrument was practiced.
+    // Mid-session instrument changes will be picked up on the next
+    // start_evaluation (we never re-snapshot a live segment).
+    let (ta_profile, ta_instrument) = {
+        let s = state.lock().unwrap();
+        (s.instrument.profile(), s.instrument.id().to_string())
+    };
+    // No preset tracking on the backend yet — the JS layer owns preset
+    // identity. D4 leaves this None and lets the UI annotate the event.
+    let ta_preset_id: Option<String> = None;
+
+    // Per-instrument calibration cache (DSP plan §"Per-instrument
+    // calibration cache"). Look up the cached `(instrument, device)`
+    // offset before the analyzer starts so a familiar combo skips the
+    // ~8-beat warmup convergence period. `device_key` is the resolved
+    // input device name; we use "default" as a stable key for the OS
+    // default device so users who never explicitly pick a device still
+    // get a cache.
+    let device_key = device_name
+        .as_deref()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "default".to_string());
+    let initial_calibration_offset_ms = {
+        let cache = cal_cache.lock().unwrap();
+        cache
+            .lookup(&ta_instrument, &device_key)
+            .map(|e| e.offset_ms)
+    };
+    // Write-back path: when the analyzer's session reaches convergence
+    // (buffer full of REAL on-device samples) it fires the callback
+    // once. We persist to the in-memory cache and to the store. The
+    // store write happens on the timing-analysis thread but it's a
+    // best-effort no-op on failure — the user already has the in-memory
+    // value, so a transient FS error doesn't break the session.
+    let cache_shared_for_callback = cal_cache.inner().clone();
+    let app_for_cal = app_handle.clone();
+    let instrument_for_cal = ta_instrument.clone();
+    let device_for_cal = device_key.clone();
+
+    let app_for_segment = app_handle.clone();
+    let session_for_segment = session_acc.inner().clone();
     let mut ta = timing_analyzer.lock().unwrap();
-    ta.start(move |feedback| {
-        let _ = app_for_timing.emit("beat-feedback", &feedback);
-        // Accumulate for session report
-        if let Ok(mut acc) = session_for_timing.lock() {
-            acc.push(feedback.clone());
-        }
-        // Update adaptive score (rolling window of last 16 beats)
-        if feedback.classification != "skipped" {
-            if let Ok(mut hits) = recent_hits_for_timing.lock() {
-                hits.push(feedback.classification != "miss");
-                if hits.len() > 16 {
-                    hits.remove(0);
-                }
-                let total = hits.len() as u32;
-                let hit_count = hits.iter().filter(|&&h| h).count() as u32;
-                let score = if total > 0 { (hit_count * 100) / total } else { 0 };
-                adaptive_score_for_timing.store(score, std::sync::atomic::Ordering::Relaxed);
+    ta.start(
+        ta_profile,
+        ta_instrument,
+        ta_preset_id,
+        initial_calibration_offset_ms,
+        move |feedback| {
+            let _ = app_for_timing.emit("beat-feedback", &feedback);
+            // Accumulate for session report
+            if let Ok(mut acc) = session_for_timing.lock() {
+                acc.push(feedback.clone());
             }
-        }
-    });
+            // Update adaptive score (rolling window of last 16 beats)
+            if feedback.classification != "skipped" {
+                if let Ok(mut hits) = recent_hits_for_timing.lock() {
+                    hits.push(feedback.classification != "miss");
+                    if hits.len() > 16 {
+                        hits.remove(0);
+                    }
+                    let total = hits.len() as u32;
+                    let hit_count = hits.iter().filter(|&&h| h).count() as u32;
+                    let score = if total > 0 { (hit_count * 100) / total } else { 0 };
+                    adaptive_score_for_timing
+                        .store(score, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        },
+        move |segment_end| {
+            // D4 Signal B — forward to JS so the coach can decide whether
+            // to surface a mini-report. The JS side filters by C4's
+            // smart-timing gatekeeper.
+            let _ = app_for_segment.emit("practice-segment-ended", &segment_end);
+            // Also persist into the accumulator so the D1 diagnostic log
+            // (written at stop_evaluation) includes the segments timeline.
+            if let Ok(mut acc) = session_for_segment.lock() {
+                acc.push_segment(crate::session_log::PracticeSegment {
+                    start_ms: segment_end.start_ms,
+                    end_ms: segment_end.end_ms,
+                    start_bpm: segment_end.bpm,
+                    end_bpm: segment_end.bpm,
+                    score: segment_end.score,
+                    component_scores: segment_end.component_scores.clone(),
+                    end_reason: segment_end.end_reason,
+                });
+            }
+        },
+        move |converged_offset_ms| {
+            // Per-instrument calibration cache write-back. Fires once
+            // per session, after the buffer fully refills with real
+            // device samples (confidence == 1.0). Persist with the
+            // explicit 1.0 confidence — the cache only persists at the
+            // PERSIST_CONFIDENCE_THRESHOLD or above, which 1.0 clears.
+            if let Ok(mut cache) = cache_shared_for_callback.lock() {
+                cache.insert(
+                    instrument_for_cal.clone(),
+                    device_for_cal.clone(),
+                    converged_offset_ms,
+                    1.0,
+                );
+                crate::calibration_cache::persist_to_store(&cache, &app_for_cal);
+            }
+        },
+    );
 
     // Start onset detection, forwarding onsets to both Tauri events AND timing analyzer
     let ai_shared = audio_input.inner().clone();
     let app_for_onset = app_handle.clone();
     let ta_shared = timing_analyzer.inner().clone();
+    // Snapshot the current instrument's profile so onset detection uses
+    // instrument-aware refractory + spectral weighting (D0). Mid-session
+    // instrument switches take effect on the next evaluation start; the
+    // current segment completes with the original profile per the plan.
+    let profile = state.lock().unwrap().instrument.profile();
+    // D2 — refresh the tempo context with the live grid before kicking
+    // off the detector so the very first hop uses the right refractory
+    // window (avoids the "first onset gets a stale 500ms guard" hole).
+    {
+        let s = state.lock().unwrap();
+        tempo_ctx.set_bpm(s.bpm);
+        tempo_ctx.set_subdivision(s.subdivision);
+    }
+    let tempo_for_onset = tempo_ctx.inner().clone();
     let mut od = onset_detector.lock().unwrap();
-    od.start(ai_shared, move |onset| {
+    od.start(ai_shared, profile, tempo_for_onset, move |onset| {
         let _ = app_for_onset.emit("onset-detected", &onset);
         // Feed into timing analyzer for beat matching
         if let Ok(ta) = ta_shared.lock() {
@@ -670,6 +886,9 @@ pub async fn start_evaluation(
                 ts_ns: crate::clock::now_ns(),
                 amplitude: velocity as f32 / 127.0,
                 centroid: 0.0, // no spectral info from MIDI
+                // MIDI is deterministic — full confidence. (No noise floor
+                // or spectral flux to estimate against.)
+                confidence: 1.0,
             };
             let _ = app_for_midi.emit("onset-detected", &onset);
             if let Ok(ta) = ta_for_midi.lock() {
@@ -687,6 +906,9 @@ pub async fn stop_evaluation(
     onset_detector: State<'_, SharedOnsetDetector>,
     timing_analyzer: State<'_, SharedTimingAnalyzer>,
     midi: State<'_, SharedMidi>,
+    session_acc: State<'_, SharedSessionAccumulator>,
+    state: State<'_, SharedState>,
+    app_handle: AppHandle,
 ) -> Result<(), String> {
     // Clear MIDI onset callback first (no lock ordering issue)
     {
@@ -698,13 +920,92 @@ pub async fn stop_evaluation(
     onset_detector.lock().map_err(|e| format!("Lock failed: {e}"))?.stop();
     timing_analyzer.lock().map_err(|e| format!("Lock failed: {e}"))?.stop();
     audio_input.lock().map_err(|e| format!("Lock failed: {e}"))?.stop();
+
+    // D1 — persist a diagnostic session log. Best-effort: failures here
+    // must never fail the stop path (the user already finished playing,
+    // we just lose retroactive debugging data). The log layer auto-prunes
+    // to MAX_SESSION_LOGS so disk growth is bounded.
+    if let Err(e) = persist_session_log(&session_acc, &state, &app_handle) {
+        eprintln!("[D1] failed to persist session log: {e}");
+    }
     Ok(())
+}
+
+/// Build + save a D1 diagnostic session log from the accumulator state.
+/// Returns Ok(()) when the log was saved OR when there was nothing to save
+/// (no feedbacks accumulated → an idle stop). Surface errors only for the
+/// "we wanted to save but the save itself failed" path.
+fn persist_session_log(
+    session_acc: &State<'_, SharedSessionAccumulator>,
+    state: &State<'_, SharedState>,
+    app_handle: &AppHandle,
+) -> Result<(), String> {
+    // Snapshot accumulator state under its own lock window, then drop
+    // the guard before any IO so we don't hold it across `fs::write`.
+    let (feedbacks, segments, start_secs, start_ms) = {
+        let acc = session_acc
+            .lock()
+            .map_err(|e| format!("session_acc lock failed: {e}"))?;
+        if acc.is_empty() {
+            // Nothing to log — successful no-op.
+            return Ok(());
+        }
+        (
+            acc.feedbacks().to_vec(),
+            acc.segments().to_vec(),
+            acc.session_start_secs().unwrap_or(0),
+            acc.session_start_ms().unwrap_or(0),
+        )
+    };
+
+    let (bpm, time_signature, subdivision, instrument) = {
+        let s = state.lock().map_err(|e| format!("state lock failed: {e}"))?;
+        (s.bpm, s.time_signature, s.subdivision, s.instrument.clone())
+    };
+
+    let end_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(start_ms);
+    let duration_ms = end_ms.saturating_sub(start_ms);
+
+    let log = crate::session_log::build_log_from_session(
+        bpm,
+        time_signature,
+        subdivision,
+        start_secs,
+        duration_ms,
+        instrument,
+        &feedbacks,
+        segments,
+    );
+
+    let dir = diagnostics_dir(app_handle)?;
+    crate::session_log::save_log(&dir, &log).map(|_| ())
 }
 
 #[tauri::command]
 pub fn get_evaluation_state(audio_input: State<SharedAudioInput>) -> bool {
     let ai = audio_input.lock().unwrap();
     ai.is_active()
+}
+
+/// D4 — Signal A entry point. The JS layer calls this when the user
+/// changes BPM, preset, time signature, or instrument. The timing
+/// analyzer closes the open segment internally on its next poll
+/// (`SegmentEndReason::SettingsChange`) so the next run of play scores
+/// against fresh state. Per the plan, no `practice-segment-ended`
+/// event fires — the coach speaks the boundary via the forced
+/// `boundary_signal_a` gatekeeper event in the JS layer.
+#[tauri::command]
+pub fn notify_settings_change(
+    timing_analyzer: State<SharedTimingAnalyzer>,
+) -> Result<(), String> {
+    let ta = timing_analyzer
+        .lock()
+        .map_err(|e| format!("Lock failed: {e}"))?;
+    ta.notify_settings_change();
+    Ok(())
 }
 
 #[tauri::command]
@@ -773,6 +1074,63 @@ pub fn clear_all_sessions(app_handle: AppHandle) -> Result<(), String> {
     let empty: Vec<crate::session::SavedSession> = Vec::new();
     store.set("evalSessionHistory", serde_json::to_value(&empty).unwrap());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic Session Logs (D1)
+//
+// These are heavier per-session JSON dumps (raw onsets, expected beats,
+// match decisions, etc.) used by the dev/debug pipeline. Storage path:
+// `app_data_dir/session_logs/`. They are independent from
+// `evalSessionHistory` above, which is the lightweight history shown
+// in the UI.
+// ---------------------------------------------------------------------------
+
+fn diagnostics_dir(app_handle: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {e}"))
+}
+
+#[tauri::command]
+pub fn list_session_logs(app_handle: AppHandle) -> Result<Vec<String>, String> {
+    let dir = diagnostics_dir(&app_handle)?;
+    let paths = crate::session_log::list_log_paths(&dir)?;
+    Ok(paths
+        .into_iter()
+        .filter_map(|p| p.to_str().map(|s| s.to_string()))
+        .collect())
+}
+
+#[tauri::command]
+pub fn get_session_log(path: String) -> Result<crate::session_log::SessionLog, String> {
+    crate::session_log::load_log(std::path::Path::new(&path))
+}
+
+/// Dump every persisted log into a single combined JSON file under
+/// `app_data_dir/exports/yames-session-logs-<unix>.json`. Returns the
+/// destination path so the frontend can show / reveal it.
+#[tauri::command]
+pub fn export_session_logs(app_handle: AppHandle) -> Result<String, String> {
+    let app_dir = diagnostics_dir(&app_handle)?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dest = app_dir
+        .join("exports")
+        .join(format!("yames-session-logs-{ts}.json"));
+    crate::session_log::export_logs(&app_dir, &dest)?;
+    dest.to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "export path is not valid UTF-8".to_string())
+}
+
+#[tauri::command]
+pub fn clear_session_logs(app_handle: AppHandle) -> Result<(), String> {
+    let dir = diagnostics_dir(&app_handle)?;
+    crate::session_log::clear_logs(&dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -891,7 +1249,22 @@ pub fn get_models_path(app_handle: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn delete_models(app_handle: AppHandle) -> Result<(), String> {
+pub fn delete_models(
+    app_handle: AppHandle,
+    dl_state: State<DownloadState>,
+) -> Result<(), String> {
+    // Signal any in-flight download to abort BEFORE wiping the models
+    // directory. Otherwise the download thread continues, sees its
+    // partial-file destination vanish, and emits a confusing failure
+    // event after the UI has already shown "removed". The cancel flag
+    // is read at each curl progress tick so the thread bails on the
+    // next chunk instead of writing into a deleted tree.
+    {
+        let mut guard = dl_state.0.lock().unwrap();
+        if let Some(cancel) = guard.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     models::delete_models(&app_handle)
 }
 
@@ -950,8 +1323,22 @@ pub async fn coach_generate(
     engine: State<'_, SharedCoachEngine>,
     context: String,
 ) -> Result<String, String> {
-    let lock = engine.lock().map_err(|e| format!("Lock failed: {e}"))?;
-    crate::coach::generate(&lock, &context)
+    // LLM inference takes ~200-2000ms and the templated fallback can
+    // still spend ~1-10ms parsing the context string. Holding the
+    // CoachEngine Mutex on a tokio worker for that whole window blocks
+    // every concurrent async command (boundary IPC, evaluation
+    // toggles, audio device polling, …) — the same hazard `tts_speak`
+    // already guards against via `spawn_blocking`. Move the inference
+    // off the async runtime so generations queue behind the mutex
+    // without freezing the rest of the command surface.
+    let engine_arc: SharedCoachEngine = engine.inner().clone();
+    let ctx_owned = context;
+    tokio::task::spawn_blocking(move || {
+        let lock = engine_arc.lock().map_err(|e| format!("Lock failed: {e}"))?;
+        crate::coach::generate(&lock, &ctx_owned)
+    })
+    .await
+    .map_err(|e| format!("coach_generate join failed: {e}"))?
 }
 
 #[tauri::command]
@@ -967,25 +1354,63 @@ pub fn is_coach_loaded(engine: State<'_, SharedCoachEngine>) -> bool {
 pub async fn tts_speak(
     tts: State<'_, SharedTts>,
     state: State<'_, SharedState>,
+    dim_state: State<'_, SharedTtsDim>,
     text: String,
 ) -> Result<(), String> {
-    // Dim metronome volume during speech (temporary, not persisted)
-    let original_volume = {
-        let mut s = state.lock().unwrap();
-        let orig = s.volume;
-        s.volume = (orig * 0.15).max(0.02);
-        orig
-    };
-
-    let result = {
-        let mut tts_engine = tts.lock().map_err(|e| format!("Lock failed: {e}"))?;
-        tts_engine.speak(&text)
-    };
-
-    // Restore original volume
+    // Dim metronome volume during speech (temporary, not persisted).
+    //
+    // Nested-dim safety: two TTS calls can land concurrently (e.g.
+    // greeting paraphrase still talking when the first coach-tip
+    // fires). Without coordination, the second call would capture the
+    // already-dimmed volume as its "original" and the restored volume
+    // would end up stuck at ~15% of the user's real setting. The
+    // `dim_enter` helper records the original ONCE on the outermost
+    // dim and tells us when to skip the AppState write; the
+    // symmetric `dim_exit` below only triggers a restore when the
+    // counter drains to zero. Pure helpers live in `tts.rs` so the
+    // invariants are unit-tested.
     {
+        let mut dim = dim_state.lock().unwrap();
+        // Hold the state lock across the read-then-conditional-write so
+        // a concurrent `set_volume` (e.g. the user dragging the volume
+        // slider mid-greeting) can't land between the "live_volume" read
+        // and the dim write — that would let dim_enter capture a stale
+        // "original" and `dim_exit` later restore over the user's new
+        // value. Acquiring `dim` first keeps the lock order consistent
+        // with `dim_exit` below; `set_volume` only takes `state` so no
+        // dim/state cross-deadlock is possible.
         let mut s = state.lock().unwrap();
-        s.volume = original_volume;
+        if let Some(target) = crate::tts::dim_enter(&mut dim, s.volume) {
+            s.volume = target;
+        }
+    }
+
+    // The Piper + afplay subprocesses inside `speak()` block the
+    // calling thread for ~1-5 seconds. Running them directly here pins
+    // a tokio worker for the full duration, which makes every other
+    // async command (boundary IPC, evaluation toggles, settings
+    // changes, …) wait — observed by the user as the whole app
+    // "freezing till the voice is over". Push the blocking work onto
+    // tokio's dedicated blocking pool so async workers stay free.
+    let tts_arc: SharedTts = tts.inner().clone();
+    let text_owned = text;
+    let result = tokio::task::spawn_blocking(move || {
+        let mut tts_engine = tts_arc.lock().map_err(|e| format!("Lock failed: {e}"))?;
+        tts_engine.speak(&text_owned)
+    })
+    .await
+    .map_err(|e| format!("TTS task join failed: {e}"))?;
+
+    // Restore original volume only when this is the outermost dim
+    // releasing. Inner dims are no-ops on restore so a concurrent
+    // greeting+tip doesn't stomp on the user-visible value mid-speech.
+    // Same dim-then-state lock order as the entry block above keeps the
+    // capture/restore symmetrical and consistent.
+    {
+        let mut dim = dim_state.lock().unwrap();
+        if let Some(orig) = crate::tts::dim_exit(&mut dim) {
+            state.lock().unwrap().volume = orig;
+        }
     }
 
     result
@@ -995,6 +1420,15 @@ pub async fn tts_speak(
 pub fn tts_set_voice(tts: State<'_, SharedTts>, voice: String) {
     if let Ok(mut engine) = tts.lock() {
         engine.set_voice(&voice);
+    }
+}
+
+/// Set the coach voice playback volume (0.0..=1.0). Stored on the TtsEngine
+/// and applied to the next `afplay` invocation via the `-v` flag.
+#[tauri::command]
+pub fn tts_set_volume(tts: State<'_, SharedTts>, volume: f32) {
+    if let Ok(mut engine) = tts.lock() {
+        engine.set_volume(volume);
     }
 }
 

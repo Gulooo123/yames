@@ -183,7 +183,10 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  animation: gridRowIn 0.25s ease;
+  /* `backwards` keeps the row in its `from` state (invisible, shifted)
+   * during the inline animation-delay so the BPM label doesn't flash
+   * visible before its turn in the top-to-bottom cascade. */
+  animation: gridRowIn 0.25s ease backwards;
 }
 
 @keyframes gridRowIn {

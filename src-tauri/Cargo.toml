@@ -23,6 +23,9 @@ cpal = "0.15"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 midir = "0.10"
+# Tauri already pulls tokio in transitively; declared explicitly so we can
+# use `tokio::task::spawn_blocking` from blocking command handlers.
+tokio = { version = "1", features = ["rt"] }
 
 # LLM inference for Practice Coach (requires cmake to build)
 # Enable with: cargo build --features coach-llm
@@ -35,3 +38,8 @@ coach-llm = ["llama-cpp-2"]
 [target.'cfg(target_os = "macos")'.dependencies]
 coreaudio-sys = "0.2"
 core-foundation-sys = "0.8"
+
+[dev-dependencies]
+# No external test deps yet — using Rust's built-in test harness.
+# Add here when needed (e.g. `pretty_assertions`, `proptest`).
+

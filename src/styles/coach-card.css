@@ -334,6 +334,25 @@
   border: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
 }
 
+/* Chip-prompt bubble — the user-affordance message that follows a
+ * mini-report. Renders as a transparent container so the chips
+ * themselves carry all the visual weight; the bubble's job is only
+ * to keep the chips logically separate from the coach's commentary
+ * card above it. The mini-report used to bundle these chips inline
+ * which made them look like part of the coach's text. */
+.coach-feed-msg-chip-prompt {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+/* Reset the chip-row margins when it lives in its own bubble — the
+ * feed already provides spacing via `.coach-card-feed { gap: 10px }`. */
+.coach-feed-msg-chip-prompt .coach-chip-row {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
 .coach-feed-msg-session-end {
   background: color-mix(
     in srgb,
@@ -368,6 +387,107 @@
 .coach-mini-report-text {
   font-size: 11px;
   color: var(--text-secondary);
+}
+
+/* Suggestion chip row (Phase 5).
+ *
+ * Layout: small pills below the mini-report, wrapping at the card's
+ * width. The escape chip uses a slightly different background to set
+ * it apart as the always-present "Ask something else…" affordance. */
+.coach-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  margin-bottom: 4px;
+}
+
+.coach-chip {
+  font-size: 11px;
+  font-family: inherit;
+  padding: 5px 10px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent, var(--text-primary)) 12%, transparent);
+  color: var(--text-primary);
+  border: 1px solid color-mix(in srgb, var(--accent, var(--text-primary)) 30%, transparent);
+  cursor: pointer;
+  transition: background-color 0.12s ease, transform 0.06s ease;
+  line-height: 1.2;
+  text-align: left;
+}
+
+.coach-chip:hover {
+  background: color-mix(in srgb, var(--accent, var(--text-primary)) 22%, transparent);
+}
+
+.coach-chip:active {
+  transform: translateY(1px);
+}
+
+.coach-chip-escape {
+  background: color-mix(in srgb, var(--bg-card, var(--bg-secondary)) 70%, transparent);
+  border-color: color-mix(in srgb, var(--border) 50%, transparent);
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.coach-chip-escape:hover {
+  background: color-mix(in srgb, var(--bg-card, var(--bg-secondary)) 85%, transparent);
+}
+
+/* Intervention affordance row (Phase 5).
+ *
+ * Two buttons: a primary accept ("Drop to 140 BPM") and a secondary
+ * dismiss ("Stay at 150"). The accept button is filled with the
+ * accent color to draw the eye — interventions are time-bounded and
+ * the user has ~10s to engage before mental context shifts. The
+ * dismiss is intentionally low-contrast so the accept reads as the
+ * default. */
+.coach-affordance-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  margin-bottom: 4px;
+}
+
+.coach-affordance-primary {
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 12px;
+  background: var(--accent, var(--text-primary));
+  color: var(--bg-primary, #fff);
+  border: 1px solid var(--accent, var(--text-primary));
+  cursor: pointer;
+  transition: filter 0.12s ease, transform 0.06s ease;
+  line-height: 1.2;
+}
+
+.coach-affordance-primary:hover {
+  filter: brightness(1.1);
+}
+
+.coach-affordance-primary:active {
+  transform: translateY(1px);
+}
+
+.coach-affordance-secondary {
+  font-size: 11px;
+  font-family: inherit;
+  padding: 6px 10px;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+  line-height: 1.2;
+}
+
+.coach-affordance-secondary:hover {
+  background: color-mix(in srgb, var(--bg-card, var(--bg-secondary)) 50%, transparent);
 }
 
 /* Timestamp */

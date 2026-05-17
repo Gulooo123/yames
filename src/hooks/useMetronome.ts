@@ -35,6 +35,7 @@ const DEFAULT_STATE: AppState = {
     warmupBeats: 4,
     warmupCount: 0,
   },
+  instrument: "other",
 };
 
 export function useMetronome() {

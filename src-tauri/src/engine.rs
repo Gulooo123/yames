@@ -1430,3 +1430,91 @@ impl Drop for MetronomeEngine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_thresholds_conservative_clamps_steps() {
+        let (up, down, step_up, step_down) = adaptive_thresholds("conservative", 1, 1);
+        assert_eq!(up, 80);
+        assert_eq!(down, 40);
+        assert!(step_up >= 2 && step_up <= 3);
+        assert!(step_down >= 2 && step_down <= 3);
+    }
+
+    #[test]
+    fn adaptive_thresholds_aggressive_has_lower_bar() {
+        let (up_aggr, down_aggr, _, _) = adaptive_thresholds("aggressive", 5, 3);
+        let (up_cons, down_cons, _, _) = adaptive_thresholds("conservative", 5, 3);
+        // Aggressive promotes earlier than conservative
+        assert!(up_aggr < up_cons);
+        assert!(down_aggr < down_cons);
+    }
+
+    #[test]
+    fn adaptive_thresholds_moderate_is_default() {
+        let (up_mod, _, _, _) = adaptive_thresholds("moderate", 5, 3);
+        let (up_unknown, _, _, _) = adaptive_thresholds("not-a-mode", 5, 3);
+        assert_eq!(up_mod, up_unknown, "unknown mode should fall through to moderate");
+    }
+
+    #[test]
+    fn advance_ramp_linear_up_increments_until_target() {
+        // start=80, target=100, increment=5, mode=linear, going up
+        let (bpm, dir, done) = advance_ramp(80, "up", 80, 100, 5, 3, "linear", false);
+        assert_eq!(bpm, 85);
+        assert_eq!(dir, "up");
+        assert!(!done);
+    }
+
+    #[test]
+    fn advance_ramp_linear_reaches_target_and_marks_done() {
+        // Last step lands on target with non-cyclic
+        let (bpm, _, done) = advance_ramp(98, "up", 80, 100, 5, 3, "linear", false);
+        assert_eq!(bpm, 100, "Should clamp at target");
+        assert!(done, "Non-cyclic ramp should be done when reaching target");
+    }
+
+    #[test]
+    fn advance_ramp_cyclic_flips_direction_at_target() {
+        let (bpm, dir, done) = advance_ramp(98, "up", 80, 100, 5, 3, "linear", true);
+        assert_eq!(bpm, 100);
+        assert_eq!(dir, "down");
+        assert!(!done, "Cyclic ramps never finish at target");
+    }
+
+    #[test]
+    fn advance_ramp_zigzag_oscillates() {
+        // Zigzag: up by increment, then down by decrement, alternating
+        let (bpm1, dir1, done1) = advance_ramp(100, "up", 80, 200, 10, 5, "zigzag", false);
+        assert_eq!(bpm1, 110);
+        assert_eq!(dir1, "down", "Zigzag flips direction every step");
+        assert!(!done1);
+
+        let (bpm2, dir2, _) = advance_ramp(110, "down", 80, 200, 10, 5, "zigzag", false);
+        assert_eq!(bpm2, 105);
+        assert_eq!(dir2, "up");
+    }
+
+    #[test]
+    fn advance_ramp_zigzag_caps_at_target() {
+        let (bpm, _, done) = advance_ramp(198, "up", 80, 200, 10, 5, "zigzag", false);
+        assert_eq!(bpm, 200);
+        assert!(done);
+    }
+
+    #[test]
+    fn advance_ramp_clamps_at_300_bpm() {
+        let (bpm, _, _) = advance_ramp(298, "up", 80, 350, 10, 5, "linear", false);
+        assert_eq!(bpm, 300, "BPM should be hard-clamped at 300");
+    }
+
+    #[test]
+    fn advance_ramp_down_floors_at_20_bpm() {
+        let (bpm, _, _) = advance_ramp(22, "down", 10, 100, 5, 3, "linear", false);
+        assert_eq!(bpm, 20, "BPM should floor at 20");
+    }
+}
+

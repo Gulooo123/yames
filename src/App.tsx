@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { MainWindow } from "./components/MainWindow";
-import { FloatingWidget } from "./components/FloatingWidget";
+import { MainWindow } from "./containers/main-window/MainWindow";
+import { FloatingWidget } from "./containers/floating-widget/FloatingWidget";
 
 function getWindowLabel(): string {
   // Tauri v2: window label is passed via URL search param or we detect by URL

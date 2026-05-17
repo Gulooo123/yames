@@ -1,39 +1,45 @@
 mod audio_input;
+mod calibration_cache;
 mod clock;
 mod coach;
 mod commands;
 mod engine;
+mod instrument;
 mod midi;
 mod models;
 mod onset;
 mod session;
+mod session_log;
 mod state;
 mod timing;
 mod tts;
 
 use audio_input::create_shared_audio_input;
+use calibration_cache::create_shared_calibration_cache;
 use coach::create_shared_engine;
-use tts::create_shared_tts;
+use tts::{create_shared_tts, create_shared_tts_dim};
 use commands::{
-    get_state, get_active_tab, get_calibration_offset, open_url, save_window_position, set_active_tab, set_always_on_top, set_bpm, set_calibration_offset,
-    set_playing, set_sound_type, set_subdivision, set_theme, set_time_signature, set_volume, set_widget_mode,
+    clear_calibration_cache_entry, get_calibration_cache_entry, get_state, get_active_tab, get_calibration_offset, list_calibration_cache, open_url, save_window_position, set_active_tab, set_always_on_top, set_bpm, set_calibration_offset,
+    set_instrument, set_playing, set_sound_type, set_subdivision, set_theme, set_time_signature, set_volume, set_widget_mode,
     set_widget_always_on_top, show_floating, show_main, toggle_playback, configure_speed_ramp, start_speed_ramp,
     start_speed_ramp_from, stop_speed_ramp, set_adaptive_decision,
     list_midi_devices, connect_midi_device, disconnect_midi_device, set_midi_binding, clear_midi_binding, get_midi_bindings,
     list_presets, save_preset, delete_preset, reorder_presets,
     list_audio_input_devices, start_evaluation, stop_evaluation, get_evaluation_state,
+    notify_settings_change,
     get_session_report, clear_session,
     save_session, get_session_history, delete_session, clear_all_sessions,
+    list_session_logs, get_session_log, export_session_logs, clear_session_logs,
     start_recording, stop_recording, start_playback, stop_playback, discard_recording, get_waveform,
     set_input_gain,
     list_audio_output_devices, set_audio_output_device,
     get_model_status, write_model_chunk, get_models_path, delete_models,
     start_model_download, cancel_model_download,
     load_coach_model, coach_generate, is_coach_loaded,
-    tts_speak, tts_set_voice, tts_list_voices,
+    tts_speak, tts_set_voice, tts_set_volume, tts_list_voices,
     EngineState, DownloadState,
 };
-use onset::create_shared_onset_detector;
+use onset::{create_shared_onset_detector, SharedTempoContext, TempoContext};
 use engine::MetronomeEngine;
 use midi::create_shared_midi;
 use session::create_shared_session_accumulator;
@@ -93,6 +99,9 @@ pub fn run() {
                 if let Some(v) = store.get("timeSignature").and_then(|v| v.as_u64()) {
                     s.time_signature = v as u8;
                 }
+                if let Some(v) = store.get("instrument").and_then(|v| v.as_str().map(String::from)) {
+                    s.instrument = instrument::Instrument::from_id(&v);
+                }
                 if let Some(v) = store.get("speedRamp") {
                     if let Some(sb) = v.get("startBpm").and_then(|x| x.as_u64()) {
                         s.speed_ramp.start_bpm = (sb as u16).clamp(20, 300);
@@ -122,6 +131,18 @@ pub fn run() {
                 }
             }
 
+            // D2 — live tempo context shared with the onset detector so the
+            // adaptive refractory period tracks the current grid without
+            // re-acquiring the SharedState mutex on every hop. Seeded from
+            // whatever we just restored from disk above.
+            let (initial_bpm, initial_subdiv) = {
+                let s = shared_state.lock().unwrap();
+                (s.bpm, s.subdivision)
+            };
+            let tempo_ctx: SharedTempoContext =
+                Arc::new(TempoContext::new(initial_bpm, initial_subdiv));
+            app.manage(tempo_ctx);
+
             app.manage(shared_state);
             let beat_log = create_beat_log();
             let mut engine = MetronomeEngine::new(beat_log.clone());
@@ -143,12 +164,26 @@ pub fn run() {
             app.manage(Arc::new(Mutex::new(TimingAnalyzer::new(beat_log))));
             app.manage(create_shared_session_accumulator());
             app.manage(create_shared_engine());
+            // Per-instrument calibration cache (DSP plan §"Per-instrument
+            // calibration cache"). Hydrated from the store with TTL
+            // eviction so we don't carry month-old entries into a fresh
+            // launch. Owned by Tauri state from here on.
+            let cal_cache = create_shared_calibration_cache();
+            {
+                let hydrated = calibration_cache::load_from_store(app.handle());
+                *cal_cache.lock().unwrap() = hydrated;
+            }
+            app.manage(cal_cache);
             let shared_tts = create_shared_tts();
             {
                 let models_dir = app.path().app_data_dir().unwrap().join("models");
                 shared_tts.lock().unwrap().set_models_dir(models_dir);
             }
             app.manage(shared_tts);
+            // Nested-dim counter shared by every `tts_speak` call so
+            // concurrent greetings + tips can't lose the user's
+            // metronome volume (see tts::TtsDimState).
+            app.manage(create_shared_tts_dim());
             app.manage(DownloadState(std::sync::Mutex::new(None)));
 
             // Set up MIDI listener
@@ -270,6 +305,7 @@ pub fn run() {
             set_always_on_top,
             set_widget_always_on_top,
             set_theme,
+            set_instrument,
             set_volume,
             show_main,
             show_floating,
@@ -285,6 +321,9 @@ pub fn run() {
             get_active_tab,
             set_calibration_offset,
             get_calibration_offset,
+            get_calibration_cache_entry,
+            clear_calibration_cache_entry,
+            list_calibration_cache,
             open_url,
             list_midi_devices,
             connect_midi_device,
@@ -300,12 +339,17 @@ pub fn run() {
             start_evaluation,
             stop_evaluation,
             get_evaluation_state,
+            notify_settings_change,
             get_session_report,
             clear_session,
             save_session,
             get_session_history,
             delete_session,
             clear_all_sessions,
+            list_session_logs,
+            get_session_log,
+            export_session_logs,
+            clear_session_logs,
             start_recording,
             stop_recording,
             start_playback,
@@ -326,15 +370,25 @@ pub fn run() {
             is_coach_loaded,
             tts_speak,
             tts_set_voice,
+            tts_set_volume,
             tts_list_voices,
         ])
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { .. } => {
-                    // Quit the entire app when user closes any window
-                    if let Some(engine_state) = window.try_state::<EngineState>() {
-                        let mut engine = engine_state.0.lock().unwrap();
-                        engine.shutdown();
+                    // Quit the entire app when user closes ANY window. The
+                    // engine shutdown is destructive (rips down the audio
+                    // thread); we gate it to the "main" window so closing
+                    // a floating-widget or zen-mode popout doesn't tear
+                    // down the audio engine before the main window's own
+                    // close fires. `app_handle().exit(0)` below still
+                    // terminates the process so the engine is cleaned up
+                    // via Drop on shutdown either way.
+                    if window.label() == "main" {
+                        if let Some(engine_state) = window.try_state::<EngineState>() {
+                            let mut engine = engine_state.0.lock().unwrap();
+                            engine.shutdown();
+                        }
                     }
                     window.app_handle().exit(0);
                 }

@@ -147,17 +147,31 @@
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 
+/* ─── Header volume popover: iOS-style chunky pill faders ────────────────
+ *
+ * Two side-by-side vertical faders (Metronome, Voice). Built around a
+ * native <input type="range"> with `writing-mode: vertical-lr; direction:
+ * rtl;` so 0 sits at the bottom and 100 at the top.
+ *
+ * Visually: each fader is a wide rounded pill column. The track is the
+ * empty/dim container; the fill is the accent-colored portion that
+ * rises with the value. The fill itself IS the draggable surface — the
+ * native thumb is transparent and the entire pill is the click/drag
+ * target, so the user grabs the chunky bar directly (iOS-volume feel).
+ *
+ * `overflow: hidden` on the track clips the fill to the pill shape;
+ * hover/active glow lives on the track so it escapes the clip.
+ */
 .header-volume-popover {
   position: absolute;
   top: calc(100% + 8px);
   left: 50%;
   transform: translateX(-50%) translateY(-4px);
-  padding: 10px 14px;
-  border-radius: 8px;
+  padding: 16px 20px 14px;
+  border-radius: 12px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  width: 140px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   z-index: 100;
   opacity: 0;
   visibility: hidden;
@@ -165,6 +179,10 @@
     opacity 0.15s,
     visibility 0.15s,
     transform 0.15s;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 18px;
 }
 
 .header-volume-wrap:hover .header-volume-popover {
@@ -173,33 +191,163 @@
   transform: translateX(-50%) translateY(0);
 }
 
-.header-volume-popover .volume-slider {
-  width: 100%;
-  -webkit-appearance: none;
-  appearance: none;
-  height: 4px;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, 0.1);
-  background-image: linear-gradient(
-    to right,
-    var(--accent) 0%,
-    var(--accent) var(--volume-pct, 80%),
-    rgba(255, 255, 255, 0.1) var(--volume-pct, 80%),
-    rgba(255, 255, 255, 0.1) 100%
-  );
-  outline: none;
-  border: none;
+/* Fixed column width so both faders are symmetric inside the popover.
+ * Without this, each column would size to its widest child (the label),
+ * making the wider "METRONOME" column push the slider track off-center
+ * relative to the popover's midpoint. */
+.header-volume-popover .volume-fader {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 72px;
 }
 
+.header-volume-popover .volume-fader-value {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--text-primary, rgba(255, 255, 255, 0.92));
+  min-width: 28px;
+  text-align: center;
+  user-select: none;
+}
+
+.header-volume-popover .volume-fader-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.6));
+  user-select: none;
+}
+
+/* Keep the fader visible (discoverability) but dim it and italicize the
+ * label so it reads as "available but gated". Pointer events still flow
+ * so the parent tooltip explains why. */
+.header-volume-popover .volume-fader-disabled {
+  opacity: 0.4;
+}
+
+.header-volume-popover .volume-fader-disabled .volume-fader-label {
+  font-style: italic;
+}
+
+/* Track = the rounded pill container. Fill rises inside it; clip it so
+ * the fill's top edge follows the pill curve cleanly at any value. */
+.header-volume-popover .volume-fader-track {
+  position: relative;
+  width: 32px;
+  height: 144px;
+  background: rgba(255, 255, 255, 0.07);
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow:
+    inset 0 1px 1px rgba(0, 0, 0, 0.25),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.header-volume-popover .volume-fader-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: linear-gradient(
+    to top,
+    var(--accent) 0%,
+    color-mix(in srgb, var(--accent) 86%, white 14%) 100%
+  );
+  /* Subtle top highlight so the fill's top edge reads as the "grab" line. */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.12);
+  pointer-events: none;
+  transition: height 0.06s ease-out;
+}
+
+.header-volume-popover .volume-fader-disabled .volume-fader-fill {
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: none;
+}
+
+/* Native input layered over the entire track — invisible. The colored
+ * fill behind it is what the user sees and "grabs"; the input just
+ * captures pointer + keyboard input. */
+.header-volume-popover .volume-slider {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  outline: none;
+  border: none;
+  cursor: pointer;
+}
+
+.header-volume-popover .volume-slider:disabled {
+  cursor: not-allowed;
+}
+
+.header-volume-popover .volume-slider::-webkit-slider-runnable-track {
+  background: transparent;
+  border: none;
+  width: 100%;
+  height: 100%;
+}
+
+.header-volume-popover .volume-slider::-moz-range-track {
+  background: transparent;
+  border: none;
+  width: 100%;
+  height: 100%;
+}
+
+/* The thumb is transparent — the colored fill behind the input is the
+ * visible "handle". The thumb is still sized full-width so the hit area
+ * matches the entire pill column. */
 .header-volume-popover .volume-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--accent);
-  cursor: pointer;
-  box-shadow: 0 0 4px var(--accent-glow);
+  width: 32px;
+  height: 4px;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  border: none;
+  cursor: grab;
+}
+
+.header-volume-popover .volume-slider:active::-webkit-slider-thumb {
+  cursor: grabbing;
+}
+
+.header-volume-popover .volume-slider:disabled::-webkit-slider-thumb {
+  cursor: not-allowed;
+}
+
+.header-volume-popover .volume-slider::-moz-range-thumb {
+  width: 32px;
+  height: 4px;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  border: none;
+  cursor: grab;
+}
+
+.header-volume-popover .volume-slider:active::-moz-range-thumb {
+  cursor: grabbing;
+}
+
+.header-volume-popover .volume-slider:disabled::-moz-range-thumb {
+  cursor: not-allowed;
 }
 
 /* =================== Preset Sidebar =================== */
@@ -248,6 +396,11 @@
   transition:
     width 0.2s ease,
     min-width 0.2s ease;
+  /* NOTE: macOS WKWebView occasionally leaves the OS cursor stale for
+   * a few frames during this width transition — it resolves on the
+   * next mousemove. Treated as a cosmetic platform quirk; no JS
+   * workaround. `will-change` doesn't help here because width is a
+   * layout property, not a composited one. */
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--sidebar-border, color-mix(in srgb, var(--border) 60%, transparent));
@@ -681,10 +834,6 @@
   width: 100%;
   margin-left: auto;
   margin-right: auto;
-}
-
-.main-content[data-view="track"] {
-  justify-content: flex-start;
 }
 
 /* =================== BPM Section =================== */
@@ -2742,6 +2891,44 @@
   stroke: rgb(234, 179, 8);
 }
 
+/* Per-instrument calibration cache hint. Sits under the audio input
+   dropdown with a muted look so it doesn't compete with the BT-latency
+   warning. The Recalibrate button is the only interactive element. */
+.calibration-cache-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.calibration-cache-text {
+  color: var(--text-secondary);
+}
+
+.calibration-recalibrate-btn {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.calibration-recalibrate-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
 .audio-output-bt-badge {
   margin-left: auto;
   padding: 1px 5px;
@@ -3971,4 +4158,127 @@ html[data-theme="lavender"] .floating-play-btn,
 html[data-theme="lavender"] .floating-play-btn:hover,
 html[data-theme="lavender"] .floating-play-btn.playing {
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+}
+
+/* =================== First-launch instrument picker =================== */
+.instrument-picker-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fade-in 200ms ease-out;
+}
+
+.instrument-picker-modal {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 36px 40px;
+  min-width: 480px;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 20px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+
+.instrument-picker-title {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 600;
+  text-align: center;
+  color: var(--text);
+}
+
+.instrument-picker-subtitle {
+  margin: 0;
+  font-size: 0.875rem;
+  text-align: center;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.instrument-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.instrument-picker-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--text);
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    transform 80ms ease;
+  font-family: inherit;
+}
+
+.instrument-picker-card:hover {
+  border-color: var(--accent);
+  background: var(--bg-secondary);
+}
+
+.instrument-picker-card:active {
+  transform: scale(0.97);
+}
+
+.instrument-picker-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  color: var(--accent);
+}
+
+.instrument-picker-card-icon svg {
+  width: 28px;
+  height: 28px;
+}
+
+.instrument-picker-card-name {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.instrument-picker-skip {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  padding: 8px;
+  cursor: pointer;
+  align-self: center;
+  margin-top: 4px;
+  font-family: inherit;
+  transition: color 120ms ease;
+}
+
+.instrument-picker-skip:hover {
+  color: var(--text);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }

@@ -13,7 +13,7 @@ cask "yames" do
 
   name "Yames"
   desc "Yet Another Metronome Everyone Skips — musician-grade floating metronome"
-  homepage "https://turutupa.github.io/yames/"
+  homepage "https://yames.app"
 
   livecheck do
     url :url

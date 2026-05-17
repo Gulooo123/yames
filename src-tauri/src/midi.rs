@@ -194,10 +194,12 @@ impl MidiListener {
         *self.connected_device.lock().unwrap() = None;
     }
 
+    #[allow(dead_code)]
     pub fn is_connected(&self) -> bool {
         self.connection.lock().unwrap().is_some()
     }
 
+    #[allow(dead_code)]
     pub fn connected_device_name(&self) -> Option<String> {
         self.connected_device.lock().unwrap().clone()
     }
@@ -292,6 +294,7 @@ impl MidiListener {
         });
     }
 
+    #[allow(dead_code)]
     pub fn shutdown(&self) {
         self.alive.store(false, Ordering::Relaxed);
         self.disconnect();
