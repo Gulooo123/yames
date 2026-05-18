@@ -1784,6 +1784,49 @@
   margin-bottom: 12px;
 }
 
+/* Row that pairs a section title with an inline badge (e.g. the
+   EXPERIMENTAL pill next to Practice Coach). The h2's own
+   margin-bottom is zeroed here so the row controls vertical rhythm
+   instead — keeps the gap below the title identical to a plain
+   section header. */
+.settings-section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.settings-section-title h2 {
+  margin-bottom: 0;
+}
+
+/* Amber "labs" pill. Sits tonally between the accent (pink) and the
+   muted secondary text so it reads as a callout without competing
+   with active controls. Letter-spacing is overridden because the
+   parent h2's 1.5px tracking would propagate via inheritance. */
+.experimental-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, #f59e0b 18%, transparent);
+  border: 1px solid color-mix(in srgb, #f59e0b 45%, transparent);
+  color: #f59e0b;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.experimental-badge svg {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+}
+
 .hotkeys-section-header {
   display: flex;
   align-items: center;
@@ -1902,6 +1945,27 @@
 .coach-download-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Breathing room when "Download voices" and "Remove models" sit side
+   by side. Adjacent-sibling selector so a lone "Remove models"
+   button doesn't pick up phantom left margin. */
+.coach-download-btn + .coach-download-btn {
+  margin-left: 10px;
+}
+
+/* ─── Coach manage / voices sections ───
+   The Practice Coach panel renders two stacked download sections: a
+   "Voices" prompt that only appears when voices are missing/broken,
+   and a "Manage" block with Remove Models that's always present once
+   the brain is installed. Adjacent sections get a hairline separator
+   + breathing room so they read as distinct affordances rather than a
+   single row of buttons (which previously made Download and Remove
+   feel like the same control). */
+.coach-download-section + .coach-download-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
 }
 
 .coach-download-progress {
@@ -2265,6 +2329,90 @@
 
 .toggle-btn[data-tooltip]:hover::after {
   opacity: 1;
+}
+
+/* =================== Voice preview wave indicator ===================
+ * Equalizer-style 3-bar pulse rendered inside each voice toggle button
+ * while that voice's preview is mid-flight. Two design choices worth
+ * preserving:
+ *
+ *   1. The container width is FIXED (14px) regardless of active state.
+ *      We flip opacity, not display — that keeps the button width
+ *      constant so the toggle group doesn't reflow each time a preview
+ *      starts/ends. Earlier prototypes that conditionally mounted the
+ *      wave caused a perceptible jitter on the OTHER voice buttons.
+ *   2. Bars use `currentColor` so they inherit the button text color.
+ *      Active voice → accent color; inactive → secondary text color;
+ *      disabled → grey via the parent's filter. No theme-specific
+ *      overrides needed.
+ */
+.voice-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.voice-wave {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px;
+  width: 14px;
+  height: 12px;
+  opacity: 0;
+  transition: opacity 0.15s ease-in-out;
+}
+
+.voice-wave[data-active="true"] {
+  opacity: 1;
+}
+
+.voice-wave__bar {
+  width: 2px;
+  height: 100%;
+  background: currentColor;
+  border-radius: 1px;
+  transform-origin: center;
+  /* The pulse runs even when opacity is 0; that way the bars are
+     already mid-cycle when fading IN, instead of all snapping from a
+     dead-stop on first click. Costs ~nothing because the GPU compositor
+     handles transform animation off the main thread. */
+  animation: voice-wave-pulse 0.9s ease-in-out infinite;
+  /* Default starting scale puts the bar partway through its cycle so
+     the three bars don't pulse in lockstep on first paint. */
+  transform: scaleY(0.4);
+}
+
+.voice-wave__bar:nth-child(1) {
+  animation-delay: 0s;
+}
+
+.voice-wave__bar:nth-child(2) {
+  animation-delay: 0.18s;
+}
+
+.voice-wave__bar:nth-child(3) {
+  animation-delay: 0.36s;
+}
+
+@keyframes voice-wave-pulse {
+  0%, 100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+/* Pause the animation when the user prefers reduced motion. The bars
+ * stay visible (opacity:1 still applies on the active state) so the
+ * user still gets "this voice is speaking" feedback — just without the
+ * scale animation that some users find distracting. */
+@media (prefers-reduced-motion: reduce) {
+  .voice-wave__bar {
+    animation: none;
+    transform: scaleY(0.7);
+  }
 }
 
 /* =================== Theme picker =================== */

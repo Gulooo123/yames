@@ -24,7 +24,7 @@ mod tts;
 use audio_input::create_shared_audio_input;
 use calibration_cache::create_shared_calibration_cache;
 use coach::create_shared_engine;
-use tts::{create_shared_tts, create_shared_tts_dim};
+use tts::{create_shared_tts, create_shared_tts_active, create_shared_tts_dim};
 use commands::{
     clear_calibration_cache_entry, get_calibration_cache_entry, get_state, get_active_tab, get_calibration_offset, list_calibration_cache, open_url, save_window_position, set_active_tab, set_always_on_top, set_bpm, set_calibration_offset,
     set_instrument, set_playing, set_sound_type, set_subdivision, set_theme, set_time_signature, set_volume, set_widget_mode,
@@ -43,7 +43,8 @@ use commands::{
     get_model_status, write_model_chunk, get_models_path, delete_models,
     start_model_download, cancel_model_download,
     load_coach_model, coach_generate, is_coach_loaded,
-    tts_speak, tts_set_voice, tts_set_volume, tts_list_voices,
+    tts_speak, tts_stop, tts_set_voice, tts_set_volume, tts_list_voices,
+    tts_voice_diagnostics, start_voice_repair,
     EngineState, DownloadState,
 };
 use onset::{create_shared_onset_detector, SharedTempoContext, TempoContext};
@@ -229,10 +230,64 @@ pub fn run() {
                 }
             }
             app.manage(shared_tts);
+
+            // Background startup verification for the Piper engine.
+            // Legacy installs (built before the `.install_verified`
+            // marker scheme) have a working `piper` binary on disk but
+            // no marker — the new `piper_runnable` hot-path check would
+            // false-flag them as "engine missing" and the UI would
+            // start advertising the "Download voices" prompt even
+            // though Piper actually works. We run the smoke test once
+            // in the background; if it passes we write the marker so
+            // subsequent renders trust the install. Failures stay
+            // marker-less, which correctly surfaces the broken state.
+            //
+            // Threaded because the smoke test spawns a subprocess and
+            // the setup() callback should return quickly to keep window
+            // creation responsive — a slow Piper launch on a cold disk
+            // shouldn't block the first frame.
+            {
+                let models_dir = app.path().app_data_dir().unwrap().join("models");
+                std::thread::spawn(move || {
+                    let piper_dir = models_dir.join("piper");
+                    if !piper_dir.join("piper").exists() {
+                        return; // no install yet, nothing to verify
+                    }
+                    let marker = piper_dir.join(tts::PIPER_VERIFIED_MARKER);
+                    if marker.exists() {
+                        return; // already verified by a previous run
+                    }
+                    match tts::piper_smoke_test(&piper_dir) {
+                        Ok(()) => {
+                            if let Err(e) = std::fs::write(&marker, b"") {
+                                eprintln!(
+                                    "[yames] startup verify: failed to write marker at {}: {e}",
+                                    marker.display(),
+                                );
+                            } else {
+                                eprintln!(
+                                    "[yames] startup verify: Piper smoke test passed, wrote {}",
+                                    marker.display(),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[yames] startup verify: Piper smoke test FAILED ({e}) — UI will surface engine-missing state",
+                            );
+                        }
+                    }
+                });
+            }
+
             // Nested-dim counter shared by every `tts_speak` call so
             // concurrent greetings + tips can't lose the user's
             // metronome volume (see tts::TtsDimState).
             app.manage(create_shared_tts_dim());
+            // Tracks the currently-speaking subprocess + a monotonically
+            // increasing generation counter so rapid voice-preview clicks
+            // can interrupt the previous utterance instead of queueing.
+            app.manage(create_shared_tts_active());
             app.manage(DownloadState(std::sync::Mutex::new(None)));
 
             // Set up MIDI listener
@@ -418,9 +473,12 @@ pub fn run() {
             coach_generate,
             is_coach_loaded,
             tts_speak,
+            tts_stop,
             tts_set_voice,
             tts_set_volume,
             tts_list_voices,
+            tts_voice_diagnostics,
+            start_voice_repair,
         ])
         .on_window_event(|window, event| {
             match event {

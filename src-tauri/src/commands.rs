@@ -7,7 +7,7 @@ use crate::onset::{SharedOnsetDetector, SharedTempoContext};
 use crate::session::{SessionReport, SharedSessionAccumulator};
 use crate::state::{AppState, SharedState};
 use crate::timing::SharedTimingAnalyzer;
-use crate::tts::{SharedTts, SharedTtsDim};
+use crate::tts::{SharedTts, SharedTtsActive, SharedTtsDim};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -1465,10 +1465,18 @@ pub fn is_coach_loaded(engine: State<'_, SharedCoachEngine>) -> bool {
 pub async fn tts_speak(
     app_handle: AppHandle,
     tts: State<'_, SharedTts>,
+    tts_active: State<'_, SharedTtsActive>,
     state: State<'_, SharedState>,
     dim_state: State<'_, SharedTtsDim>,
     text: String,
 ) -> Result<(), String> {
+    // Interrupt any in-flight speech BEFORE we dim — a duplicate dim
+    // entry from a rapid-fire click would still be counted on
+    // dim_exit, leaving the metronome stuck quiet. Cancelling here
+    // also covers the per-voice-preview click pattern the user asked
+    // for: clicking another voice should stop the current one.
+    crate::tts::cancel_active_speech(tts_active.inner());
+
     // Dim metronome volume during speech (temporary, not persisted).
     //
     // Nested-dim safety: two TTS calls can land concurrently (e.g.
@@ -1497,27 +1505,45 @@ pub async fn tts_speak(
         }
     }
 
-    // The Piper + afplay subprocesses inside `speak()` block the
-    // calling thread for ~1-5 seconds. Running them directly here pins
-    // a tokio worker for the full duration, which makes every other
-    // async command (boundary IPC, evaluation toggles, settings
-    // changes, …) wait — observed by the user as the whole app
-    // "freezing till the voice is over". Push the blocking work onto
-    // tokio's dedicated blocking pool so async workers stay free.
-    let tts_arc: SharedTts = tts.inner().clone();
+    // Snapshot the engine state ONCE up front so the heavy subprocess
+    // work can run without holding the engine mutex. Pre-fix, holding
+    // the engine lock for the full ~1-5s speak() serialized every
+    // concurrent `tts_speak` — clicking Voice B while Voice A was
+    // playing would queue behind A's speech instead of interrupting
+    // it. The active-state cancellation above gives us the interrupt
+    // semantic; releasing the lock here lets the new call actually
+    // proceed concurrently to do the cancelling.
+    let snapshot = {
+        let engine = tts.lock().map_err(|e| format!("Lock failed: {e}"))?;
+        engine.snapshot()
+    }
+    .ok_or_else(|| "Models directory not set".to_string())?;
+
+    let tts_active_arc: SharedTtsActive = tts_active.inner().clone();
     let text_owned = text;
-    // Emit `tts-speech-started` right before audio playback begins so
-    // the UI can swap a spinner for the actual text in lockstep with
-    // the first audible sample. See `useSession.ts::speakAndReveal`.
     let app_handle_for_emit = app_handle.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let mut tts_engine = tts_arc.lock().map_err(|e| format!("Lock failed: {e}"))?;
-        tts_engine.speak(&text_owned, || {
+    // Push subprocess I/O onto tokio's blocking pool so async workers
+    // stay free for boundary IPC, evaluation toggles, settings, etc.
+    let join_result = tokio::task::spawn_blocking(move || {
+        crate::tts::speak_standalone(&snapshot, &text_owned, &tts_active_arc, || {
             let _ = app_handle_for_emit.emit("tts-speech-started", ());
         })
     })
-    .await
-    .map_err(|e| format!("TTS task join failed: {e}"))?;
+    .await;
+
+    // `tts-speech-ended` fires for EVERY exit path of speak_standalone:
+    // natural completion, user-driven interrupt (another voice click /
+    // `tts_stop`), and Piper/afplay errors that bubbled up. The Settings
+    // voice-preview UI uses this to clear its "speaking" indicator at
+    // the EXACT moment audio actually stops, instead of a coarse 3.5 s
+    // timer that drifted on long/short lines and never honoured
+    // interrupts. Emit BEFORE we unwind the dim so the indicator clears
+    // in lock-step with the audible end of speech — the spawn_blocking
+    // join error path also gets a clean ended event, so the frontend
+    // pending-counter never gets stuck above zero. Each `tts_speak`
+    // call produces exactly one `tts-speech-ended`, so the counter can
+    // be incremented per click and decremented per event.
+    let _ = app_handle.emit("tts-speech-ended", ());
 
     // Restore original volume only when this is the outermost dim
     // releasing. Inner dims are no-ops on restore so a concurrent
@@ -1531,7 +1557,16 @@ pub async fn tts_speak(
         }
     }
 
-    result
+    join_result.map_err(|e| format!("TTS task join failed: {e}"))?
+}
+
+/// Cancel any in-flight TTS speech. Used by the Settings voice-preview
+/// path so clicking a second voice cuts off the first one's audio
+/// instead of queueing behind it. Idempotent — a no-op when nothing
+/// is currently speaking.
+#[tauri::command]
+pub fn tts_stop(tts_active: State<'_, SharedTtsActive>) {
+    crate::tts::cancel_active_speech(tts_active.inner());
 }
 
 #[tauri::command]
@@ -1553,4 +1588,40 @@ pub fn tts_set_volume(tts: State<'_, SharedTts>, volume: f32) {
 #[tauri::command]
 pub fn tts_list_voices(tts: State<'_, SharedTts>) -> Vec<(String, String)> {
     tts.lock().map(|e| e.list_available_voices()).unwrap_or_default()
+}
+
+/// Per-voice readiness for the Settings UI — the JS layer renders the
+/// download button when `engineMissing` OR `onnxMissing` OR `corrupted`,
+/// so the user can repair a single voice without nuking the brain.
+#[tauri::command]
+pub fn tts_voice_diagnostics(tts: State<'_, SharedTts>) -> Vec<crate::tts::VoiceDiagnostic> {
+    tts.lock().map(|e| e.list_voice_diagnostics()).unwrap_or_default()
+}
+
+/// Repair-download a single voice. Re-installs the Piper engine if
+/// it's missing or partial (the dylib-missing case) AND fetches that
+/// voice's `.onnx` + `.onnx.json` sidecar. The frontend wires the
+/// per-voice "Download" buttons in `CoachSettingsSection` to this
+/// command, so a single missing/corrupted voice can be fixed without
+/// re-downloading the whole brain.
+///
+/// Emits the same `model-download-progress` / `model-download-complete`
+/// events as `start_model_download` so the existing download UI works
+/// unchanged. `tier` is omitted from the complete event so the
+/// frontend's "tier completed" branch doesn't false-fire — repairs
+/// don't change the active brain tier.
+#[tauri::command]
+pub fn start_voice_repair(
+    app_handle: AppHandle,
+    voice_id: String,
+    dl_state: State<DownloadState>,
+) -> Result<(), String> {
+    let mut guard = dl_state.0.lock().unwrap();
+    if let Some(old) = guard.take() {
+        old.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    *guard = Some(cancel.clone());
+    models::start_voice_repair(app_handle, voice_id, cancel);
+    Ok(())
 }

@@ -4,6 +4,15 @@ version = "0.9.0"
 description = "Yet Another Metronome Everyone Skips — practice metronome with MIDI control, speed drills, and AI coach"
 authors = ["you"]
 edition = "2021"
+# Tauri's `beforeDevCommand` shells out to `cargo run` with no `--bin`
+# flag. As soon as a second binary lives under `src/bin/` (we added
+# `dump-fixture` for the DSP fixture pipeline), Cargo refuses to pick a
+# default and `tauri dev` fails with:
+#   error: `cargo run` could not determine which binary to run.
+#   available binaries: dump-fixture, yames
+# `default-run` tells Cargo which binary `cargo run` (no `--bin`) should
+# launch — the desktop app — so `tauri dev` keeps booting the shell.
+default-run = "yames"
 
 [lib]
 name = "yames_lib"

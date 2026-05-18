@@ -10,8 +10,9 @@ import {
   ttsListVoices,
   ttsSetVoice,
   ttsSetVolume,
+  ttsVoiceDiagnostics,
 } from "../ipc";
-import type { DownloadProgress, ModelStatus } from "../ipc";
+import type { DownloadProgress, ModelStatus, VoiceDiagnostic } from "../ipc";
 import type { BrainTier, ModelTier, VoiceMode, Verbosity } from "../types";
 
 // Legacy persisted values may still carry "chime" from an earlier
@@ -60,6 +61,15 @@ export function useCoachDownload() {
   const [availableVoices, setAvailableVoices] = useState<[string, string][]>(
     [],
   );
+  // Per-voice diagnostic flags driven by `tts_voice_diagnostics`. Lets
+  // the Settings UI render a per-voice "Repair" button when a voice is
+  // missing on disk, has a corrupted .onnx (size < MIN_ONNX_BYTES), or
+  // when the Piper engine itself is broken (dylibs / binary missing).
+  // Kept alongside `availableVoices` so existing call sites that only
+  // need the ready list don't have to adapt.
+  const [voiceDiagnostics, setVoiceDiagnostics] = useState<VoiceDiagnostic[]>(
+    [],
+  );
   // Voice playback gain (0..1). Lives next to the metronome volume in the
   // unified header slider so users can tame the coach independently.
   const [ttsVolume, setTtsVolumeState] = useState<number>(1.0);
@@ -99,6 +109,7 @@ export function useCoachDownload() {
       }
     });
     ttsListVoices().then(setAvailableVoices);
+    ttsVoiceDiagnostics().then(setVoiceDiagnostics).catch(() => {});
   }, []);
 
   // Setter wrapper: persist + push the new gain into the Rust TTS engine so
@@ -145,11 +156,23 @@ export function useCoachDownload() {
     });
     const unsubComplete = onDownloadComplete((result) => {
       if (result.success && result.tier) {
+        // Full brain+voices install path — tier present, persist + flip
+        // the active brain tier.
         setCoachBrainTier(result.tier as ModelTier);
         storeSave("coachBrainTier", result.tier);
         setDownloadSuccess(true);
         getModelStatus().then(setModelStatus);
         ttsListVoices().then(setAvailableVoices);
+        ttsVoiceDiagnostics().then(setVoiceDiagnostics).catch(() => {});
+      } else if (result.success) {
+        // Per-voice repair path — no `tier` field on the event so we
+        // don't clobber the active brain tier. Still refresh model
+        // status + diagnostics so the UI reflects the freshly-repaired
+        // voice (the previously disabled toggle should now light up).
+        setDownloadSuccess(true);
+        getModelStatus().then(setModelStatus);
+        ttsListVoices().then(setAvailableVoices);
+        ttsVoiceDiagnostics().then(setVoiceDiagnostics).catch(() => {});
       } else if (!result.cancelled && result.error) {
         setDownloadError(result.error);
       }
@@ -191,6 +214,7 @@ export function useCoachDownload() {
     coachVerbosity,
     setCoachVerbosity,
     availableVoices,
+    voiceDiagnostics,
     ttsVolume,
     setTtsVolume,
     // actions

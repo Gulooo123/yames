@@ -633,6 +633,7 @@ export function MainWindow() {
             setModelStatus={coach.setModelStatus}
             modelDownloading={coach.modelDownloading}
             availableVoices={coach.availableVoices}
+            voiceDiagnostics={coach.voiceDiagnostics}
             instrument={instrument}
             setInstrument={setInstrument}
             onStartDownload={coach.handleStartDownload}

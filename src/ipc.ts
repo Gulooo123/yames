@@ -681,6 +681,20 @@ export function onTtsSpeechStarted(callback: () => void) {
   return listen<null>("tts-speech-started", () => callback());
 }
 
+/**
+ * Subscribe to the "TTS speech ended" signal — fires once per
+ * `tts_speak` invocation in every exit path: natural completion,
+ * cancellation via `tts_stop` (or another voice click), AND error.
+ * Used by the Settings voice-preview UI to clear the per-voice
+ * "speaking" indicator at the exact moment audio stops, instead of a
+ * coarse timer that didn't honour interrupts. Pair every increment of
+ * a pending-speech counter with a decrement here for a clean tally
+ * across rapid voice-button clicks.
+ */
+export function onTtsSpeechEnded(callback: () => void) {
+  return listen<null>("tts-speech-ended", () => callback());
+}
+
 export async function ttsSetVoice(voice: string): Promise<void> {
   return invoke("tts_set_voice", { voice });
 }
@@ -696,6 +710,58 @@ export async function ttsSetVolume(volume: number): Promise<void> {
 
 export async function ttsListVoices(): Promise<[string, string][]> {
   return invoke<[string, string][]>("tts_list_voices");
+}
+
+/**
+ * Interrupt any currently-playing TTS utterance (piper-then-afplay or the
+ * macOS `say` fallback). The Rust side bumps a generation counter so any
+ * in-flight `speak_standalone` call early-returns as Cancelled and kills
+ * the tracked PID with `kill -9`. Safe to call when nothing is playing
+ * (the counter still bumps but no kill is issued). Used by the voice
+ * preview UI so rapid clicks across voices feel snappy instead of
+ * queueing up.
+ */
+export async function ttsStop(): Promise<void> {
+  return invoke("tts_stop");
+}
+
+/**
+ * Per-voice diagnostic info from the Rust side. Mirrors the
+ * `VoiceDiagnostic` struct in `tts.rs` (serde renames the boolean fields
+ * to camelCase). `ready` is true only when:
+ *   - the Piper binary + its 3 required dylibs are all on disk
+ *   - the voice's .onnx file exists AND is larger than `MIN_ONNX_BYTES`
+ *   - the voice's .onnx.json sidecar exists
+ *
+ * The UI uses these flags to gate the per-voice download button — if
+ * any of `engineMissing`, `onnxMissing`, `jsonMissing`, or `corrupted`
+ * is true, the voice can't speak and the user needs to click "Repair".
+ */
+export interface VoiceDiagnostic {
+  id: string;
+  name: string;
+  ready: boolean;
+  corrupted: boolean;
+  onnxMissing: boolean;
+  jsonMissing: boolean;
+  engineMissing: boolean;
+  onnxBytes: number;
+}
+
+export async function ttsVoiceDiagnostics(): Promise<VoiceDiagnostic[]> {
+  return invoke<VoiceDiagnostic[]>("tts_voice_diagnostics");
+}
+
+/**
+ * Download (or re-download) a single voice's .onnx + .onnx.json. If the
+ * Piper engine itself is missing required dylibs, this also re-extracts
+ * the Piper tarball before pulling the voice. Emits the standard
+ * `model-download-progress` events; on success emits
+ * `model-download-complete` WITHOUT a `tier` field so the frontend
+ * doesn't clobber the active brain tier.
+ */
+export async function startVoiceRepair(voiceId: string): Promise<void> {
+  return invoke("start_voice_repair", { voiceId });
 }
 
 export function onDownloadProgress(callback: (progress: DownloadProgress) => void) {

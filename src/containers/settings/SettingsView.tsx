@@ -7,7 +7,7 @@ import type {
   VoiceMode,
   WidgetMode,
 } from "../../types";
-import type { ModelStatus } from "../../ipc";
+import type { ModelStatus, VoiceDiagnostic } from "../../ipc";
 import type { useEvaluation } from "../../hooks/useEvaluation";
 import type { UseMidiReturn } from "../../hooks/useMidi";
 import type { BindingTarget } from "./KeybindingModals";
@@ -80,6 +80,7 @@ interface SettingsViewProps {
   setModelStatus: Dispatch<SetStateAction<ModelStatus | null>>;
   modelDownloading: boolean;
   availableVoices: [string, string][];
+  voiceDiagnostics: VoiceDiagnostic[];
   instrument: string;
   setInstrument: Dispatch<SetStateAction<string>>;
   onStartDownload: (tier: ModelTier) => void;
@@ -157,6 +158,7 @@ export function SettingsView({
   setModelStatus,
   modelDownloading,
   availableVoices,
+  voiceDiagnostics,
   instrument,
   setInstrument,
   onStartDownload,
@@ -237,6 +239,7 @@ export function SettingsView({
         setModelStatus={setModelStatus}
         modelDownloading={modelDownloading}
         availableVoices={availableVoices}
+        voiceDiagnostics={voiceDiagnostics}
         instrument={instrument}
         setInstrument={setInstrument}
         onStartDownload={onStartDownload}

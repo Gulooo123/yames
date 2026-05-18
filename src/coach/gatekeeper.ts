@@ -47,18 +47,28 @@ export const SPOKEN_COOLDOWN_CEILING_MS = 60_000;
 /**
  * Hard floor on written-channel cooldown.
  *
- * Bumped from 3s → 8s on 2026-05-17 (player feedback: "the number of
- * interruptions from the coach are overwhelming, specially as soon as
- * I start playing... haven't even played for 5s already got lots of
- * comments"). At 3s the cooldown floor was almost decorative — back-to-
- * back written tips were technically allowed and frequently happened
- * because the burst limiter only kicks in at 3 fires per 30s. 8s gives
- * the player one or two bars between any two written tips at common
- * tempos.
+ * History:
+ *   - 3s (original): nearly decorative — bursts only stopped at 3/30s.
+ *   - 8s (2026-05-17): bought a single bar of breathing room at 120 BPM
+ *     but still allowed 3 corrective tips inside the burst-short window.
+ *   - 18s (2026-05-18): paired with the new `CORRECTIVE_CHANNEL_COOLDOWN_MS`
+ *     to address player feedback that even with the 8s floor, written
+ *     tips of DIFFERENT corrective scenarios (drift_early → drop →
+ *     drift_late) chained inside 20–30 seconds. At 18s the floor
+ *     guarantees ≥ 25 beats between any two written tips at 85 BPM
+ *     (one slow bar of 16ths). The corrective-channel cooldown gates
+ *     contradictory tips on top of this; the burst limiter still
+ *     handles sustained chatty stretches.
  */
-export const WRITTEN_COOLDOWN_FLOOR_MS = 8_000;
-/** Hard ceiling on written-channel cooldown. */
-export const WRITTEN_COOLDOWN_CEILING_MS = 10_000;
+export const WRITTEN_COOLDOWN_FLOOR_MS = 18_000;
+/** Hard ceiling on written-channel cooldown.
+ *
+ * Bumped 10s → 30s on 2026-05-18 so the adaptive scaling
+ * (`sinceStart × 0.05`) actually has headroom — at the old 10s ceiling
+ * the formula clamped before it could meaningfully lengthen pauses on
+ * long sessions. 30s lines up with the corrective-channel cooldown so
+ * "calm" sessions feel calm and "chatty" sessions still get debounced. */
+export const WRITTEN_COOLDOWN_CEILING_MS = 30_000;
 
 /** Adaptive cooldown floor: spoken silence that triggers `check_in`. */
 export const CHECK_IN_AFTER_QUIET_MS = 5 * 60 * 1000;
@@ -416,6 +426,30 @@ export function createGatekeeper(sessionStartMs: number): GatekeeperState {
 }
 
 /**
+ * True when we're still in the INITIAL warmup window — the first
+ * `WARMUP_GRACE_MS` after session start, before any tempo-change
+ * `bumpWarmup` or boundary-signal re-arm could have extended it.
+ *
+ * The generic `state.warmupUntilMs` check doesn't distinguish "first
+ * 30s of session" from "30s after a mid-session tempo change", but
+ * the player experience differs:
+ *   - At session start they want pure silence to warm up — no spoken
+ *     tips, including ALWAYS_SPOKEN ones and forced boundary signals.
+ *   - At a mid-session tempo change they want the boundary
+ *     acknowledged ("Bumped to 130 BPM — let's go") because they just
+ *     initiated the change.
+ *
+ * Used by `evaluate` to demote forced spoken events to written when
+ * the session is still in its initial warmup runway.
+ */
+export function isInInitialWarmup(
+  state: GatekeeperState,
+  now: number,
+): boolean {
+  return now < state.sessionStartMs + WARMUP_GRACE_MS;
+}
+
+/**
  * Extend the warmup grace window. Called from the session layer when
  * the player changes tempo, picks a different preset, or otherwise
  * starts a fresh exercise — give them a brief quiet runway to settle
@@ -653,6 +687,54 @@ function passesPerScenarioCooldown(
 }
 
 /**
+ * Cross-scenario "corrective channel" cooldown (2026-05-18).
+ *
+ * The per-scenario map debounces REPEATS of the same tag, but the
+ * corrective scenarios as a group share a problem: they're all
+ * "coach is correcting you" tips, and the player can't tell them
+ * apart fast enough when they stack. Player feedback was a tight
+ * cluster of
+ *
+ *     drift_early → accuracy_drop → drift_late → drift_early
+ *
+ * across ~55 seconds — each scenario passed its OWN 25s/60s
+ * per-scenario gate because the gates only look at one tag at a
+ * time. The result reads as a coach piling on with contradictory
+ * advice, which is worse than silence.
+ *
+ * This gate enforces a 30s cooldown across the whole corrective
+ * family. Once any one of them fires, the others wait. Doesn't
+ * affect non-corrective scenarios (PB streak, milestones, recovery,
+ * boundary events, low-confidence, check-in).
+ */
+export const CORRECTIVE_CHANNEL_COOLDOWN_MS = 30_000;
+
+const CORRECTIVE_SCENARIOS: ReadonlySet<ScenarioTag> = new Set([
+  "rushing_trend",
+  "dragging_trend",
+  "accuracy_drop",
+  "fatigue",
+]);
+
+function passesCorrectiveChannel(
+  state: GatekeeperState,
+  scenario: ScenarioTag,
+  now: number,
+): boolean {
+  if (!CORRECTIVE_SCENARIOS.has(scenario)) return true;
+  // Find the newest fire across the corrective family (any scenario
+  // in the set, not just the one we're evaluating). Tracked via
+  // `lastEventMs` which is already kept up to date by `commit`.
+  let lastCorrectiveFire = 0;
+  for (const tag of CORRECTIVE_SCENARIOS) {
+    const t = state.lastEventMs[tag];
+    if (t !== undefined && t > lastCorrectiveFire) lastCorrectiveFire = t;
+  }
+  if (lastCorrectiveFire === 0) return true;
+  return now - lastCorrectiveFire >= CORRECTIVE_CHANNEL_COOLDOWN_MS;
+}
+
+/**
  * Combined gate: a detected scenario only passes when ALL gates pass.
  * Order is cheapest-first for short-circuit efficiency, but every
  * gate is consulted on a real fire so behavior is independent of
@@ -667,6 +749,11 @@ function passesAllGates(
   now: number,
 ): boolean {
   if (!passesPerScenarioCooldown(state, scenario, now)) return false;
+  // Corrective-channel cooldown runs alongside the per-scenario gate.
+  // It only affects {rushing_trend, dragging_trend, accuracy_drop,
+  // fatigue} — see `passesCorrectiveChannel`. Cheap (set membership +
+  // 4 map lookups) so it's safe to run before the warmup check.
+  if (!passesCorrectiveChannel(state, scenario, now)) return false;
   if (!passesWarmup(state, scenario, now)) return false;
   if (!passesRepetition(state, scenario, tier)) return false;
   if (!passesBurstLimit(state, scenario, now)) return false;
@@ -1019,11 +1106,23 @@ export function evaluate(
   state: GatekeeperState,
   ctx: GatekeeperContext,
 ): { state: GatekeeperState; event: GatekeeperEvent | null } {
-  // 1. Forced events bypass everything except the first-beats rule.
+  // 1. Forced events bypass cooldown / streak / warmup-suppression
+  // gates BUT not the initial-warmup tier demotion. Player feedback
+  // (2026-05-18): "warmup grace of 30 seconds is already fine... as
+  // long as its respected, not like when i started playing that it
+  // immediately started firing comments". The "immediate firing"
+  // was forced `boundary_signal_b` (activity-gap detection on the
+  // very first beats of a session) sneaking through with tier
+  // "spoken" — bypassing the warmup gate because forced events
+  // skipped `passesAllGates` entirely. The event still belongs in
+  // the feed (the coach has acknowledged the start), but it must
+  // not trigger TTS during the warmup runway. Demoting to "written"
+  // achieves both: silent acknowledgement, no audible interruption.
   if (ctx.force) {
+    const tier: Tier = isInInitialWarmup(state, ctx.now) ? "written" : "spoken";
     const forced: GatekeeperEvent = {
       scenario: ctx.force.scenario,
-      tier: "spoken",
+      tier,
       context: ctx.force.context,
       taggedBpm: ctx.bpm,
     };

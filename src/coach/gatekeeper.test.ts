@@ -10,6 +10,7 @@
 
 import { describe, it, expect } from "vitest";
 import type { BeatFeedback } from "../types";
+import type { ScenarioTag } from "./gatekeeper";
 import {
   ACCURACY_DROP_CONFIRMATIONS,
   ACCURACY_DROP_WINDOW,
@@ -20,6 +21,7 @@ import {
   BURST_SHORT_PENALTY_MS,
   BURST_SHORT_WINDOW_MS,
   CHECK_IN_AFTER_QUIET_MS,
+  CORRECTIVE_CHANNEL_COOLDOWN_MS,
   DRILL_STALENESS_BPM,
   FIRST_BEATS_TTS_FLOOR,
   LOW_CONFIDENCE_SUSTAIN_MS,
@@ -38,6 +40,7 @@ import {
   evaluate,
   isAlwaysSpoken,
   isFirstBeatsExempt,
+  isInInitialWarmup,
   resetCooldowns,
   shouldDropForStaleness,
   spokenCooldownMs,
@@ -103,12 +106,18 @@ describe("spokenCooldownMs", () => {
 });
 
 describe("writtenCooldownMs", () => {
-  it("clamps to the 3s floor and 10s ceiling", () => {
+  it("clamps to the configured floor and ceiling", () => {
+    // Formula: min(ceiling, max(floor, sinceStart × 0.05)).
+    // Asserted against the constants directly so the test stays
+    // correct as the envelope is tuned (was 3s–10s pre-2026-05-17,
+    // then 8s–10s, then 18s–30s as the coach grew less chatty).
+    //
+    // sinceStart=0 → scaled=0 → clamped UP to floor.
     expect(writtenCooldownMs(0)).toBe(WRITTEN_COOLDOWN_FLOOR_MS);
-    expect(writtenCooldownMs(60_000)).toBe(WRITTEN_COOLDOWN_FLOOR_MS); // 3s at 1 min
-    expect(writtenCooldownMs(5 * 60 * 1000)).toBe(15_000 > WRITTEN_COOLDOWN_CEILING_MS
-      ? WRITTEN_COOLDOWN_CEILING_MS
-      : 15_000);
+    // 1 minute of session: scaled = 3s — well below the floor at
+    // every value of WRITTEN_COOLDOWN_FLOOR_MS we've shipped.
+    expect(writtenCooldownMs(60_000)).toBe(WRITTEN_COOLDOWN_FLOOR_MS);
+    // 1 hour of session: scaled = 180s — well past any ceiling.
     expect(writtenCooldownMs(60 * 60 * 1000)).toBe(WRITTEN_COOLDOWN_CEILING_MS);
   });
 });
@@ -652,6 +661,26 @@ describe("evaluate — forced events", () => {
   });
 
   it("forced event commits lastSpokenMs so subsequent calls cool down", () => {
+    // Post-warmup forced event commits at spoken tier — both
+    // cooldown channels are pulled forward.
+    const state = createGatekeeper(T0);
+    const r = evaluate(state, {
+      now: T0 + WARMUP_GRACE_MS + 1_000,
+      bpm: 120,
+      window: [],
+      force: { scenario: "boundary_signal_a", context: {} },
+    });
+    expect(r.state.lastSpokenMs).toBe(T0 + WARMUP_GRACE_MS + 1_000);
+    expect(r.state.lastWrittenMs).toBe(T0 + WARMUP_GRACE_MS + 1_000);
+  });
+
+  it("forced event during initial warmup only commits lastWrittenMs", () => {
+    // Inside the initial-warmup envelope, forced events are demoted
+    // to written tier — so the spoken cooldown clock must NOT advance.
+    // (See `isInInitialWarmup` + the forced-branch tier resolver in
+    // `evaluate`.) Without this guard, a forced Signal A at T0+1_000
+    // would lock the spoken channel for the next 20s+ and starve
+    // legitimate post-warmup spoken events.
     const state = createGatekeeper(T0);
     const r = evaluate(state, {
       now: T0 + 1_000,
@@ -659,7 +688,10 @@ describe("evaluate — forced events", () => {
       window: [],
       force: { scenario: "boundary_signal_a", context: {} },
     });
-    expect(r.state.lastSpokenMs).toBe(T0 + 1_000);
+    expect(r.event?.tier).toBe("written");
+    // lastSpokenMs left at the default seeded by createGatekeeper.
+    expect(r.state.lastSpokenMs).toBe(T0);
+    expect(r.state.lastWrittenMs).toBe(T0 + 1_000);
   });
 });
 
@@ -760,7 +792,30 @@ describe("evaluate — first-4-beats TTS hard rule", () => {
     expect(event?.tier).toBe("spoken");
   });
 
-  it("Signal A always speaks even at beat 0 (user-initiated boundary)", () => {
+  it("Signal A speaks at beat 0 once past initial warmup (user-initiated boundary)", () => {
+    // Signal A is exempt from the first-4-beats rule (a tempo change
+    // the user just made should announce regardless of beats elapsed)
+    // — but only AFTER the initial-warmup envelope. Inside the first
+    // 30s of a session, the initial-warmup demotion still wins.
+    const state = createGatekeeper(T0);
+    const { event } = evaluate(state, {
+      now: T0 + WARMUP_GRACE_MS + 1_000,
+      bpm: 130,
+      window: manyHits(8),
+      beatsInSegment: 0,
+      force: {
+        scenario: "boundary_signal_a",
+        context: { change: "tempo up to 130 BPM" },
+      },
+    });
+    expect(event?.scenario).toBe("boundary_signal_a");
+    expect(event?.tier).toBe("spoken");
+  });
+
+  it("Signal A is demoted to written during the initial warmup envelope", () => {
+    // Belt-and-suspenders: even the first-4-beats-exempt Signal A
+    // observes the initial warmup. Otherwise a tempo change at T0+1s
+    // would speak inside a window the user just asked to be quiet.
     const state = createGatekeeper(T0);
     const { event } = evaluate(state, {
       now: T0 + 1_000,
@@ -773,7 +828,7 @@ describe("evaluate — first-4-beats TTS hard rule", () => {
       },
     });
     expect(event?.scenario).toBe("boundary_signal_a");
-    expect(event?.tier).toBe("spoken");
+    expect(event?.tier).toBe("written");
   });
 
   it("Signal B is demoted during the first 4 beats of its new segment", () => {
@@ -976,13 +1031,16 @@ describe("evaluate — warmup grace", () => {
     expect(event?.scenario).toBe("accuracy_drop");
   });
 
-  it("does NOT suppress ALWAYS_SPOKEN scenarios during warmup", () => {
-    // Forced boundary_signal_a (a settings change the user just made)
-    // fires inside warmup because it's always-spoken — it's the
-    // acknowledgement of the player's own input, suppressing it would
-    // feel broken. Pre-2026-05-17 this test used personal_best_streak,
-    // but PB was demoted out of ALWAYS_SPOKEN; any remaining always-
-    // spoken scenario exercises the bypass equally well.
+  it("demotes forced events to written tier during initial warmup", () => {
+    // Forced events (settings changes the user just made) still surface
+    // during initial warmup — silence would feel broken — but they're
+    // written-only so the user gets visual ack without the coach
+    // jumping in audibly within the first 30s of a session.
+    // Pre-2026-05-17 this test asserted the forced bypass; that bypass
+    // ALSO short-circuited the tier resolver, so a forced event landed
+    // at full spoken tier the instant a session started. The cadence
+    // fix demotes the tier to "written" while inside the initial
+    // warmup envelope so the warmup grace is actually respected.
     const state = createGatekeeper(T0);
     const { event } = evaluate(state, {
       now: T0 + 1_000, // deep inside warmup
@@ -991,17 +1049,30 @@ describe("evaluate — warmup grace", () => {
       force: { scenario: "boundary_signal_a", context: { change: "tempo up" } },
     });
     expect(event?.scenario).toBe("boundary_signal_a");
+    expect(event?.tier).toBe("written");
   });
 
-  it("does NOT suppress forced boundary events during warmup", () => {
+  it("fires forced events at spoken tier once initial warmup has elapsed", () => {
+    // Past the initial warmup envelope, forced events resolve to
+    // spoken tier as before — only the first 30s of a session is
+    // protected from audible interjections.
     const state = createGatekeeper(T0);
     const { event } = evaluate(state, {
-      now: T0 + 500,
+      now: T0 + WARMUP_GRACE_MS + 500,
       bpm: 130,
       window: manyHits(8),
       force: { scenario: "boundary_signal_a", context: { change: "tempo up" } },
     });
     expect(event?.scenario).toBe("boundary_signal_a");
+    expect(event?.tier).toBe("spoken");
+  });
+
+  it("isInInitialWarmup tracks the WARMUP_GRACE_MS envelope from session start", () => {
+    const state = createGatekeeper(T0);
+    expect(isInInitialWarmup(state, T0)).toBe(true);
+    expect(isInInitialWarmup(state, T0 + WARMUP_GRACE_MS - 1)).toBe(true);
+    expect(isInInitialWarmup(state, T0 + WARMUP_GRACE_MS)).toBe(false);
+    expect(isInInitialWarmup(state, T0 + WARMUP_GRACE_MS + 60_000)).toBe(false);
   });
 
   it("auto-bumps warmup when boundary_signal_a commits", () => {
@@ -1054,6 +1125,126 @@ describe("evaluate — warmup grace", () => {
       window,
     });
     expect(r2.event).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Corrective channel cooldown — cross-scenario cooldown across the
+// {rushing_trend, dragging_trend, accuracy_drop, fatigue} family so
+// the coach doesn't pile on with overlapping advice in tight windows.
+// ---------------------------------------------------------------------------
+
+describe("evaluate — corrective channel cooldown", () => {
+  it("CORRECTIVE_CHANNEL_COOLDOWN_MS is 30 seconds", () => {
+    // Sanity-pin the constant; bumping this affects perceived chatter
+    // and should be a deliberate decision, not a slip in tuning.
+    expect(CORRECTIVE_CHANNEL_COOLDOWN_MS).toBe(30_000);
+  });
+
+  it("blocks a corrective scenario when another corrective fired within the window", () => {
+    // Seed `lastEventMs.rushing_trend` as if rushing_trend had just
+    // committed 15s before our evaluation. accuracy_drop's OWN
+    // per-scenario cooldown is fresh, but the cross-family gate
+    // should still suppress it.
+    let state = {
+      ...createGatekeeper(T0),
+      bestStreak: HIGH_PB,
+      lastEventMs: {
+        rushing_trend: T0 + WARMUP_GRACE_MS + 15_000,
+      } as Partial<Record<ScenarioTag, number>>,
+    };
+    const window = [
+      ...manyHits(ACCURACY_DROP_WINDOW),
+      ...manyMisses(ACCURACY_DROP_WINDOW),
+    ];
+    // Two passes to clear the accuracy-drop confirmation counter —
+    // both inside the corrective-cooldown window.
+    state = evaluate(state, {
+      now: T0 + WARMUP_GRACE_MS + 25_000,
+      bpm: 120,
+      window,
+    }).state;
+    const result = evaluate(state, {
+      now: T0 + WARMUP_GRACE_MS + 25_500,
+      bpm: 120,
+      window,
+    });
+    expect(result.event).toBeNull();
+  });
+
+  it("allows a corrective scenario once the cross-family cooldown has elapsed", () => {
+    let state = {
+      ...createGatekeeper(T0),
+      bestStreak: HIGH_PB,
+      lastEventMs: {
+        rushing_trend: T0 + WARMUP_GRACE_MS + 15_000,
+      } as Partial<Record<ScenarioTag, number>>,
+    };
+    const window = [
+      ...manyHits(ACCURACY_DROP_WINDOW),
+      ...manyMisses(ACCURACY_DROP_WINDOW),
+    ];
+    // Two passes well past the 30s envelope (>= 30s after the
+    // rushing_trend fire at WARMUP_GRACE_MS + 15_000).
+    state = evaluate(state, {
+      now: T0 + WARMUP_GRACE_MS + 50_000,
+      bpm: 120,
+      window,
+    }).state;
+    const result = evaluate(state, {
+      now: T0 + WARMUP_GRACE_MS + 50_500,
+      bpm: 120,
+      window,
+    });
+    expect(result.event?.scenario).toBe("accuracy_drop");
+  });
+
+  it("does NOT block non-corrective scenarios", () => {
+    // personal_best_streak is outside the corrective family. A recent
+    // rushing_trend fire must NOT suppress milestones / streaks.
+    const state = {
+      ...createGatekeeper(T0),
+      bestStreak: 8,
+      lastEventMs: {
+        rushing_trend: T0 + WARMUP_GRACE_MS + 15_000,
+      } as Partial<Record<ScenarioTag, number>>,
+    };
+    const result = evaluate(state, {
+      now: T0 + WARMUP_GRACE_MS + 25_000,
+      bpm: 120,
+      window: manyHits(STREAK_PERSONAL_BEST_MIN + 5),
+    });
+    expect(result.event?.scenario).toBe("personal_best_streak");
+  });
+
+  it("treats the corrective family as cross-scenario — dragging blocks rushing too", () => {
+    // The gate looks across the whole family, not just one tag at a
+    // time. Seed dragging_trend's fire time and verify rushing_trend
+    // is suppressed (and vice-versa is exercised by the other tests).
+    let state = {
+      ...createGatekeeper(T0),
+      bestStreak: HIGH_PB,
+      lastEventMs: {
+        dragging_trend: T0 + WARMUP_GRACE_MS + 10_000,
+      } as Partial<Record<ScenarioTag, number>>,
+    };
+    const window = [
+      ...manyHits(ACCURACY_DROP_WINDOW, 0),
+      ...manyHits(ACCURACY_DROP_WINDOW, -10),
+    ];
+    state = evaluate(state, {
+      now: T0 + WARMUP_GRACE_MS + 20_000,
+      bpm: 120,
+      window,
+      inStreak: false,
+    }).state;
+    const result = evaluate(state, {
+      now: T0 + WARMUP_GRACE_MS + 20_500,
+      bpm: 120,
+      window,
+      inStreak: false,
+    });
+    expect(result.event).toBeNull();
   });
 });
 

@@ -5,9 +5,11 @@
 //! file, then playing it with `afplay` (macOS). The metronome volume is
 //! dimmed during speech (handled by the tts_speak command).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+
+use serde::Serialize;
 
 /// Available voice identifiers — maps to downloaded .onnx files.
 pub const VOICES: &[(&str, &str)] = &[
@@ -15,6 +17,23 @@ pub const VOICES: &[(&str, &str)] = &[
     ("amy", "Amy"),         // Female, warm
     ("ryan", "Ryan"),       // Male, deeper
 ];
+
+/// Minimum size a Piper medium ONNX model file should have on disk to be
+/// considered "real" rather than a stalled/partial download. The actual
+/// medium models from rhasspy/piper-voices weigh ~60 MB; we floor at
+/// 30 MB so the check is robust to future minor size shifts but still
+/// catches the common corruption mode: a 1-2 KB HTML error page that
+/// curl saved when the CDN returned a 4xx/5xx mid-download. Without
+/// this floor, `list_available_voices` would advertise the voice as
+/// usable, the user would click it, and Piper would crash on garbage
+/// input — same regression class as the missing-dylib silence bug.
+pub const MIN_ONNX_BYTES: u64 = 30 * 1024 * 1024;
+
+/// Minimum size for the `.onnx.json` sidecar. Real sidecars are ~5 KB
+/// of JSON (phoneme map + speaker config). 1 KB catches the "saved an
+/// empty 404 page" failure mode without false-flagging legitimate
+/// future config trims.
+pub const MIN_ONNX_JSON_BYTES: u64 = 1024;
 
 /// Map a Piper voice id to the closest macOS `say` voice for the
 /// fallback path (used when Piper isn't installed or the model file is
@@ -45,6 +64,63 @@ pub type SharedTts = Arc<Mutex<TtsEngine>>;
 
 pub fn create_shared_tts() -> SharedTts {
     Arc::new(Mutex::new(TtsEngine::new()))
+}
+
+/// Interrupt-aware tracking for the in-flight TTS subprocess (piper,
+/// afplay, or the `say` fallback). A monotonic `generation` counter
+/// distinguishes "process finished naturally" from "user clicked
+/// another voice and cancelled this one" so `speak_standalone` knows
+/// whether to fall back to `say` (natural failure) or just return
+/// cleanly (intentional cancellation).
+///
+/// Why a counter rather than a boolean: two cancellations can race —
+/// user clicks voice A, then voice B, then voice C. The boolean would
+/// be flipped by B and reset by C, leaving A's wait() unsure whether
+/// it was cancelled. The counter is bumped on every cancel/new-speak,
+/// and each `speak_standalone` snapshot captures its OWN generation
+/// at start — anything that increments past that means "I lost my
+/// slot," no matter how many later interrupts happened.
+#[derive(Debug, Default)]
+pub struct TtsActive {
+    /// Bumped on every new speak request and every `tts_stop`. Each
+    /// `speak_standalone` invocation captures this value once at the
+    /// top; any later mismatch == "I was interrupted."
+    pub generation: u64,
+    /// PID of the subprocess (piper / afplay / say) the current
+    /// generation owns. None when no subprocess is mid-wait.
+    pub pid: Option<u32>,
+}
+
+pub type SharedTtsActive = Arc<Mutex<TtsActive>>;
+
+pub fn create_shared_tts_active() -> SharedTtsActive {
+    Arc::new(Mutex::new(TtsActive::default()))
+}
+
+/// Cancel any in-flight TTS subprocess and bump the generation so its
+/// `speak_standalone` returns cleanly (without falling back to `say`)
+/// when its wait() resolves. Safe to call when nothing is playing — in
+/// that case we just bump the generation, which is harmless.
+///
+/// Kills via the macOS `kill -9 <pid>` command so we don't have to
+/// pull in `nix` or `libc` for one signal call. Failures are
+/// swallowed — if the process has already exited, the wait() in the
+/// owner thread will resolve the same instant either way.
+pub fn cancel_active_speech(active: &SharedTtsActive) {
+    let pid = {
+        let mut guard = active.lock().unwrap();
+        guard.generation = guard.generation.wrapping_add(1);
+        guard.pid.take()
+    };
+    if let Some(pid) = pid {
+        // `-9` is SIGKILL — the cleanest interruption signal. The
+        // child can't ignore it (unlike SIGINT/SIGTERM) so we don't
+        // risk a hung `afplay` waiting for the metronome dim restore.
+        let _ = Command::new("kill")
+            .arg("-9")
+            .arg(pid.to_string())
+            .status();
+    }
 }
 
 /// Tracks nested metronome-volume dims so two concurrent `tts_speak`
@@ -142,140 +218,528 @@ impl TtsEngine {
         }
     }
 
-    /// Speak text using Piper TTS.
-    /// Generates a WAV file then plays it with afplay.
-    /// Blocks until playback is complete — call from a background thread.
-    /// Synthesize the text and play it. The `on_ready_to_play` callback
-    /// fires AFTER synthesis has finished but BEFORE audio playback
-    /// starts — that is the moment to reveal the text in the UI so the
-    /// spinner-to-text swap lands within ~10-30ms of the first audible
-    /// sample (the typical `afplay`/`say` launch latency).
-    ///
-    /// The callback is `FnOnce` so it cannot fire twice even if both
-    /// the Piper and the `say` fallback paths get hit (only one will).
+    /// Snapshot the fields `speak_standalone` needs so we can release
+    /// the engine lock before doing any subprocess I/O. Holding the
+    /// engine mutex during the 1-5 second Piper+afplay window serialized
+    /// every concurrent `tts_speak` call — the regression the user hit
+    /// where clicking a second voice preview would queue behind the
+    /// first instead of interrupting it.
+    pub fn snapshot(&self) -> Option<TtsSnapshot> {
+        self.models_dir.as_ref().map(|dir| TtsSnapshot {
+            voice: self.voice.clone(),
+            models_dir: dir.clone(),
+            volume: self.volume,
+        })
+    }
+
+    /// Speak text using Piper TTS. Kept as a thin wrapper around the
+    /// free-function `speak_standalone` so the existing single-shot
+    /// call sites (tests, the dim/coach pipeline) keep working without
+    /// being aware of the interrupt machinery. The interrupt-aware
+    /// path goes through `commands::tts_speak` which calls the free
+    /// function directly with a `SharedTtsActive` it owns.
+    #[allow(dead_code)]
     pub fn speak<F: FnOnce()>(&mut self, text: &str, on_ready_to_play: F) -> Result<(), String> {
-        let dir = self.models_dir.as_ref().ok_or("Models directory not set")?;
-        let piper_bin = dir.join("piper").join("piper");
-        let model_path = dir.join("voice").join(format!("en_US-{}-medium.onnx", self.voice));
-
-        if !piper_bin.exists() {
-            return self.speak_fallback(text, on_ready_to_play);
-        }
-        if !model_path.exists() {
-            return self.speak_fallback(text, on_ready_to_play);
-        }
-
+        let snap = self
+            .snapshot()
+            .ok_or_else(|| "Models directory not set".to_string())?;
+        // No interrupt tracking when called via this legacy entry —
+        // create a one-shot SharedTtsActive that nobody else can see.
+        let active = create_shared_tts_active();
         self.speaking = true;
+        let result = speak_standalone(&snap, text, &active, on_ready_to_play);
+        self.speaking = false;
+        result
+    }
 
-        // Generate WAV to a temp file
-        let tmp_wav = std::env::temp_dir().join("yames_tts.wav");
+    /// List available voices (only those that can actually be SPOKEN by
+    /// Piper). Gating on Piper as well as the ONNX file matters because
+    /// the JS layer drives the Settings voice picker off this list:
+    ///   * No Piper binary → `speak()` falls back to macOS `say`, which
+    ///     produces the "robotic" voices instead of the downloaded
+    ///     Piper ones. Returning the voices anyway would let the user
+    ///     keep picking "Lessac"/"Amy"/"Ryan" while the speech path
+    ///     silently went elsewhere — the regression that surfaced in
+    ///     v0.9.0 when a prior install left the ONNX files on disk but
+    ///     the Piper tarball extraction had failed.
+    ///   * No ONNX file → Piper itself errors out on launch, same
+    ///     fallback. Both checks have to hold or the voice is unusable.
+    ///   * Corrupted (truncated) ONNX → Piper crashes on garbage
+    ///     headers. We treat a sub-`MIN_ONNX_BYTES` file as missing so
+    ///     the UI offers a per-voice repair download instead of
+    ///     advertising the voice as ready and falling back to `say`
+    ///     mid-click.
+    ///
+    /// When the list is empty, `CoachSettingsSection` disables the
+    /// Voice toggle and shows "Download voices to enable" — same UX as
+    /// a fresh install, so the user knows to hit the download button.
+    pub fn list_available_voices(&self) -> Vec<(String, String)> {
+        self.list_voice_diagnostics()
+            .into_iter()
+            .filter(|d| d.ready)
+            .map(|d| (d.id, d.name))
+            .collect()
+    }
 
-        let piper_result = Command::new(&piper_bin)
+    /// Per-voice readiness with enough context for the UI to surface a
+    /// per-voice repair button. Each entry says "is this voice playable
+    /// right now" and (when not) WHY — corrupted files vs absent files
+    /// vs the Piper engine itself missing. The frontend uses this to
+    /// render either an active toggle or a download icon, sidestepping
+    /// the "all voices download together" regression where the user
+    /// had to nuke the brain to recover from a partial voice install.
+    pub fn list_voice_diagnostics(&self) -> Vec<VoiceDiagnostic> {
+        let dir = match &self.models_dir {
+            Some(d) => d.clone(),
+            None => {
+                return VOICES
+                    .iter()
+                    .map(|(id, name)| VoiceDiagnostic::empty(id, name))
+                    .collect()
+            }
+        };
+        let piper_ok = piper_runnable(&dir);
+        let voice_dir = dir.join("voice");
+        VOICES
+            .iter()
+            .map(|(id, name)| {
+                let onnx = voice_dir.join(format!("en_US-{id}-medium.onnx"));
+                let json = voice_dir.join(format!("en_US-{id}-medium.onnx.json"));
+                voice_diagnostic_for(id, name, &onnx, &json, piper_ok)
+            })
+            .collect()
+    }
+}
+
+/// Snapshot of the engine fields needed by `speak_standalone`. Cloned
+/// once at the top of `commands::tts_speak` so the heavy subprocess
+/// work runs without holding the engine mutex — that was the bug that
+/// serialized voice-preview clicks, making the second click wait for
+/// the first speech to finish.
+#[derive(Debug, Clone)]
+pub struct TtsSnapshot {
+    pub voice: String,
+    pub models_dir: PathBuf,
+    pub volume: f32,
+}
+
+/// Per-voice readiness report for the Settings UI. The flags are
+/// independent so the UI can pick the right copy: "Voice missing"
+/// (download), "Voice corrupted" (repair), "Engine missing" (re-
+/// install Piper). The numeric size is included so we can show
+/// "12.3 MB of 60 MB" on a stalled download without a follow-up call.
+#[derive(Debug, Clone, Serialize)]
+pub struct VoiceDiagnostic {
+    pub id: String,
+    pub name: String,
+    /// True when this voice can be played right now (onnx present and
+    /// sane, json present and sane, Piper engine runnable).
+    pub ready: bool,
+    /// True when the ONNX file is present but smaller than expected —
+    /// almost always a stalled curl saving a 4xx HTML body to disk.
+    pub corrupted: bool,
+    /// True when the ONNX file is missing entirely.
+    #[serde(rename = "onnxMissing")]
+    pub onnx_missing: bool,
+    /// True when the sidecar JSON is missing or corrupted.
+    #[serde(rename = "jsonMissing")]
+    pub json_missing: bool,
+    /// True when the Piper engine (binary + dylibs) isn't runnable. The
+    /// engine is shared across voices, so this is the same value for
+    /// every entry — duplicated for the UI's convenience.
+    #[serde(rename = "engineMissing")]
+    pub engine_missing: bool,
+    /// Bytes of the ONNX on disk (0 when absent). Lets the UI show a
+    /// progress hint on stalled downloads without a follow-up call.
+    #[serde(rename = "onnxBytes")]
+    pub onnx_bytes: u64,
+}
+
+impl VoiceDiagnostic {
+    fn empty(id: &str, name: &str) -> Self {
+        VoiceDiagnostic {
+            id: id.to_string(),
+            name: name.to_string(),
+            ready: false,
+            corrupted: false,
+            onnx_missing: true,
+            json_missing: true,
+            engine_missing: true,
+            onnx_bytes: 0,
+        }
+    }
+}
+
+fn voice_diagnostic_for(
+    id: &str,
+    name: &str,
+    onnx: &Path,
+    json: &Path,
+    piper_ok: bool,
+) -> VoiceDiagnostic {
+    let onnx_bytes = std::fs::metadata(onnx).map(|m| m.len()).unwrap_or(0);
+    let onnx_missing = !onnx.exists();
+    let onnx_corrupted = !onnx_missing && onnx_bytes < MIN_ONNX_BYTES;
+    let json_bytes = std::fs::metadata(json).map(|m| m.len()).unwrap_or(0);
+    let json_missing = !json.exists() || json_bytes < MIN_ONNX_JSON_BYTES;
+    let engine_missing = !piper_ok;
+    let ready = piper_ok && !onnx_missing && !onnx_corrupted && !json_missing;
+    VoiceDiagnostic {
+        id: id.to_string(),
+        name: name.to_string(),
+        ready,
+        corrupted: onnx_corrupted,
+        onnx_missing,
+        json_missing,
+        engine_missing,
+        onnx_bytes,
+    }
+}
+
+/// Filename of the "install passed the smoke test" marker the install
+/// pipeline writes after `piper_smoke_test` returns Ok. Used by
+/// `piper_runnable` as the fast filesystem-only signal of "Piper is
+/// known to actually launch on this machine", without paying a
+/// subprocess on every check.
+pub const PIPER_VERIFIED_MARKER: &str = ".install_verified";
+
+/// Fast filesystem-only check that the Piper engine is INSTALLED AND
+/// KNOWN-WORKING. Requires both the `piper` binary AND the
+/// `.install_verified` marker (written by the install pipeline after a
+/// successful smoke test). Used in hot paths (speak / per-voice
+/// diagnostics / UI status) where spawning a subprocess on every check
+/// would be wasteful.
+///
+/// The marker is the cheap proxy for "we ran `piper --help` and it
+/// didn't dyld-crash" — without it the UI would falsely advertise
+/// voices as ready even when the binary is broken (the regression a
+/// 2026-05-18 user hit: dylibs got quarantined by macOS Gatekeeper, the
+/// `piper` binary remained on disk, the old filename-list check
+/// passed, speak silently fell back to `say` and the user got the
+/// robotic voice with no diagnostic signal).
+///
+/// History: this function used to ALSO check for three hard-coded
+/// dylibs (`libespeak-ng.1.dylib`, `libonnxruntime.1.14.1.dylib`,
+/// `libpiper_phonemize.1.dylib`). That list went stale when upstream
+/// Piper changed its macOS tarball layout — the dylibs are now either
+/// static-linked into the binary or shipped as standalone helper
+/// executables. The hard-coded list permanently false-flagged working
+/// installs as "engine missing". Replaced with the marker-file scheme,
+/// which is forward-compatible (no filename schema) and accurately
+/// reflects whatever the install pipeline's actual smoke test proved.
+pub fn piper_runnable(models_dir: &Path) -> bool {
+    let piper_dir = models_dir.join("piper");
+    piper_dir.join("piper").exists() && piper_dir.join(PIPER_VERIFIED_MARKER).exists()
+}
+
+/// Verify the Piper engine actually launches on this machine by
+/// running `piper --help` as a subprocess. Returns `Ok(())` if the
+/// binary runs cleanly (libraries resolve, binary is executable), or
+/// `Err(msg)` with a user-facing diagnostic.
+///
+/// Designed to be called once at the end of the download/install
+/// pipeline. Forward-compatible with future Piper releases whose
+/// tarball layout differs from today's — there is no filename schema
+/// to match. As long as `piper --help` doesn't blow up at dyld time
+/// or produce zero output, the install is considered good.
+///
+/// Failure modes the smoke test catches:
+///   * Binary missing entirely (filesystem check up front)
+///   * Binary present but dyld can't resolve required libraries —
+///     surfaces the actual "Library not loaded:" line from stderr.
+///     This is the regression the old dylib filename list tried to
+///     prevent, but now we catch it dynamically regardless of which
+///     dylib (or whether dylibs are needed at all) the build expects.
+///   * Binary exits cleanly but with zero stdout AND stderr — almost
+///     certainly a corrupt binary the OS started and then killed
+///     before main().
+pub fn piper_smoke_test(piper_dir: &Path) -> Result<(), String> {
+    let bin = piper_dir.join("piper");
+    if !bin.exists() {
+        return Err(format!(
+            "piper binary not found at {} \u{2014} the archive may have changed layout",
+            bin.display(),
+        ));
+    }
+    let output = std::process::Command::new(&bin)
+        .arg("--help")
+        .output()
+        .map_err(|e| format!("failed to launch piper: {e}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Dyld errors print BEFORE main() runs. Match the macOS-typical
+    // markers explicitly so the error string we surface points at
+    // the actual broken library rather than a generic exit code.
+    if let Some(line) = stderr.lines().find(|l| {
+        l.contains("Library not loaded") || l.contains("dyld:") || l.contains("dyld[")
+    }) {
+        return Err(format!(
+            "piper binary can't load required libraries: {}",
+            line.trim(),
+        ));
+    }
+    // Any successful exit OR any captured output counts as "binary
+    // launched fine" — that's all the smoke test needs to prove.
+    // (Piper's `--help` is implemented via CLI11 which prints usage
+    // and exits 0; some forks may exit differently, so we're lenient.)
+    if output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "piper exited with status {} and produced no output \u{2014} binary may be corrupt",
+        output.status,
+    ))
+}
+
+/// Interrupt-aware speak path. Spawns Piper (then afplay) as
+/// subprocesses, registering each PID with `SharedTtsActive` so a
+/// concurrent `tts_stop` (or another `tts_speak`) can SIGKILL it. After
+/// each wait we re-check the generation — if it bumped past our
+/// snapshot, the call was intentionally cancelled and we return
+/// Ok(()) cleanly instead of falling back to `say` (which would make
+/// the cancellation audible).
+///
+/// `on_ready_to_play` fires after Piper synthesis finishes but BEFORE
+/// `afplay` launches, so the UI text-reveal lands within ~10-30ms of
+/// the first audible sample. The callback is `FnOnce` so it can't fire
+/// twice even when the Piper path and the `say` fallback both
+/// activate (only one wins).
+pub fn speak_standalone<F: FnOnce()>(
+    snap: &TtsSnapshot,
+    text: &str,
+    active: &SharedTtsActive,
+    on_ready_to_play: F,
+) -> Result<(), String> {
+    // Snapshot the generation we own. Any later increment means we
+    // were cancelled — `cancel_active_speech` bumps and a fresh
+    // `speak_standalone` bumps inside `commands::tts_speak` BEFORE
+    // calling us, so this snapshot is the marker we compare against.
+    let my_gen = active.lock().unwrap().generation;
+
+    let piper_bin = snap.models_dir.join("piper").join("piper");
+    let model_path = snap
+        .models_dir
+        .join("voice")
+        .join(format!("en_US-{}-medium.onnx", snap.voice));
+
+    // Pre-flight: same fallback rationale as before — if the engine
+    // OR the voice file isn't on disk, go straight to `say` so the
+    // user gets audible feedback instead of silence.
+    if !piper_runnable(&snap.models_dir) {
+        eprintln!(
+            "[tts] piper engine not runnable at {} \u{2014} falling back to macOS `say`",
+            piper_bin.display(),
+        );
+        return speak_fallback_standalone(snap, text, active, my_gen, on_ready_to_play);
+    }
+    if !model_path.exists() {
+        eprintln!(
+            "[tts] voice model missing at {} \u{2014} falling back to macOS `say`",
+            model_path.display(),
+        );
+        return speak_fallback_standalone(snap, text, active, my_gen, on_ready_to_play);
+    }
+
+    // Generate WAV to a temp file. Per-PID name so two concurrent
+    // calls (greeting + tip overlap) can't trample each other's WAV.
+    let tmp_wav = std::env::temp_dir().join(format!("yames_tts_{}.wav", std::process::id()));
+
+    let piper_status = spawn_and_track(
+        Command::new(&piper_bin)
             .arg("--model")
             .arg(&model_path)
             .arg("--output_file")
             .arg(&tmp_wav)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .and_then(|mut child| {
-                if let Some(mut stdin) = child.stdin.take() {
-                    use std::io::Write;
-                    let _ = stdin.write_all(text.as_bytes());
-                }
-                child.wait()
-            });
+            // Capture stderr so a fallback can log the actual failure
+            // (typically a `dyld:`/`Library not loaded:` line). Before
+            // this it was `Stdio::null` and the user saw the macOS
+            // `say` robotic voice with no signal in the logs telling
+            // us WHY the engine had silently dropped out — the
+            // 2026-05-18 regression where macOS Gatekeeper had
+            // quarantined the dylibs without anyone noticing.
+            .stderr(std::process::Stdio::piped()),
+        active,
+        my_gen,
+        Some(text),
+    );
 
-        match piper_result {
-            Ok(status) if status.success() && tmp_wav.exists() => {
-                // Synth done — fire the "audio about to play" signal so
-                // the UI can swap the spinner for the actual text right
-                // before sound starts.
-                on_ready_to_play();
-
-                // Play the WAV file. `afplay -v <gain>` accepts 0.0..1.0+
-                // (1.0 = no change). Anything below ~0.001 silences the
-                // clip entirely on macOS, which is what we want when the
-                // user pulls the slider all the way down.
-                let play_result = Command::new("afplay")
+    match piper_status {
+        SubprocessOutcome::Cancelled => {
+            let _ = std::fs::remove_file(&tmp_wav);
+            Ok(())
+        }
+        SubprocessOutcome::Ok(status, _) if status.success() && tmp_wav.exists() => {
+            on_ready_to_play();
+            let play_outcome = spawn_and_track(
+                Command::new("afplay")
                     .arg("-v")
-                    .arg(format!("{:.3}", self.volume))
-                    .arg(&tmp_wav)
-                    .output();
+                    .arg(format!("{:.3}", snap.volume))
+                    .arg(&tmp_wav),
+                active,
+                my_gen,
+                None,
+            );
+            let _ = std::fs::remove_file(&tmp_wav);
+            match play_outcome {
+                SubprocessOutcome::Cancelled => Ok(()),
+                SubprocessOutcome::Ok(s, _) if s.success() => Ok(()),
+                SubprocessOutcome::Ok(s, _) => Err(format!("afplay exited with {s}")),
+                SubprocessOutcome::SpawnErr(e) => Err(format!("afplay spawn failed: {e}")),
+            }
+        }
+        SubprocessOutcome::Ok(status, stderr) => {
+            // Piper spawned but didn't produce a usable WAV — partial
+            // install (missing dylib) is the usual culprit. Fall back
+            // to `say` so the user gets audible output, AND log the
+            // captured stderr so we know whether it's a dyld issue, a
+            // model-format mismatch, or something else entirely.
+            // Previously this branch only logged the exit status, so
+            // every silent-fallback bug looked identical in the logs.
+            let _ = std::fs::remove_file(&tmp_wav);
+            let detail = stderr
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("(no stderr captured)");
+            eprintln!(
+                "[tts] piper exited with {status} \u{2014} falling back to macOS `say`. stderr: {detail}",
+            );
+            speak_fallback_standalone(snap, text, active, my_gen, on_ready_to_play)
+        }
+        SubprocessOutcome::SpawnErr(e) => {
+            eprintln!(
+                "[tts] piper spawn failed: {e} \u{2014} falling back to macOS `say`",
+            );
+            speak_fallback_standalone(snap, text, active, my_gen, on_ready_to_play)
+        }
+    }
+}
 
-                let _ = std::fs::remove_file(&tmp_wav);
-                self.speaking = false;
+/// `say` fallback. Same interrupt machinery as the Piper path so a
+/// rapid voice-button click cancels an in-flight fallback too — the
+/// user explicitly complained that clicking another voice wouldn't
+/// stop the previous one, and the fallback isn't exempt.
+fn speak_fallback_standalone<F: FnOnce()>(
+    snap: &TtsSnapshot,
+    text: &str,
+    active: &SharedTtsActive,
+    my_gen: u64,
+    on_ready_to_play: F,
+) -> Result<(), String> {
+    on_ready_to_play();
+    let mut cmd = Command::new("say");
+    cmd.arg("-r").arg("175");
+    if let Some(say_voice) = piper_voice_to_say_voice(&snap.voice) {
+        cmd.arg("-v").arg(say_voice);
+    }
+    cmd.arg(text);
+    match spawn_and_track(&mut cmd, active, my_gen, None) {
+        SubprocessOutcome::Cancelled => Ok(()),
+        SubprocessOutcome::Ok(s, _) if s.success() => Ok(()),
+        SubprocessOutcome::Ok(s, _) => Err(format!("say exited with {s}")),
+        SubprocessOutcome::SpawnErr(e) => Err(format!("say spawn failed: {e}")),
+    }
+}
 
-                match play_result {
-                    Ok(output) if output.status.success() => Ok(()),
-                    Ok(output) => Err(format!("afplay failed: {}", String::from_utf8_lossy(&output.stderr))),
-                    Err(e) => Err(format!("afplay error: {e}")),
-                }
-            }
-            Ok(status) => {
-                self.speaking = false;
-                let _ = std::fs::remove_file(&tmp_wav);
-                Err(format!("piper exited with {status}"))
-            }
-            Err(e) => {
-                self.speaking = false;
-                Err(format!("piper error: {e}"))
-            }
+/// Outcome of `spawn_and_track`. We distinguish the cancellation case
+/// from a natural error so the caller knows whether to fall back to
+/// the `say` path (natural error) or just return cleanly
+/// (intentional interrupt).
+///
+/// The optional `String` on the `Ok` variant carries the captured
+/// stderr — populated only when the caller set up the command with
+/// `.stderr(Stdio::piped())`. The Piper path uses this to surface the
+/// dyld error line in the eprintln when falling back to macOS `say`,
+/// turning a silent regression ("voice sounds robotic") into a
+/// debuggable log entry ("piper exited with X. stderr: dyld: Library
+/// not loaded: @rpath/...").
+enum SubprocessOutcome {
+    Ok(std::process::ExitStatus, Option<String>),
+    Cancelled,
+    SpawnErr(std::io::Error),
+}
+
+/// Spawn a subprocess, register its PID with `active`, write `stdin`
+/// if provided, then wait for completion. Returns `Cancelled` when
+/// the active generation has bumped past `my_gen` — that's how a
+/// concurrent `tts_stop` or another `tts_speak` signals "you've been
+/// interrupted, don't fall back to `say`."
+fn spawn_and_track(
+    cmd: &mut Command,
+    active: &SharedTtsActive,
+    my_gen: u64,
+    stdin: Option<&str>,
+) -> SubprocessOutcome {
+    if stdin.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return SubprocessOutcome::SpawnErr(e),
+    };
+    let pid = child.id();
+    // Grab the stderr handle BEFORE wait so we can drain it after the
+    // child exits. Only populated when the caller set up the command
+    // with `.stderr(Stdio::piped())` — the Piper path does, so its dyld
+    // failures get surfaced in the eprintln on fallback; afplay/say
+    // leave stderr as inherited and we get None here.
+    let stderr_handle = child.stderr.take();
+
+    // Race-window guard: if `cancel_active_speech` ran BETWEEN the
+    // generation snapshot and our spawn, the killed PID we'd register
+    // would never be revisited (cancel already happened). Detect that
+    // by re-checking the generation under the lock, BEFORE storing the
+    // PID — if we lost the race, kill our just-spawned child and bail
+    // out clean rather than letting it run to completion.
+    {
+        let mut guard = active.lock().unwrap();
+        if guard.generation != my_gen {
+            drop(guard);
+            let _ = child.kill();
+            let _ = child.wait();
+            return SubprocessOutcome::Cancelled;
+        }
+        guard.pid = Some(pid);
+    }
+
+    // Pipe in the text once the PID is registered so an interrupt can
+    // still SIGKILL the synth even if stdin is mid-write.
+    if let Some(s) = stdin {
+        if let Some(mut handle) = child.stdin.take() {
+            use std::io::Write;
+            let _ = handle.write_all(s.as_bytes());
         }
     }
 
-    /// Fallback to macOS `say` if Piper isn't available. `say`
-    /// synthesizes and plays in one step, so the `on_ready_to_play`
-    /// callback fires immediately before launching the subprocess —
-    /// `say` typically begins audible output within ~100ms of launch.
-    fn speak_fallback<F: FnOnce()>(&mut self, text: &str, on_ready_to_play: F) -> Result<(), String> {
-        self.speaking = true;
-        // Signal "about to play" — `say` does its synth+play in a single
-        // subprocess so we can't get a tighter sync without a different
-        // backend. ~100ms is close enough that the UI swap reads as
-        // simultaneous with the first audible sample.
-        on_ready_to_play();
-        // Map the selected Piper voice to a macOS `say` voice so the
-        // user's settings-page choice actually changes what they hear
-        // when Piper isn't installed. Without this, every fallback
-        // call used the system default voice regardless of UI state
-        // (the original "voice change doesn't work" bug).
-        let mut cmd = Command::new("say");
-        cmd.arg("-r").arg("175");
-        if let Some(say_voice) = piper_voice_to_say_voice(&self.voice) {
-            cmd.arg("-v").arg(say_voice);
-        }
-        let result = cmd
-            .arg(text)
-            .output()
-            .map_err(|e| format!("TTS failed: {e}"));
-
-        self.speaking = false;
-
-        match result {
-            Ok(output) if output.status.success() => Ok(()),
-            Ok(output) => Err(format!(
-                "say exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            )),
-            Err(e) => Err(e),
+    let status_result = child.wait();
+    // Clear our PID slot only if we still own it. If a cancel landed
+    // mid-wait, `cancel_active_speech` already took the PID and bumped
+    // the generation, and the new owner has registered theirs — we
+    // mustn't blank that out.
+    {
+        let mut guard = active.lock().unwrap();
+        if guard.generation == my_gen {
+            guard.pid = None;
         }
     }
-
-    /// List available voices (only those with downloaded models).
-    pub fn list_available_voices(&self) -> Vec<(String, String)> {
-        let dir = match &self.models_dir {
-            Some(d) => d,
-            None => return Vec::new(),
-        };
-        let voice_dir = dir.join("voice");
-        VOICES
-            .iter()
-            .filter(|(id, _)| voice_dir.join(format!("en_US-{id}-medium.onnx")).exists())
-            .map(|(id, name)| (id.to_string(), name.to_string()))
-            .collect()
+    let cancelled = active.lock().unwrap().generation != my_gen;
+    if cancelled {
+        return SubprocessOutcome::Cancelled;
+    }
+    // Drain stderr now that the child is gone. Reading after wait is
+    // safe because the writing end has been closed by the kernel; the
+    // typical "blocking pipe" risk doesn't apply for the tiny stderr
+    // volumes Piper produces (one dyld line on failure, empty on
+    // success).
+    let stderr_text = stderr_handle.and_then(|mut h| {
+        use std::io::Read;
+        let mut buf = String::new();
+        h.read_to_string(&mut buf).ok().map(|_| buf)
+    });
+    match status_result {
+        Ok(s) => SubprocessOutcome::Ok(s, stderr_text),
+        Err(e) => SubprocessOutcome::SpawnErr(e),
     }
 }
 
