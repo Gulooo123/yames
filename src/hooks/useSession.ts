@@ -152,6 +152,10 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
   const [messages, setMessages] = useState<FeedMessage[]>([]);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [cardOpen, setCardOpen] = useState(false);
+  // Step 5 — play-style derived from onset_efficiency each mini-report.
+  // 'structured' = ≥0.65 ratio of matched onsets; 'noodling' = <0.65.
+  // undefined until the first scoreable segment lands.
+  const [playMode, setPlayMode] = useState<"structured" | "noodling" | undefined>(undefined);
   const wasPlayingRef = useRef(false);
   const playBpmRef = useRef(bpm);
   const segmentReportsRef = useRef<SessionSegment[]>([]);
@@ -420,6 +424,18 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
           coachDebug("mini-report.no-report-from-backend");
         }
         if (report && reportable) {
+          // Step 5 — prefer the server-computed playMode (Rust derives it
+          // from onset_efficiency at segment close). Fall back to JS
+          // derivation so old saved sessions and short warmup bursts still
+          // resolve rather than leaving the UI undefined.
+          const derivedPlayMode: "structured" | "noodling" =
+            report.onsetEfficiency !== undefined
+              ? report.onsetEfficiency >= 0.65
+                ? "structured"
+                : "noodling"
+              : "structured";
+          setPlayMode(report.playMode ?? derivedPlayMode);
+
           const now = Date.now();
           segmentReportsRef.current.push({ report, bpm: segmentBpm, timeSignature, startTime: segmentStartRef.current, endTime: now });
 
@@ -464,6 +480,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
                 report,
                 instrumentLabel,
                 narrativeRef.current ? formatForLLM(narrativeRef.current) : undefined,
+                derivedPlayMode,
               );
               comment = await coachGenerate(context);
             } catch (err) {
@@ -1745,6 +1762,8 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     toggleCard,
     handleChipAction,
     registerChatFocus,
+    /** Step 5 — current play style, updated each mini-report. */
+    playMode,
   };
 }
 
@@ -1892,6 +1911,7 @@ function formatMiniReportContext(
   report: SessionReport,
   instrumentLabel: string,
   narrativeBlock?: string,
+  playMode?: "structured" | "noodling",
 ): string {
   const pocket = report.meanDeviationMs < -5 ? "ahead of the beat (rushing)"
     : report.meanDeviationMs > 5 ? "behind the beat (dragging)"
@@ -1931,7 +1951,16 @@ function formatMiniReportContext(
   // on `75/100`, which silently turned the score back into 0 in the
   // wild. Keeping the value bare gives the parser something it can
   // actually consume.
-  return `The player (${instrumentLabel}) just finished a passage. Generate a brief coaching comment.
+  // Step 6 — noodling context: prepend framing so the LLM switches
+  // register. Must come BEFORE the metric block so the model picks it
+  // up as a system instruction. Score/Accuracy lines MUST stay intact
+  // below — the Rust no-LLM fallback parser keys off those prefixes.
+  const noodlingHint =
+    playMode === "noodling"
+      ? "CONTEXT: The player is free-playing/noodling (onset efficiency below the structured-practice threshold — their onsets are NOT aligning to the beat grid). This is exploratory practice, not a structured drill. Acknowledge the musical exploration positively. DO NOT criticise for missed beats or off-grid playing — they weren't trying to lock in. Comment on feel, energy, musical ideas, or what direction to explore next.\n"
+      : "";
+
+  return `${noodlingHint}The player (${instrumentLabel}) just finished a passage. Generate a brief coaching comment.
 BPM: ${bpm}, Time signature: ${timeSignature}/4
 Score: ${report.score} out of 100
 Playing style: ${style}

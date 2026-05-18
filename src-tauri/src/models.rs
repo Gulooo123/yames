@@ -4,6 +4,16 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
+/// Play mode derived from `onset_efficiency`. ≥ 0.65 → Structured
+/// (the player is locking in to the beat grid); < 0.65 → Noodling
+/// (free improvisation against the metronome).
+#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlayMode {
+    Structured,
+    Noodling,
+}
+
 /// Status of model components on disk.
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelStatus {

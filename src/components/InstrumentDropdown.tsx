@@ -59,14 +59,16 @@ export function InstrumentDropdown({
           {INSTRUMENTS.map((inst) => (
             <button
               key={inst.id}
-              className={`instrument-dropdown-item ${inst.id === value ? "selected" : ""}`}
+              className={`instrument-dropdown-item ${inst.id === value ? "selected" : ""} ${inst.soon ? "soon" : ""}`}
               onClick={() => {
+                if (inst.soon) return;
                 onChange(inst.id);
                 setOpen(false);
               }}
               type="button"
+              disabled={inst.soon}
             >
-              {inst.id === value && (
+              {inst.id === value && !inst.soon && (
                 <svg
                   className="instrument-dropdown-check"
                   width="14"
@@ -83,6 +85,9 @@ export function InstrumentDropdown({
               )}
               <span className="instrument-dropdown-icon">{INSTRUMENT_ICONS[inst.id]}</span>
               <span>{inst.name}</span>
+              {inst.soon && (
+                <span className="instrument-dropdown-soon">SOON</span>
+              )}
             </button>
           ))}
         </div>

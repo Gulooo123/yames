@@ -100,6 +100,7 @@ pub fn set_subdivision(
 pub fn toggle_playback(
     state: State<SharedState>,
     engine_state: State<EngineState>,
+    tempo_ctx: State<SharedTempoContext>,
     app_handle: AppHandle,
 ) {
     let is_playing = {
@@ -119,6 +120,9 @@ pub fn toggle_playback(
         s.is_playing = true;
     }
 
+    // D2 — keep tempo context in sync so the onset detector gates
+    // analysis against the live playing state.
+    tempo_ctx.set_playing(!is_playing);
     emit_state_changed(&state, &app_handle);
 }
 
@@ -127,6 +131,7 @@ pub fn set_playing(
     playing: bool,
     state: State<SharedState>,
     engine_state: State<EngineState>,
+    tempo_ctx: State<SharedTempoContext>,
     app_handle: AppHandle,
 ) {
     let mut engine = engine_state.0.lock().unwrap();
@@ -141,6 +146,9 @@ pub fn set_playing(
         s.is_playing = false;
     }
 
+    // D2 — mirror into tempo context so the onset detector gates on
+    // the live playing state.
+    tempo_ctx.set_playing(playing);
     emit_state_changed(&state, &app_handle);
 }
 
@@ -341,6 +349,7 @@ pub fn configure_speed_ramp(
 pub fn start_speed_ramp(
     state: State<SharedState>,
     engine_state: State<EngineState>,
+    tempo_ctx: State<SharedTempoContext>,
     app_handle: AppHandle,
 ) {
     {
@@ -359,6 +368,8 @@ pub fn start_speed_ramp(
         let mut engine = engine_state.0.lock().unwrap();
         engine.start(state.inner().clone(), app_handle.clone());
     }
+    // D2 — gate onset analysis on the running state.
+    tempo_ctx.set_playing(true);
     emit_state_changed(&state, &app_handle);
 }
 
@@ -369,6 +380,7 @@ pub fn start_speed_ramp_from(
     bar: u8,
     state: State<SharedState>,
     engine_state: State<EngineState>,
+    tempo_ctx: State<SharedTempoContext>,
     app_handle: AppHandle,
 ) {
     {
@@ -387,6 +399,8 @@ pub fn start_speed_ramp_from(
         let mut engine = engine_state.0.lock().unwrap();
         engine.start(state.inner().clone(), app_handle.clone());
     }
+    // D2 — gate onset analysis on the running state.
+    tempo_ctx.set_playing(true);
     emit_state_changed(&state, &app_handle);
 }
 
@@ -394,6 +408,7 @@ pub fn start_speed_ramp_from(
 pub fn stop_speed_ramp(
     state: State<SharedState>,
     engine_state: State<EngineState>,
+    tempo_ctx: State<SharedTempoContext>,
     app_handle: AppHandle,
 ) {
     {
@@ -405,6 +420,8 @@ pub fn stop_speed_ramp(
         let mut engine = engine_state.0.lock().unwrap();
         engine.stop();
     }
+    // D2 — clear the playing gate so the onset detector stops analysis.
+    tempo_ctx.set_playing(false);
     emit_state_changed(&state, &app_handle);
 }
 

@@ -611,6 +611,47 @@
   cursor: not-allowed;
 }
 
+/* ─── SystemStatusChip ─── */
+.system-status-chip {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  border-top: 1px solid color-mix(in srgb, var(--border) 25%, transparent);
+}
+
+.system-status-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.system-status-chip-dot.pulse {
+  animation: chip-dot-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes chip-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+/* Per-variant accent colours */
+.system-status-chip.listening  { color: var(--text-muted); }
+.system-status-chip.playing    { color: var(--accent); }
+.system-status-chip.noodling   { color: var(--text-secondary); }
+.system-status-chip.thinking   { color: var(--accent); }
+.system-status-chip.speaking   { color: var(--accent); }
+
+.system-status-chip-label {
+  font-weight: 500;
+}
+
 /* ─── History List ─── */
 .coach-history-list {
   flex: 1;

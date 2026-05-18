@@ -179,6 +179,13 @@ export type SessionReport = {
   comment: string;
   insights: string[];
   gridCorrelation: number;
+  /** Mean onset efficiency over the segment window (0.0–1.0).
+   *  Absent when no segments were recorded (short warmup, etc.). */
+  onsetEfficiency?: number;
+  /** Play mode derived server-side from onsetEfficiency (≥0.65 → structured).
+   *  Absent when no segments were recorded. Falls back to JS derivation when
+   *  absent (e.g. old saved sessions, short warmup bursts). */
+  playMode?: 'structured' | 'noodling';
 };
 
 export type SavedSession = {

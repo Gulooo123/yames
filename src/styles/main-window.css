@@ -2977,6 +2977,28 @@
   opacity: 0.5;
 }
 
+.instrument-dropdown-item.soon {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.instrument-dropdown-item.soon:hover {
+  background: transparent;
+}
+
+.instrument-dropdown-soon {
+  margin-left: auto;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  color: var(--accent);
+  padding: 1px 5px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  opacity: 0.8;
+  flex-shrink: 0;
+}
+
 .midi-refresh-btn {
   padding: 6px;
   border-radius: 6px;

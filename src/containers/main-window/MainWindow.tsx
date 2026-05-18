@@ -701,6 +701,7 @@ export function MainWindow() {
         isPlaying={state.isPlaying}
         onPause={() => state.isPlaying && togglePlayback()}
         inferredGrid={evaluation.inferredGrid}
+        playMode={session.playMode}
       />
       )}
       </div>{/* main-body */}

@@ -2,7 +2,7 @@
 
 **Yet Another Metronome Everyone Skips** — except this one, you won't.
 
-[Website](https://yames.app) &nbsp;·&nbsp; [Download](https://github.com/turutupa/yames/releases/latest) &nbsp;·&nbsp; [Request a Feature](https://github.com/turutupa/yames/issues/new)
+[Website](https://yames.app) &nbsp;·&nbsp; [Download](https://github.com/turutupa/yames/releases/latest) &nbsp;·&nbsp; [Request a Feature](https://github.com/turutupa/yames/issues/new) &nbsp;·&nbsp; [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 <br>
 

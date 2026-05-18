@@ -3,6 +3,7 @@ name = "yames"
 version = "0.9.0"
 description = "Yet Another Metronome Everyone Skips — practice metronome with MIDI control, speed drills, and AI coach"
 authors = ["you"]
+license = "GPL-3.0-or-later"
 edition = "2021"
 # Tauri's `beforeDevCommand` shells out to `cargo run` with no `--bin`
 # flag. As soon as a second binary lives under `src/bin/` (we added
@@ -35,6 +36,13 @@ midir = "0.10"
 # Tauri already pulls tokio in transitively; declared explicitly so we can
 # use `tokio::task::spawn_blocking` from blocking command handlers.
 tokio = { version = "1", features = ["rt"] }
+# aubio — GPL-2+ MIR library for onset detection. The `static` feature
+# bundles the C source via aubio-sys (cmake required at build time) so
+# there is no runtime .dylib dependency. Requires cmake; on macOS:
+#   brew install cmake
+# On Linux: apt-get install cmake
+# The crate name on crates.io is `aubio` (v0.2.*).
+aubio = { version = "0.2", features = ["static", "bindgen"] }
 
 # LLM inference for Practice Coach (requires cmake to build)
 # Enable with: cargo build --features coach-llm

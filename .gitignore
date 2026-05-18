@@ -8,3 +8,4 @@ package-lock.json
 .winget
 certs/
 .wibey/
+.claude/

@@ -5,6 +5,7 @@ import type { FeedMessage, SavedSession, AudioSpectrum, InferredGridChanged } fr
 import { FeedMessageItem, type ChipAction } from "./CoachFeedMessage";
 import { CoachHistoryList } from "./CoachHistoryList";
 import { CoachSessionDetail } from "./CoachSessionDetail";
+import { SystemStatusChip } from "../../components/SystemStatusChip";
 
 /**
  * Apply the JS-side legacy scoring formula to every loaded session.
@@ -52,6 +53,14 @@ interface CoachCardProps {
    *  caption next to the title. `null` or `locked === false` → no
    *  caption. */
   inferredGrid?: InferredGridChanged | null;
+  /** Step 5 — derived play style from onset_efficiency. 'noodling'
+   *  when the ratio of matched onsets is below the threshold,
+   *  'structured' otherwise. Absent until the first session report. */
+  playMode?: "structured" | "noodling";
+  /** True while the LLM is generating a response. */
+  coachLoading?: boolean;
+  /** True while TTS audio is playing back. */
+  ttsActive?: boolean;
 }
 
 /** Path B — map a locked divisor to a human-readable label.
@@ -71,7 +80,7 @@ function divisorLabel(divisor: number): string | null {
 type CardTab = "feed" | "history";
 type HistoryView = "list" | "detail";
 
-export default function CoachCard({ open, active, messages, onToggle, onStartSession, onEndSession, onSendChat, onChipAction, onRegisterChatFocus, listening, hasSignal, spectrum, isPlaying, onPause, inferredGrid }: CoachCardProps) {
+export default function CoachCard({ open, active, messages, onToggle, onStartSession, onEndSession, onSendChat, onChipAction, onRegisterChatFocus, listening, hasSignal, spectrum, isPlaying, onPause, inferredGrid, playMode, coachLoading, ttsActive }: CoachCardProps) {
   const feedRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const [chatInput, setChatInput] = useState("");
@@ -308,6 +317,16 @@ export default function CoachCard({ open, active, messages, onToggle, onStartSes
                 ))}
               </div>
             )}
+
+            <SystemStatusChip
+              active={active}
+              isPlaying={isPlaying}
+              listening={listening}
+              playMode={playMode}
+              coachLoading={coachLoading}
+              ttsActive={ttsActive}
+              inferredDivisor={inferredGrid?.locked ? inferredGrid.divisor : undefined}
+            />
 
             {/* Chat input */}
             <div className="coach-card-chat">

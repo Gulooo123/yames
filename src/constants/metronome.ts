@@ -42,17 +42,20 @@ export const SOUND_TYPES = [
   { id: "drum", name: "Drum", icon: "◎" },
 ];
 
-export const INSTRUMENTS = [
-  { id: "drums", name: "Drums" },
-  { id: "electric-guitar", name: "Electric Guitar" },
-  { id: "acoustic-guitar", name: "Acoustic Guitar" },
-  { id: "bass", name: "Bass" },
-  { id: "piano", name: "Piano" },
-  // "Other" is the neutral fallback for users whose instrument isn't in the
-  // calibrated list. DSP runs on moderate defaults; coach vocabulary stays
-  // generic.
-  { id: "other", name: "Other" },
-];
+export const INSTRUMENTS: Array<{ id: string; name: string; soon?: boolean }> =
+  [
+    { id: "drums", name: "Drums" },
+    { id: "electric-guitar", name: "Electric Guitar" },
+    { id: "acoustic-guitar", name: "Acoustic Guitar" },
+    // Bass onset detection via aubio is planned — mark as coming soon until
+    // the instrument profile is fully calibrated.
+    { id: "bass", name: "Bass", soon: true },
+    { id: "piano", name: "Piano" },
+    // "Other" is the neutral fallback for users whose instrument isn't in the
+    // calibrated list. DSP runs on moderate defaults; coach vocabulary stays
+    // generic.
+    { id: "other", name: "Other" },
+  ];
 
 export const TIME_SIGNATURES = [
   { beats: 0, label: "Never" },

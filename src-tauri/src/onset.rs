@@ -6,6 +6,10 @@ use std::time::Duration;
 use crate::audio_input::SharedAudioInput;
 use crate::instrument::InstrumentProfile;
 
+// aubio onset detector — replaces the hand-rolled Goertzel FFT + spectral
+// flux pipeline. Aliased to avoid shadowing our own `Onset` event struct.
+use aubio::Onset as AubioOnset;
+
 /// A detected onset event.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Onset {
@@ -39,6 +43,10 @@ pub struct TempoContext {
     bpm_x100: AtomicU32,
     /// Current subdivision (1 = quarter, 2 = 8th, 4 = 16th, …).
     subdivision: AtomicU32,
+    /// Whether the metronome click track is currently running.
+    /// The `detect_loop` gates analysis on this so onsets aren't
+    /// accumulated when there's no beat grid to match against.
+    is_playing: AtomicBool,
 }
 
 impl TempoContext {
@@ -46,6 +54,7 @@ impl TempoContext {
         Self {
             bpm_x100: AtomicU32::new((bpm as u32) * 100),
             subdivision: AtomicU32::new(subdivision.max(1) as u32),
+            is_playing: AtomicBool::new(false),
         }
     }
     pub fn set_bpm(&self, bpm: u16) {
@@ -54,6 +63,16 @@ impl TempoContext {
     pub fn set_subdivision(&self, subdivision: u8) {
         self.subdivision
             .store(subdivision.max(1) as u32, Ordering::Relaxed);
+    }
+    /// Mark the metronome click track as started (`true`) or stopped
+    /// (`false`). The `detect_loop` reads this flag every hop to gate
+    /// spectral analysis — no grid → no matching → no event flood.
+    pub fn set_playing(&self, playing: bool) {
+        self.is_playing.store(playing, Ordering::Relaxed);
+    }
+    /// Returns `true` if the metronome click track is currently running.
+    pub fn is_playing(&self) -> bool {
+        self.is_playing.load(Ordering::Relaxed)
     }
     /// Returns the current subdivision interval in milliseconds. At
     /// 120 BPM quarter-notes this is 500ms; at 200 BPM 16ths it's 75ms.
@@ -181,29 +200,35 @@ impl OnsetDetector {
     ) where
         F: Fn(Onset) + Send + 'static,
     {
-        let fft_size = 1024_usize;
-        // NOTE: hop_size is implicit (512 = fft_size / 2; 50% overlap)
-        // and only referenced in comments around `flux_history_len`
-        // and the FFT loop's hop math. The explicit binding sat dead
-        // for a while — removed during the Step-4 cleanup so the
-        // overlap factor is documented HERE in one place.
-        let half = fft_size / 2;
+        // aubio parameters: 1024-sample analysis window, 512-sample hop
+        // (50% overlap). These match the old Goertzel frame size so the
+        // refractory-period timing math and ring-buffer read sizing are
+        // unchanged.
+        let fft_size: usize = 1024;
+        let hop_size: usize = fft_size / 2; // 512 — ~10.7 ms at 48 kHz
 
-        // Hann window
-        let window: Vec<f32> = (0..fft_size)
-            .map(|i| {
-                0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (fft_size - 1) as f32).cos())
-            })
-            .collect();
+        // Read sample rate first — needed both for aubio init and for
+        // the refractory / adaptive threshold math below.
+        let sample_rate = {
+            let ai = audio_input.lock().unwrap();
+            ai.sample_rate()
+        };
 
-        // Previous magnitude spectrum for flux computation
-        let mut prev_mags = vec![0.0_f32; half];
-
-        // Adaptive threshold: ring buffer of recent flux values
-        let flux_history_len = 100; // ~1 second at hop_size=512, 48kHz (~10ms per hop)
-        let mut flux_history = vec![0.0_f32; flux_history_len];
-        let mut flux_write_pos = 0;
-        let threshold_multiplier = 1.5_f32;
+        // Instrument-specific onset algorithm. `InstrumentProfile` carries
+        // `aubio_onset_method` ("hfc" / "complex" / "specflux") that maps
+        // directly to aubio's built-in detectors. Parse, falling back to
+        // SpecFlux if the string is unrecognised (should never happen in
+        // practice).
+        let aubio_mode = profile
+            .aubio_onset_method
+            .parse::<aubio::OnsetMode>()
+            .unwrap_or(aubio::OnsetMode::SpecFlux);
+        let mut detector = AubioOnset::new(aubio_mode, fft_size, hop_size, sample_rate)
+            .expect("aubio::Onset init failed — invalid parameters");
+        // Keep aubio's internal adaptive threshold; set the silence gate
+        // explicitly at −70 dBFS (aubio's default). Our own adaptive RMS
+        // noise floor is layered on top as a second guard.
+        detector.set_silence(-70.0);
 
         // D2 adaptive noise floor — rolling 10th-percentile of RMS over
         // ~5 seconds of recent audio. Replaces the old hardcoded 0.01.
@@ -231,12 +256,6 @@ impl OnsetDetector {
         // the grid subdivision alone."
         let mut last_onset_ns: u64 = 0;
 
-        // Reference time uses shared clock for cross-thread comparability
-        let sample_rate = {
-            let ai = audio_input.lock().unwrap();
-            ai.sample_rate()
-        };
-
         // Diagnostic logging — env-flag gated so logs don't ship in
         // production builds. Flip on by launching the dev shell with:
         //   YAMES_ONSET_DEBUG=1 npm run tauri dev
@@ -262,124 +281,52 @@ impl OnsetDetector {
                 break;
             }
 
-            // Read available samples from ring buffer
+            // Gate: only run detection while the metronome click track is
+            // active. When stopped, flush any in-flight cluster so stale
+            // events don't leak into the next session, reset
+            // `last_onset_ns` so the refractory clock doesn't span the gap,
+            // and reset the aubio phase vocoder so stale buffered samples
+            // don't produce phantom onsets when playback resumes.
+            if !tempo_ctx.is_playing() {
+                if let Some(p) = pending.take() {
+                    on_onset(p.flush());
+                }
+                last_onset_ns = 0;
+                detector.reset();
+                continue;
+            }
+
+            // Feed the most recent hop into aubio. Read 4× hop_size from
+            // the ring so we have enough samples even if the loop ran fast;
+            // take only the tail hop_size chunk. Because the ring exposes
+            // only `read_last` (no cursor-based advance), we may re-feed
+            // duplicate hops on fast iterations — aubio handles this
+            // gracefully via its internal phase-vocoder state; the
+            // refractory period below suppresses any resulting duplicates.
             let new_samples = {
                 let ai = audio_input.lock().unwrap();
                 let ring = ai.ring();
                 let r = ring.lock().unwrap();
-                // Read the last 4096 samples (more than we need) and determine
-                // what's new since our last read
-                r.read_last(fft_size * 4)
+                r.read_last(hop_size * 4)
             };
 
-            if new_samples.len() < fft_size {
+            if new_samples.len() < hop_size {
                 continue;
             }
 
-            // Process in hops. We overlap by hop_size.
-            let total_available = new_samples.len();
-            let offset = if total_available > fft_size {
-                total_available - fft_size
-            } else {
-                0
+            let offset = new_samples.len().saturating_sub(hop_size);
+            let hop_slice = &new_samples[offset..offset + hop_size];
+
+            // Run aubio onset detection on this hop.
+            // `do_result` returns > 0.0 when an onset is detected;
+            // the exact value is an offset ∈ (0, 1] within the hop.
+            let onset_value = match detector.do_result(hop_slice) {
+                Ok(v) => v,
+                Err(_) => continue,
             };
 
-            // Only process the most recent complete frame to avoid falling behind
-            if offset + fft_size > total_available {
-                continue;
-            }
-
-            let frame = &new_samples[offset..offset + fft_size];
-
-            // Apply window
-            let windowed: Vec<f32> = frame.iter().zip(&window).map(|(s, w)| s * w).collect();
-
-            // Compute magnitude spectrum using DFT for each bin
-            // For 512 bins this is expensive, so we use a simplified approach:
-            // compute magnitude only for bins we need (every 4th bin for flux)
-            // Actually, let's compute full magnitudes using the Goertzel algorithm
-            // which is O(N) per bin but gives us exact values.
-            // For 512 bins × 1024 samples = ~500K ops, runs in <1ms.
-            let mut mags = vec![0.0_f32; half];
-            for k in 0..half {
-                let freq = 2.0 * std::f32::consts::PI * k as f32 / fft_size as f32;
-                let coeff = 2.0 * freq.cos();
-                let mut s1 = 0.0_f32;
-                let mut s2 = 0.0_f32;
-                for &x in &windowed {
-                    let s0 = x + coeff * s1 - s2;
-                    s2 = s1;
-                    s1 = s0;
-                }
-                let power = s1 * s1 + s2 * s2 - coeff * s1 * s2;
-                mags[k] = power.max(0.0).sqrt();
-            }
-
-            // Spectral flux: sum of positive differences (half-wave
-            // rectification), weighted by the instrument's 16-band
-            // spectral profile. The 512 magnitude bins are bucketed into
-            // 16 contiguous bands and each bin's contribution is scaled
-            // by its band's weight. Drums emphasize low+high (kick +
-            // hat); bass emphasizes low; guitar emphasizes mid. "Other"
-            // uses uniform 1.0 across all bands (i.e. unchanged).
-            let bins_per_band = half / 16; // 512/16 = 32
-            let mut flux = 0.0_f32;
-            for k in 0..half {
-                let diff = mags[k] - prev_mags[k];
-                if diff > 0.0 {
-                    let band = (k / bins_per_band).min(15);
-                    flux += diff * profile.spectral_weights[band];
-                }
-            }
-
-            // Compute spectral centroid for this frame
-            let mag_sum: f32 = mags.iter().sum();
-            let centroid = if mag_sum > 0.0001 {
-                let weighted: f32 = mags
-                    .iter()
-                    .enumerate()
-                    .map(|(k, &m)| k as f32 * sample_rate as f32 / fft_size as f32 * m)
-                    .sum();
-                weighted / mag_sum
-            } else {
-                0.0
-            };
-
-            // Compute RMS amplitude
-            let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
-
-            // Update previous magnitudes
-            prev_mags.copy_from_slice(&mags);
-
-            // Update flux history for adaptive threshold
-            flux_history[flux_write_pos] = flux;
-            flux_write_pos = (flux_write_pos + 1) % flux_history_len;
-
-            // Adaptive threshold: 25th-percentile of recent flux × multiplier.
-            //
-            // Previously this used the median (50th percentile) which ran
-            // hot for steady playing: at 80 BPM 16ths the player produces
-            // ~5 onsets/sec, so half of `flux_history` (100 hops ≈ 1s)
-            // ends up filled with note-attack samples. The median then
-            // tracks "what a typical attack looks like" and the threshold
-            // becomes 1.5 × typical_attack — gating roughly half of the
-            // onsets that produced it. Result: ~50% of steady playing
-            // gets silently suppressed before reaching the matcher.
-            //
-            // p25 mirrors the noise-floor's p10 strategy (`rms_history`
-            // below): anchor to the quiet baseline rather than the
-            // median of attacks. The threshold now reflects "what
-            // silence-plus-decay looks like," and consistent attacks
-            // clear it reliably.
-            //
-            // The 0.001 floor prevents triggering on pure silence (where
-            // the baseline ≈ 0 and any non-zero flux would otherwise fire).
-            let threshold = {
-                let mut sorted = flux_history.clone();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let p25 = sorted[sorted.len() / 4];
-                p25 * threshold_multiplier + 0.001
-            };
+            // Compute RMS on the hop for amplitude and noise-floor gating.
+            let rms = (hop_slice.iter().map(|s| s * s).sum::<f32>() / hop_size as f32).sqrt();
 
             // D2 adaptive noise floor — update rolling RMS history then
             // take 10th percentile × NOISE_FLOOR_MULTIPLIER. Until the
@@ -408,29 +355,29 @@ impl OnsetDetector {
 
             // Periodic state dump — see DEBUG comment near loop start.
             // Useful diagnostic when the user says "I'm playing but no
-            // onsets fire": shows whether `rms > noise_floor` and
-            // `flux > threshold` are passing.
+            // onsets fire": shows whether `rms > noise_floor` and the
+            // aubio onset value are passing.
             if debug_enabled {
                 hops_since_log += 1;
                 if hops_since_log >= LOG_EVERY_HOPS {
                     hops_since_log = 0;
                     let rms_pass = rms > noise_floor;
-                    let flux_pass = flux > threshold;
                     eprintln!(
-                        "[onset] state rms={:.4}{} flux={:.3}{} floor={:.4} thr={:.3} refrac={:.0}ms",
+                        "[onset] state rms={:.4}{} onset_val={:.3} desc={:.3} floor={:.4} refrac={:.0}ms",
                         rms,
                         if rms_pass { ">floor" } else { "<floor" },
-                        flux,
-                        if flux_pass { ">thr" } else { "<thr" },
+                        onset_value,
+                        detector.get_descriptor(),
                         noise_floor,
-                        threshold,
                         adaptive_refractory_ms,
                     );
                 }
             }
 
-            // Check for onset
-            if flux > threshold && rms > noise_floor {
+            // aubio signals an onset when do_result returns > 0.
+            // We layer our own RMS noise-floor gate on top so brief
+            // silence artefacts in the phase-vocoder don't fire.
+            if onset_value > 0.0 && rms > noise_floor {
                 let now_ns = crate::clock::now_ns();
                 let since_last_ms = now_ns.saturating_sub(last_onset_ns) / 1_000_000;
 
@@ -439,34 +386,34 @@ impl OnsetDetector {
                     last_onset_ns = now_ns;
                     if debug_enabled {
                         eprintln!(
-                            "[onset] FIRED rms={:.4} flux={:.3} thr={:.3} floor={:.4} since_last={}ms",
-                            rms, flux, threshold, noise_floor, since_last_ms,
+                            "[onset] FIRED rms={:.4} onset_val={:.3} desc={:.3} floor={:.4} since_last={}ms",
+                            rms, onset_value, detector.get_descriptor(), noise_floor, since_last_ms,
                         );
                     }
 
-                    // D2 confidence — blend three signals:
-                    //   * amplitude-to-noise ratio (audibility)
-                    //   * flux above adaptive threshold (peak sharpness)
-                    //   * raw amplitude vs absolute ceiling (sanity)
-                    // Final value clamped to [0, 1].
+                    // D2 confidence — blend amplitude-to-noise ratio with
+                    // aubio's thresholded descriptor, which acts as a proxy
+                    // for peak sharpness (descriptor − threshold; clamped to
+                    // [0, 1] since the raw value can exceed 1 for strong
+                    // onsets — those saturate to max confidence, which is
+                    // acceptable).
                     let amp_ratio = if noise_floor > 0.0 {
                         (rms / noise_floor).min(8.0)
                     } else {
                         1.0
                     };
-                    let flux_ratio = if threshold > 0.0 {
-                        (flux / threshold).min(8.0)
-                    } else {
-                        1.0
-                    };
                     let conf_amp = ((amp_ratio - 1.0) / 4.0).clamp(0.0, 1.0);
-                    let conf_flux = ((flux_ratio - 1.0) / 4.0).clamp(0.0, 1.0);
-                    let confidence = (conf_amp * 0.45 + conf_flux * 0.55).clamp(0.0, 1.0);
+                    let conf_desc = detector.get_thresholded_descriptor().clamp(0.0, 1.0);
+                    let confidence = (conf_amp * 0.45 + conf_desc * 0.55).clamp(0.0, 1.0);
 
                     let onset = Onset {
                         ts_ns: now_ns,
                         amplitude: rms.clamp(0.0, 1.0),
-                        centroid,
+                        // aubio doesn't expose spectral centroid directly;
+                        // field is preserved for schema compatibility and
+                        // future use (e.g. pitch/brightness from aubio's
+                        // pitch detector).
+                        centroid: 0.0,
                         confidence,
                     };
 
@@ -499,14 +446,13 @@ impl OnsetDetector {
                         }
                     }
                 } else if debug_enabled {
-                    // Candidate was loud + spectral enough but the
-                    // refractory guard blocked it. Common during fast
-                    // tremolo / drum rolls; flag in logs so the user
-                    // can tell whether a low onset count is "didn't
-                    // detect" vs "detected but merged".
+                    // aubio fired but the refractory guard blocked it.
+                    // Common during fast tremolo / drum rolls; flag in
+                    // logs so the user can tell whether a low onset count
+                    // is "didn't detect" vs "detected but merged".
                     eprintln!(
-                        "[onset] blocked-by-refractory since_last={}ms < refrac={:.0}ms (rms={:.4} flux={:.3})",
-                        since_last_ms, adaptive_refractory_ms, rms, flux,
+                        "[onset] blocked-by-refractory since_last={}ms < refrac={:.0}ms (rms={:.4})",
+                        since_last_ms, adaptive_refractory_ms, rms,
                     );
                 }
             }

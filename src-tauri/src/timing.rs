@@ -5,6 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::instrument::InstrumentProfile;
+use crate::models::PlayMode;
 use crate::onset::Onset;
 use crate::session_log::{
     Classification, ComponentScores, DetectedOnset, ExpectedBeat, MatchDecision, MatchReason,
@@ -151,6 +152,10 @@ pub struct PracticeSegmentEnded {
     /// or play too erratic); ≥ 0.65 means the lock was confident.
     #[serde(rename = "inferredDivisorConfidence")]
     pub inferred_divisor_confidence: f64,
+    /// D3b — Structured if onset_efficiency ≥ 0.65; Noodling otherwise.
+    /// Serialised as "structured" / "noodling" for the JS coach.
+    #[serde(rename = "playMode")]
+    pub play_mode: PlayMode,
 }
 
 /// Path B — UI event emitted whenever the rhythm-inference's locked
@@ -1150,6 +1155,11 @@ impl TimingAnalyzer {
                                         .current_divisor(),
                                     inferred_divisor_confidence:
                                         rhythm_inference.confidence(),
+                                    play_mode: if onset_efficiency >= 0.65 {
+                                        PlayMode::Structured
+                                    } else {
+                                        PlayMode::Noodling
+                                    },
                                 });
                                 segment = None;
                             }
@@ -1268,6 +1278,11 @@ impl TimingAnalyzer {
                                             .current_divisor(),
                                         inferred_divisor_confidence:
                                             rhythm_inference.confidence(),
+                                        play_mode: if onset_efficiency >= 0.65 {
+                                            PlayMode::Structured
+                                        } else {
+                                            PlayMode::Noodling
+                                        },
                                     });
                                 }
                                 segment = None;

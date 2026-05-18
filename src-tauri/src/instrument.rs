@@ -83,6 +83,7 @@ impl Instrument {
                 spectral_weights: spectral_weights_broadband_low_high(),
                 activity_silence_beats: 8,
                 vocabulary: InstrumentVocabulary::Drums,
+                aubio_onset_method: "hfc",
             },
             Instrument::ElectricGuitar => InstrumentProfile {
                 refractory_floor_ms: 40,
@@ -92,6 +93,7 @@ impl Instrument {
                 spectral_weights: spectral_weights_mid(),
                 activity_silence_beats: 4,
                 vocabulary: InstrumentVocabulary::Guitar,
+                aubio_onset_method: "complex",
             },
             Instrument::AcousticGuitar => InstrumentProfile {
                 refractory_floor_ms: 50,
@@ -101,6 +103,7 @@ impl Instrument {
                 spectral_weights: spectral_weights_mid_high(),
                 activity_silence_beats: 4,
                 vocabulary: InstrumentVocabulary::Guitar,
+                aubio_onset_method: "complex",
             },
             Instrument::Bass => InstrumentProfile {
                 refractory_floor_ms: 35,
@@ -110,6 +113,7 @@ impl Instrument {
                 spectral_weights: spectral_weights_low(),
                 activity_silence_beats: 4,
                 vocabulary: InstrumentVocabulary::Bass,
+                aubio_onset_method: "complex",
             },
             Instrument::Piano => InstrumentProfile {
                 refractory_floor_ms: 20,
@@ -119,6 +123,7 @@ impl Instrument {
                 spectral_weights: spectral_weights_broadband(),
                 activity_silence_beats: 8,
                 vocabulary: InstrumentVocabulary::Piano,
+                aubio_onset_method: "specflux",
             },
             Instrument::Other => InstrumentProfile {
                 refractory_floor_ms: 30,
@@ -128,6 +133,7 @@ impl Instrument {
                 spectral_weights: spectral_weights_moderate_broadband(),
                 activity_silence_beats: 5,
                 vocabulary: InstrumentVocabulary::Other,
+                aubio_onset_method: "specflux",
             },
         }
     }
@@ -193,7 +199,27 @@ pub struct InstrumentProfile {
     /// 16-band spectrum weight emphasis for spectral flux computation.
     /// Drums = broadband; bass = low; guitar = mid; piano = broadband.
     /// Sums to roughly 16.0 (uniform = 1.0 per band).
+    ///
+    /// **Superseded by `aubio_onset_method` once Step 4 lands** — the
+    /// hand-rolled Goertzel spectral-flux detector that consumed these
+    /// weights is replaced by `aubio::Onset`. `allow(dead_code)` keeps the
+    /// lib build warning-free until the old detector is removed.
+    #[allow(dead_code)]
     pub spectral_weights: [f32; 16],
+
+    /// aubio onset-detection algorithm to use for this instrument.
+    ///
+    /// Valid values (see aubio docs):
+    ///   - `"hfc"`      — high-frequency content; sharp, percussive transients (drums)
+    ///   - `"complex"`  — complex-domain; good for pitched notes with fast attacks
+    ///                    (guitar, bass)
+    ///   - `"specflux"` — spectral flux; works well for sustained / harmonic onsets
+    ///                    (piano, other)
+    ///
+    /// Consumed by `onset.rs` (Step 4) when constructing `aubio::Onset`.
+    /// `allow(dead_code)` until that wiring is in place.
+    #[allow(dead_code)]
+    pub aubio_onset_method: &'static str,
 
     /// Beats of silence before transitioning to Resting state. Drums +
     /// piano tolerate longer rests (musical phrasing, sustain pedal);

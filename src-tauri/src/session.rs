@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use crate::models::PlayMode;
 use crate::session_log::PracticeSegment;
 use crate::timing::BeatFeedback;
 
@@ -62,6 +63,18 @@ pub struct SessionReport {
     /// Mean grid correlation (0.0–1.0). High = structured exercise, low = free playing.
     #[serde(rename = "gridCorrelation")]
     pub grid_correlation: f64,
+    /// Mean onset efficiency over the segment window (0.0–1.0).
+    /// Derived from `ComponentScores.onset_efficiency` across the segments
+    /// that fed into this report. `None` when no segments were recorded
+    /// (e.g. short warm-up bursts, unit-test fixtures with raw feedbacks).
+    /// The JS side uses this to classify the session as 'structured' vs
+    /// 'noodling' (threshold = 0.65).
+    #[serde(rename = "onsetEfficiency", skip_serializing_if = "Option::is_none")]
+    pub onset_efficiency: Option<f32>,
+    /// Play mode derived from `onset_efficiency`. `None` when no segments
+    /// were recorded (mirrors the `onset_efficiency` sentinel exactly).
+    #[serde(rename = "playMode", skip_serializing_if = "Option::is_none")]
+    pub play_mode: Option<PlayMode>,
 }
 
 /// Accumulates BeatFeedback events during a playing session.
@@ -409,6 +422,26 @@ impl SessionAccumulator {
             tempo_stability_ms,
         );
 
+        // Mean onset efficiency across window segments.  `None` when no
+        // segment has been emitted yet (short warmup, raw-feedback unit tests).
+        let onset_efficiency = if self.segments.is_empty() {
+            None
+        } else {
+            let sum: f32 = self
+                .segments
+                .iter()
+                .map(|s| s.component_scores.onset_efficiency)
+                .sum();
+            Some(sum / self.segments.len() as f32)
+        };
+        let play_mode = onset_efficiency.map(|oe| {
+            if oe >= 0.65 {
+                PlayMode::Structured
+            } else {
+                PlayMode::Noodling
+            }
+        });
+
         SessionReport {
             total_beats,
             hits_count,
@@ -431,6 +464,8 @@ impl SessionAccumulator {
             comment,
             insights,
             grid_correlation: if grid_correlations.is_empty() { 0.0 } else { grid_correlations.iter().sum::<f64>() / grid_correlations.len() as f64 },
+            onset_efficiency,
+            play_mode,
         }
     }
 }
