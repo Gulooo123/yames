@@ -158,7 +158,7 @@ pub enum InstrumentVocabulary {
 #[derive(Debug, Clone)]
 pub struct InstrumentProfile {
     /// Minimum time between distinct onsets (instrument physics floor).
-    /// D2 will compute `max(this, subdivision_interval_ms × 0.35)` —
+    /// D2 will compute `max(this, subdivision_interval_ms × 0.55)` —
     /// this floor protects fast articulations that the grid wouldn't
     /// otherwise allow (drum rolls, guitar tremolo) while the grid
     /// multiplier handles the tempo-relative case.

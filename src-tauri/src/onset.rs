@@ -69,10 +69,34 @@ impl TempoContext {
 
 pub type SharedTempoContext = Arc<TempoContext>;
 
-/// D2 refractory multiplier — `max(floor, subdivision_interval × 0.35)`.
+/// D2 refractory multiplier — `max(floor, subdivision_interval × 0.55)`.
 /// Plan-specified value; lower for drums (separate path via the
 /// `profile.refractory_floor_ms` already), tighter at faster tempos.
-pub const REFRACTORY_SUBDIVISION_FACTOR: f32 = 0.35;
+///
+/// Bumped from 0.35 → 0.55 on 2026-05-17 after a paired-WAV
+/// investigation of the "DSP doubling/density" bug. The 0.35 multiplier
+/// produced a refractory of only 65–70ms at 80 BPM × 16ths subdivision
+/// (sub_interval ≈ 187ms). Guitar / acoustic instruments have attack
+/// envelopes whose body resonance peaks land 60–95ms after the initial
+/// pluck, comfortably above the old refractory — so the detector
+/// emitted 2–3 "ghost" onsets per real hit. In six paired test
+/// sessions, 82% of consecutive onsets were < 100ms apart (median
+/// 74ms), and matched-vs-spurious onsets had identical amplitude /
+/// confidence distributions (mean amp 0.0082 each), confirming the
+/// detector couldn't distinguish a real hit from an envelope echo.
+///
+/// 0.55 raises the same scenario's refractory to ≈ 103ms — wide enough
+/// to swallow the body-resonance peaks while still permitting 16ths up
+/// to ≈ 150 BPM (125ms ticks) and 8ths up to ≈ 290 BPM. Simulation
+/// against the six WAV-paired sessions: this fix removes 35–46% of the
+/// detected onsets, almost exactly matching the observed false-positive
+/// rate.
+///
+/// If we ever want to support 32nds or extreme tempos, drop the
+/// instrument refractory floor (instrument.rs) for that profile
+/// instead of pulling this constant back — the floor already exists
+/// specifically to protect fast articulations.
+pub const REFRACTORY_SUBDIVISION_FACTOR: f32 = 0.55;
 
 /// Onset detector using spectral flux with adaptive threshold.
 ///
@@ -99,7 +123,7 @@ impl OnsetDetector {
     ///
     /// `tempo_ctx` is the live BPM / subdivision view (D2). The
     /// detector reads it every hop to compute the adaptive refractory
-    /// period — `max(floor, subdivision_interval × 0.35)`. Drums get a
+    /// period — `max(floor, subdivision_interval × 0.55)`. Drums get a
     /// tighter floor via the profile so fast rolls aren't merged at
     /// fast tempos.
     ///
@@ -147,7 +171,7 @@ impl OnsetDetector {
     ///     toward the instrument's characteristic energy region.
     ///
     /// Consumes `tempo_ctx` to make the refractory period adaptive
-    /// (`max(floor, subdivision_interval × 0.35)`).
+    /// (`max(floor, subdivision_interval × 0.55)`).
     fn detect_loop<F>(
         alive: Arc<AtomicBool>,
         audio_input: SharedAudioInput,
@@ -331,12 +355,30 @@ impl OnsetDetector {
             flux_history[flux_write_pos] = flux;
             flux_write_pos = (flux_write_pos + 1) % flux_history_len;
 
-            // Adaptive threshold: median of recent flux × multiplier
+            // Adaptive threshold: 25th-percentile of recent flux × multiplier.
+            //
+            // Previously this used the median (50th percentile) which ran
+            // hot for steady playing: at 80 BPM 16ths the player produces
+            // ~5 onsets/sec, so half of `flux_history` (100 hops ≈ 1s)
+            // ends up filled with note-attack samples. The median then
+            // tracks "what a typical attack looks like" and the threshold
+            // becomes 1.5 × typical_attack — gating roughly half of the
+            // onsets that produced it. Result: ~50% of steady playing
+            // gets silently suppressed before reaching the matcher.
+            //
+            // p25 mirrors the noise-floor's p10 strategy (`rms_history`
+            // below): anchor to the quiet baseline rather than the
+            // median of attacks. The threshold now reflects "what
+            // silence-plus-decay looks like," and consistent attacks
+            // clear it reliably.
+            //
+            // The 0.001 floor prevents triggering on pure silence (where
+            // the baseline ≈ 0 and any non-zero flux would otherwise fire).
             let threshold = {
                 let mut sorted = flux_history.clone();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let median = sorted[sorted.len() / 2];
-                median * threshold_multiplier + 0.001 // small floor to avoid triggering on silence
+                let p25 = sorted[sorted.len() / 4];
+                p25 * threshold_multiplier + 0.001
             };
 
             // D2 adaptive noise floor — update rolling RMS history then
@@ -358,7 +400,7 @@ impl OnsetDetector {
             // D2 adaptive refractory — recompute per-hop from the live
             // tempo context. Floor (instrument physics) wins at fast
             // subdivisions; the multiplier wins at slow ones. Plan:
-            // `max(profile.refractory_floor_ms, sub_interval × 0.35)`.
+            // `max(profile.refractory_floor_ms, sub_interval × 0.55)`.
             let sub_interval_ms = tempo_ctx.subdivision_interval_ms();
             let adaptive_refractory_ms = (sub_interval_ms * REFRACTORY_SUBDIVISION_FACTOR)
                 .max(profile.refractory_floor_ms as f32);
@@ -603,9 +645,12 @@ mod tests {
 
     #[test]
     fn refractory_factor_constant_matches_plan() {
-        // Plan-locked: 0.35 of subdivision interval is the "musical" knee
-        // between "too eager" and "blocking legit fast runs."
-        assert!(approx_eq(REFRACTORY_SUBDIVISION_FACTOR, 0.35, 1e-6));
+        // Plan-locked: 0.55 of subdivision interval is the "musical" knee
+        // between "too eager" and "blocking legit fast runs." Was 0.35
+        // — bumped 2026-05-17 after the doubling-bug WAV analysis (see
+        // constant's docstring for full forensics). The new value still
+        // permits 16ths up to ≈ 150 BPM at typical instrument floors.
+        assert!(approx_eq(REFRACTORY_SUBDIVISION_FACTOR, 0.55, 1e-6));
     }
 
     fn mk_onset(ts_ns: u64, amp: f32, centroid: f32, conf: f32) -> Onset {

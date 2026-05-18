@@ -270,6 +270,30 @@ export type ComponentScores = {
   onsetEfficiency: number;
 };
 
+/**
+ * Path B — payload of the `inferred-grid-changed` Tauri event.
+ *
+ * The Rust matcher's rhythm-inference picks the divisor of the beat
+ * the player is actually playing (1=quarter, 2=8th, 3=triplet,
+ * 4=16th, 6=sextuplet) and scores against THAT, not the user's click
+ * setting. This event fires whenever the locked divisor or lock-state
+ * changes; the coach UI surfaces a subtle "Tracking 16ths" caption
+ * when `locked` is true.
+ */
+export type InferredGridChanged = {
+  /** Divisor the matcher is currently scoring against. */
+  divisor: number;
+  /**
+   * Whether the inference has crystallized. False during cold-start
+   * (< 8 onsets or no candidate clears MIN_LOCK_FIT). The UI should
+   * NOT show the "Tracking …" caption when this is false — the
+   * matcher is still guessing.
+   */
+  locked: boolean;
+  /** Fit ratio of the locked divisor in [0, 1]. */
+  confidence: number;
+};
+
 export type PracticeSegment = {
   startMs: number;
   endMs: number;
@@ -391,6 +415,12 @@ export type FeedMessage = {
    *  affordance, so the UI can hide the buttons without removing the
    *  message text. */
   affordanceResolved?: boolean;
+  /** When true, the UI renders a spinner instead of the message text
+   *  until the matching `tts-speech-started` event fires. Used to
+   *  sync the visible text with the audible voice so the user doesn't
+   *  read the greeting/tip seconds before they hear it (see
+   *  `speakAndReveal` in useSession.ts). */
+  pending?: boolean;
 };
 
 // ---------------------------------------------------------------------------

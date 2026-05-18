@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { accuracyPct, accuracyRatio, scoredBeats } from "./reportStats";
+import {
+  accuracyPct,
+  accuracyRatio,
+  computeLegacyScore,
+  gradeForScore,
+  scoredBeats,
+} from "./reportStats";
 
 /**
  * The accuracy denominator is the #1 source of "subtle correctness"
@@ -104,5 +110,98 @@ describe("accuracyRatio", () => {
     // 2 / 3 = 0.6666... → accuracyPct rounds to 67
     const r = { hitsCount: 2, missCount: 1 };
     expect(accuracyPct(r)).toBe(Math.round(accuracyRatio(r) * 100));
+  });
+});
+
+describe("computeLegacyScore", () => {
+  // The two saved sessions that originally exposed the demotivating
+  // scoring inconsistency on 2026-05-17 (80 BPM 16ths, back-to-back
+  // sessions of the same exercise). Pinning them here so a future
+  // refactor of the formula can't silently regress the relative order.
+  it("scores the better-metrics 80bpm session strictly above the worse one", () => {
+    // c847c91b — 75% acc, streak 30, stddev 23.6ms (PIC 1)
+    const pic1 = computeLegacyScore({
+      hitsCount: 200,
+      missCount: 66,
+      perfectCount: 83,
+      goodCount: 100,
+      okCount: 17,
+      stdDeviationMs: 23.59,
+    });
+    // 6c920ad0 — 69% acc, streak 23, stddev 22.0ms (PIC 2)
+    const pic2 = computeLegacyScore({
+      hitsCount: 225,
+      missCount: 102,
+      perfectCount: 99,
+      goodCount: 110,
+      okCount: 16,
+      stdDeviationMs: 22.05,
+    });
+    // Pic 1 has higher hit rate, longer streak, similar quality — it
+    // SHOULD rank at least as high as Pic 2. Backend's segment-aware
+    // path gave 27 vs 72 (the bug); legacy formula gives ~74 vs ~72.
+    expect(pic1).toBeGreaterThanOrEqual(pic2);
+    expect(pic1).toBeGreaterThanOrEqual(70); // at least a "B"
+    expect(pic1).toBeLessThanOrEqual(100);
+  });
+
+  it("returns 0 for a totally empty report (no NaN/Infinity)", () => {
+    expect(
+      computeLegacyScore({
+        hitsCount: 0,
+        missCount: 0,
+        perfectCount: 0,
+        goodCount: 0,
+        okCount: 0,
+        stdDeviationMs: 0,
+      }),
+    ).toBe(20); // 0.2 weight × 1.0 consistency-with-zero-stddev × 100
+  });
+
+  it("clamps to [0, 100]", () => {
+    // Pathological: stddev is enormous, should not produce a negative.
+    const v = computeLegacyScore({
+      hitsCount: 0,
+      missCount: 100,
+      perfectCount: 0,
+      goodCount: 0,
+      okCount: 0,
+      stdDeviationMs: 9999,
+    });
+    expect(v).toBeGreaterThanOrEqual(0);
+    expect(v).toBeLessThanOrEqual(100);
+  });
+
+  it("perfect run lands ≥ 95 (S-grade band)", () => {
+    const v = computeLegacyScore({
+      hitsCount: 100,
+      missCount: 0,
+      perfectCount: 100,
+      goodCount: 0,
+      okCount: 0,
+      stdDeviationMs: 2,
+    });
+    expect(v).toBeGreaterThanOrEqual(95);
+  });
+});
+
+describe("gradeForScore", () => {
+  // Band boundaries pinned to match the Rust report
+  // (session.rs::report) so the JS-side override stays in lockstep.
+  it.each([
+    [100, "S"],
+    [95, "S"],
+    [94, "A"],
+    [85, "A"],
+    [84, "B"],
+    [70, "B"],
+    [69, "C"],
+    [55, "C"],
+    [54, "D"],
+    [40, "D"],
+    [39, "F"],
+    [0, "F"],
+  ])("score %i → grade %s", (score, grade) => {
+    expect(gradeForScore(score)).toBe(grade);
   });
 });

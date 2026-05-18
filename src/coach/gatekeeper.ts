@@ -44,8 +44,19 @@ export const SPOKEN_COOLDOWN_FLOOR_MS = 20_000;
 /** Hard ceiling on spoken-channel cooldown. */
 export const SPOKEN_COOLDOWN_CEILING_MS = 60_000;
 
-/** Hard floor on written-channel cooldown. */
-export const WRITTEN_COOLDOWN_FLOOR_MS = 3_000;
+/**
+ * Hard floor on written-channel cooldown.
+ *
+ * Bumped from 3s → 8s on 2026-05-17 (player feedback: "the number of
+ * interruptions from the coach are overwhelming, specially as soon as
+ * I start playing... haven't even played for 5s already got lots of
+ * comments"). At 3s the cooldown floor was almost decorative — back-to-
+ * back written tips were technically allowed and frequently happened
+ * because the burst limiter only kicks in at 3 fires per 30s. 8s gives
+ * the player one or two bars between any two written tips at common
+ * tempos.
+ */
+export const WRITTEN_COOLDOWN_FLOOR_MS = 8_000;
 /** Hard ceiling on written-channel cooldown. */
 export const WRITTEN_COOLDOWN_CEILING_MS = 10_000;
 
@@ -84,8 +95,29 @@ export const TREND_OFFSET_THRESHOLD_MS = 5;
 export const TREND_PRIOR_NEUTRAL_MS = 2;
 export const TREND_CONFIRMATION_REQUIRED = 2;
 
-/** Personal-best streak: min beats AND must beat session best. */
-export const STREAK_PERSONAL_BEST_MIN = 8;
+/**
+ * Personal-best streak: min beats AND must beat session best.
+ *
+ * Bumped from 8 → 24 on 2026-05-17. At 8 the detector fired as soon as
+ * the player strung together a measure of 4/4 quarters (~4s) — then
+ * re-fired every beat the streak grew past the previous best (8 → 9 →
+ * 10 → 11 ...). At 16ths that produced 5+ "Picking's locked / Streak
+ * holding / Clean run going" tips in 10 seconds. 24 beats is one bar of
+ * 16ths or six bars of quarters — a meaningfully sustained passage.
+ *
+ * Paired with `STREAK_PERSONAL_BEST_GROWTH` below: re-fires now require
+ * beating the previous best by a meaningful margin, not just one beat.
+ */
+export const STREAK_PERSONAL_BEST_MIN = 24;
+
+/**
+ * Minimum margin by which a new streak must beat the existing best
+ * before re-firing the `personal_best_streak` scenario. Without this
+ * the detector fired on every single-beat improvement (8 → 9 → 10).
+ * 8 beats ≈ one bar of 8ths, so consecutive fires now reflect a real
+ * jump in performance, not the streak counter ticking up.
+ */
+export const STREAK_PERSONAL_BEST_GROWTH = 8;
 
 /** New-band-locked: sustained accuracy ≥ this for at least this long. */
 export const NEW_BAND_ACCURACY = 0.85;
@@ -111,6 +143,61 @@ export const FIRST_BEATS_TTS_FLOOR = 4;
  */
 export const LOW_CONFIDENCE_THRESHOLD = 0.5;
 export const LOW_CONFIDENCE_SUSTAIN_MS = 30_000;
+
+/**
+ * Burst limiter — "if it already has said several comments in a row
+ * it should shut up for a while unless completely necessary to chime
+ * in" (player feedback, 2026-05-17).
+ *
+ * Two tiers operate together:
+ *   - Short burst: ≥ BURST_SHORT_MAX fires within BURST_SHORT_WINDOW_MS
+ *     → require BURST_SHORT_PENALTY_MS of silence from the most recent
+ *     fire before any new tip may emit.
+ *   - Long burst: ≥ BURST_LONG_MAX fires within BURST_LONG_WINDOW_MS
+ *     → require BURST_LONG_PENALTY_MS of silence.
+ *
+ * `ALWAYS_SPOKEN` scenarios (boundary events, milestones, recovery,
+ * fatigue, personal_best_streak, new_band_locked) bypass the limiter
+ * — those represent genuinely necessary chime-ins.
+ */
+export const BURST_SHORT_WINDOW_MS = 30_000;
+export const BURST_SHORT_MAX = 3;
+export const BURST_SHORT_PENALTY_MS = 45_000;
+
+export const BURST_LONG_WINDOW_MS = 60_000;
+export const BURST_LONG_MAX = 5;
+export const BURST_LONG_PENALTY_MS = 90_000;
+
+/**
+ * Warmup grace — give the player a quiet runway at the start of a
+ * session and after any tempo/exercise change. Player feedback
+ * (2026-05-17): "what if a user is just 'warming up' not necessarily
+ * in the session but in that given exercise... you gotta be lenient
+ * in the beginning for the player to get used to the newly set
+ * tempo."
+ *
+ * During the warmup window, non-ALWAYS_SPOKEN scenarios are
+ * suppressed. The session start sets a 15s warmup automatically;
+ * `bumpWarmup` can extend it by 10s when the user changes settings.
+ */
+/**
+ * Bumped from 15s → 30s on 2026-05-17 — the 15s window let
+ * `personal_best_streak` fire almost immediately on any decent player
+ * (which is the worst kind of "premature" tip — congratulating them
+ * for breathing). 30s gives the player time to settle into a tempo
+ * before the coach has any opinion at all.
+ */
+export const WARMUP_GRACE_MS = 30_000;
+export const WARMUP_GRACE_TEMPO_MS = 10_000;
+
+/**
+ * Repetition suppression — "we don't wanna give something like GREAT,
+ * bad, bad, GREAT! that's just not meaningful" (player feedback,
+ * 2026-05-17). When the most recently fired scenario tag would repeat
+ * back-to-back, suppress unless it's ALWAYS_SPOKEN. The history is
+ * capped at REPETITION_HISTORY_MAX entries so the gate stays cheap.
+ */
+export const REPETITION_HISTORY_MAX = 3;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -180,6 +267,28 @@ export type GatekeeperState = {
    * dips don't re-fire (one-shot per session).
    */
   lowConfidenceSinceMs: number | null;
+  /**
+   * Timestamps (wall-clock ms) of recently committed events of any
+   * tier. Used by the burst limiter to detect when the coach has been
+   * chatty and back off. Entries older than `BURST_LONG_WINDOW_MS` are
+   * pruned on every commit so the array stays small.
+   */
+  recentFireTimes: number[];
+  /**
+   * Until this wall-clock ms, non-ALWAYS_SPOKEN scenarios are
+   * suppressed (warmup grace). Set on session start and re-armed by
+   * `bumpWarmup` whenever the player changes tempo / preset / drill.
+   */
+  warmupUntilMs: number;
+  /**
+   * Scenario + tier of the most recent commits, newest LAST. Used by
+   * the repetition gate to suppress immediate scenario duplicates
+   * ("bad, bad" pattern) while still allowing the trend-confirmation
+   * rule's written→spoken escalation (same scenario but different
+   * tier is meaningful, not repetitive). Capped at
+   * `REPETITION_HISTORY_MAX`.
+   */
+  recentScenarios: Array<{ scenario: ScenarioTag; tier: Tier }>;
 };
 
 export type GatekeeperContext = {
@@ -268,7 +377,27 @@ export function createGatekeeper(sessionStartMs: number): GatekeeperState {
     lockedBpmLow: null,
     bandLockedSinceMs: null,
     lowConfidenceSinceMs: null,
+    recentFireTimes: [],
+    warmupUntilMs: sessionStartMs + WARMUP_GRACE_MS,
+    recentScenarios: [],
   };
+}
+
+/**
+ * Extend the warmup grace window. Called from the session layer when
+ * the player changes tempo, picks a different preset, or otherwise
+ * starts a fresh exercise — give them a brief quiet runway to settle
+ * in before the coach starts critiquing. Idempotent / monotonic: only
+ * pushes `warmupUntilMs` forward, never pulls it back.
+ */
+export function bumpWarmup(
+  state: GatekeeperState,
+  now: number,
+  durationMs: number = WARMUP_GRACE_TEMPO_MS,
+): GatekeeperState {
+  const candidate = now + durationMs;
+  if (candidate <= state.warmupUntilMs) return state;
+  return { ...state, warmupUntilMs: candidate };
 }
 
 /**
@@ -340,6 +469,151 @@ function passesWrittenCooldown(state: GatekeeperState, now: number): boolean {
   return now - state.lastWrittenMs >= required;
 }
 
+/**
+ * Burst-limit gate. Counts recent fires in two rolling windows; if
+ * either threshold is hit, requires a penalty window of silence from
+ * the most recent fire before allowing another tip. ALWAYS_SPOKEN
+ * scenarios bypass — those are the "completely necessary to chime
+ * in" cases.
+ */
+function passesBurstLimit(
+  state: GatekeeperState,
+  scenario: ScenarioTag,
+  now: number,
+): boolean {
+  if (isAlwaysSpoken(scenario)) return true;
+  if (state.recentFireTimes.length === 0) return true;
+
+  let shortCount = 0;
+  let longCount = 0;
+  let lastFire = 0;
+  for (const t of state.recentFireTimes) {
+    const age = now - t;
+    if (age <= BURST_SHORT_WINDOW_MS) shortCount++;
+    if (age <= BURST_LONG_WINDOW_MS) longCount++;
+    if (t > lastFire) lastFire = t;
+  }
+
+  if (shortCount >= BURST_SHORT_MAX && now - lastFire < BURST_SHORT_PENALTY_MS) {
+    return false;
+  }
+  if (longCount >= BURST_LONG_MAX && now - lastFire < BURST_LONG_PENALTY_MS) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Warmup gate. Suppresses non-ALWAYS_SPOKEN scenarios while the
+ * session is still in its warmup window (set on construction,
+ * extended by `bumpWarmup` on settings changes).
+ */
+function passesWarmup(
+  state: GatekeeperState,
+  scenario: ScenarioTag,
+  now: number,
+): boolean {
+  if (isAlwaysSpoken(scenario)) return true;
+  return now >= state.warmupUntilMs;
+}
+
+/**
+ * Repetition gate. Rejects when the (scenario, tier) pair would
+ * exactly match the most recently fired event (avoids the "bad, bad"
+ * sequence the player called out). Tier is included in the comparison
+ * so the trend-confirmation rule's written→spoken escalation is NOT
+ * treated as a repeat — that escalation is deliberate signal. Two
+ * `accuracy_drop` SPOKEN tips in a row, on the other hand, get
+ * blocked. ALWAYS_SPOKEN scenarios bypass.
+ */
+function passesRepetition(
+  state: GatekeeperState,
+  scenario: ScenarioTag,
+  tier: Tier,
+): boolean {
+  if (isAlwaysSpoken(scenario)) return true;
+  if (state.recentScenarios.length === 0) return true;
+  const last = state.recentScenarios[state.recentScenarios.length - 1];
+  return !(last.scenario === scenario && last.tier === tier);
+}
+
+/**
+ * Per-scenario hard cooldown that applies EVEN to ALWAYS_SPOKEN
+ * scenarios. The other cooldowns (spoken/written) gate the whole
+ * channel and are bypassed for always-speak events, which is correct
+ * for boundary signals and milestones — but `personal_best_streak`
+ * abused that bypass by re-firing every time the streak counter beat
+ * its previous max. This map enforces a per-scenario minimum gap that
+ * always-speak status cannot defeat.
+ *
+ * Scenarios not in the map have no per-scenario cooldown — they fall
+ * through to the channel cooldown / burst limiter / repetition gate
+ * as before.
+ */
+const PER_SCENARIO_COOLDOWN_MS: Partial<Record<ScenarioTag, number>> = {
+  // 60s between personal_best fires — even a virtuoso doesn't deserve
+  // five "great streak!" chimes per minute. Paired with the growth
+  // gate inside `detectPersonalBestStreak` this limits PB tips to ~1
+  // per minute of strong play (2026-05-17).
+  personal_best_streak: 60_000,
+  // === User-adjustment window (2026-05-17) =========================
+  // The corrective scenarios (`rushing_trend`, `dragging_trend`,
+  // `accuracy_drop`, `fatigue`) used to re-fire as fast as their
+  // detectors re-detected the same condition — which on a 2-second
+  // analysis cadence meant the coach would re-comment "you're
+  // dragging" before the user could even register the FIRST tip.
+  //
+  // User feedback (verbatim): "we don't wanna comment too fast on
+  // what user is doing, for example, if user is dragging or going
+  // too fast, we wanna give the user the opportunity to fix it."
+  //
+  // 25s per scenario gives the user a full 8–10 bar window at
+  // common tempos (≥80 BPM) to internalize the tip and adjust
+  // before the SAME issue is flagged again. Cross-scenario
+  // comments (e.g. accuracy_drop after a rushing tip) still pass
+  // through; this only debounces the SAME tag.
+  rushing_trend: 25_000,
+  dragging_trend: 25_000,
+  accuracy_drop: 25_000,
+  fatigue: 25_000,
+};
+
+function passesPerScenarioCooldown(
+  state: GatekeeperState,
+  scenario: ScenarioTag,
+  now: number,
+): boolean {
+  const cd = PER_SCENARIO_COOLDOWN_MS[scenario];
+  if (cd === undefined) return true;
+  const lastFire = state.lastEventMs[scenario];
+  if (lastFire === undefined) return true;
+  return now - lastFire >= cd;
+}
+
+/**
+ * Combined gate: a detected scenario only passes when ALL gates pass.
+ * Order is cheapest-first for short-circuit efficiency, but every
+ * gate is consulted on a real fire so behavior is independent of
+ * ordering. Always-spoken scenarios are bypassed by the warmup,
+ * burst, and repetition gates individually — but NOT by the
+ * per-scenario cooldown map above.
+ */
+function passesAllGates(
+  state: GatekeeperState,
+  scenario: ScenarioTag,
+  tier: Tier,
+  now: number,
+): boolean {
+  if (!passesPerScenarioCooldown(state, scenario, now)) return false;
+  if (!passesWarmup(state, scenario, now)) return false;
+  if (!passesRepetition(state, scenario, tier)) return false;
+  if (!passesBurstLimit(state, scenario, now)) return false;
+  if (tier === "spoken") {
+    return passesSpokenCooldown(state, scenario, now);
+  }
+  return passesWrittenCooldown(state, now);
+}
+
 // ---------------------------------------------------------------------------
 // Scenario detectors
 // ---------------------------------------------------------------------------
@@ -389,7 +663,12 @@ function detectPersonalBestStreak(
 ): Detection | null {
   const streak = trailingCleanStreak(window);
   if (streak < STREAK_PERSONAL_BEST_MIN) return null;
-  if (streak <= state.bestStreak) return null;
+  // Growth gate: re-fires must beat the previous best by a meaningful
+  // margin, not just one beat. Without this the detector fired on
+  // every 8 → 9 → 10 tick of the streak counter, producing 5+ rapid
+  // "Picking's locked / Clean run / Streak holding" tips per minute
+  // (2026-05-17 feedback).
+  if (streak < state.bestStreak + STREAK_PERSONAL_BEST_GROWTH) return null;
   return {
     scenario: "personal_best_streak",
     tier: "spoken",
@@ -666,7 +945,7 @@ export function evaluate(
   // 2. Accuracy drop (intervention). Always escalates to spoken,
   // bypasses streak suppression.
   const drop = detectAccuracyDrop(ctx.window);
-  if (drop && passesSpokenCooldown(working, drop.scenario, ctx.now)) {
+  if (drop && passesAllGates(working, drop.scenario, drop.tier, ctx.now)) {
     return commit(
       working,
       ctx.now,
@@ -678,7 +957,7 @@ export function evaluate(
   const pb = detectPersonalBestStreak(working, ctx.window);
   if (pb) {
     if (pb.partialState) working = { ...working, ...pb.partialState };
-    if (passesSpokenCooldown(working, pb.scenario, ctx.now)) {
+    if (passesAllGates(working, pb.scenario, pb.tier, ctx.now)) {
       return commit(
         working,
         ctx.now,
@@ -691,7 +970,10 @@ export function evaluate(
   // band entry.
   const band = detectNewBandLocked(working, ctx);
   if (band.partialState) working = { ...working, ...band.partialState };
-  if (band.detection && passesSpokenCooldown(working, band.detection.scenario, ctx.now)) {
+  if (
+    band.detection &&
+    passesAllGates(working, band.detection.scenario, band.detection.tier, ctx.now)
+  ) {
     return commit(
       working,
       ctx.now,
@@ -715,11 +997,7 @@ export function evaluate(
     const suppressSpoken =
       inStreak && !isAlwaysSpoken(trend.scenario) && trend.tier === "spoken";
     const tier: Tier = suppressSpoken ? "written" : trend.tier;
-    const passes =
-      tier === "spoken"
-        ? passesSpokenCooldown(working, trend.scenario, ctx.now)
-        : passesWrittenCooldown(working, ctx.now);
-    if (passes) {
+    if (passesAllGates(working, trend.scenario, tier, ctx.now)) {
       return commit(
         working,
         ctx.now,
@@ -731,7 +1009,15 @@ export function evaluate(
   // 6. Low-confidence caveat — one-shot per session.
   const lowConf = detectLowConfidence(working, ctx);
   if (lowConf.partialState) working = { ...working, ...lowConf.partialState };
-  if (lowConf.detection && passesSpokenCooldown(working, lowConf.detection.scenario, ctx.now)) {
+  if (
+    lowConf.detection &&
+    passesAllGates(
+      working,
+      lowConf.detection.scenario,
+      lowConf.detection.tier,
+      ctx.now,
+    )
+  ) {
     return commit(
       working,
       ctx.now,
@@ -742,7 +1028,7 @@ export function evaluate(
   // 7. Adaptive cooldown floor — emits at most once per quiet window
   // because committing updates `lastSpokenMs`.
   const checkIn = detectCheckIn(working, ctx.now);
-  if (checkIn) {
+  if (checkIn && passesAllGates(working, checkIn.scenario, checkIn.tier, ctx.now)) {
     return commit(
       working,
       ctx.now,
@@ -780,10 +1066,40 @@ function commit(
   event: GatekeeperEvent,
 ): { state: GatekeeperState; event: GatekeeperEvent } {
   const lastEventMs = { ...state.lastEventMs, [event.scenario]: now };
+  // Burst-limiter bookkeeping: append `now`, drop entries older than
+  // the longest watched window so the array can't grow unbounded.
+  const cutoff = now - BURST_LONG_WINDOW_MS;
+  const recentFireTimes = [
+    ...state.recentFireTimes.filter((t) => t > cutoff),
+    now,
+  ];
+  // Repetition bookkeeping: append (scenario, tier), cap to most
+  // recent N. Tier is part of the key so the trend rule's
+  // written→spoken escalation isn't mistaken for a duplicate.
+  const recentScenarios = [
+    ...state.recentScenarios,
+    { scenario: event.scenario, tier: event.tier },
+  ].slice(-REPETITION_HISTORY_MAX);
+  // Segment-boundary auto-bump: when boundary_signal_a (settings
+  // change) or boundary_signal_b (activity-gap new segment) fires,
+  // re-arm the warmup so the player gets a quiet runway for the new
+  // exercise. Monotonic: never pulls the existing warmup back.
+  const warmupUntilMs =
+    event.scenario === "boundary_signal_a" ||
+    event.scenario === "boundary_signal_b"
+      ? Math.max(state.warmupUntilMs, now + WARMUP_GRACE_TEMPO_MS)
+      : state.warmupUntilMs;
+  const base = {
+    ...state,
+    lastEventMs,
+    recentFireTimes,
+    recentScenarios,
+    warmupUntilMs,
+  };
   const next: GatekeeperState =
     event.tier === "spoken"
-      ? { ...state, lastSpokenMs: now, lastWrittenMs: now, lastEventMs }
-      : { ...state, lastWrittenMs: now, lastEventMs };
+      ? { ...base, lastSpokenMs: now, lastWrittenMs: now }
+      : { ...base, lastWrittenMs: now };
   return { state: next, event };
 }
 

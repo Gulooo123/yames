@@ -828,6 +828,13 @@ pub async fn start_evaluation(
                     score: segment_end.score,
                     component_scores: segment_end.component_scores.clone(),
                     end_reason: segment_end.end_reason,
+                    // Path B — propagate the inferred divisor so the D1
+                    // diagnostic log records what grid the matcher was
+                    // scoring against (essential for debugging "why did
+                    // this score this way?" from session_*.json).
+                    inferred_divisor: segment_end.inferred_divisor,
+                    inferred_divisor_confidence:
+                        segment_end.inferred_divisor_confidence,
                 });
             }
         },
@@ -845,6 +852,15 @@ pub async fn start_evaluation(
                     1.0,
                 );
                 crate::calibration_cache::persist_to_store(&cache, &app_for_cal);
+            }
+        },
+        {
+            // Path B — emit divisor-locked / divisor-changed events so
+            // the coach UI can render the subtle "Tracking 16ths"
+            // caption. The Rust side debounces; this just forwards.
+            let app_for_grid = app_handle.clone();
+            move |grid: crate::timing::InferredGridChanged| {
+                let _ = app_for_grid.emit("inferred-grid-changed", &grid);
             }
         },
     );
@@ -918,14 +934,28 @@ pub async fn stop_evaluation(
     // Stop in reverse-start order: onset_detector → timing_analyzer → audio_input
     // This matches start_evaluation's lock acquisition order to prevent deadlocks
     onset_detector.lock().map_err(|e| format!("Lock failed: {e}"))?.stop();
-    timing_analyzer.lock().map_err(|e| format!("Lock failed: {e}"))?.stop();
+    // Drain raw telemetry from the timing analyzer BEFORE stop() —
+    // actually, drain AFTER stop() so the analyzer thread has fully
+    // joined and there's no concurrent push racing the take.
+    // `TimingAnalyzer::drain_telemetry()` requires the analyzer to be
+    // stopped for that race-free guarantee; `start()` resets the
+    // buffer for the next session.
+    let telemetry = {
+        let mut ta = timing_analyzer
+            .lock()
+            .map_err(|e| format!("Lock failed: {e}"))?;
+        ta.stop();
+        ta.drain_telemetry()
+    };
     audio_input.lock().map_err(|e| format!("Lock failed: {e}"))?.stop();
 
     // D1 — persist a diagnostic session log. Best-effort: failures here
     // must never fail the stop path (the user already finished playing,
     // we just lose retroactive debugging data). The log layer auto-prunes
     // to MAX_SESSION_LOGS so disk growth is bounded.
-    if let Err(e) = persist_session_log(&session_acc, &state, &app_handle) {
+    if let Err(e) =
+        persist_session_log(&session_acc, &state, &app_handle, &audio_input, telemetry)
+    {
         eprintln!("[D1] failed to persist session log: {e}");
     }
     Ok(())
@@ -933,23 +963,30 @@ pub async fn stop_evaluation(
 
 /// Build + save a D1 diagnostic session log from the accumulator state.
 /// Returns Ok(()) when the log was saved OR when there was nothing to save
-/// (no feedbacks accumulated → an idle stop). Surface errors only for the
-/// "we wanted to save but the save itself failed" path.
+/// (no feedbacks AND no telemetry → an idle stop). Surface errors only
+/// for the "we wanted to save but the save itself failed" path.
 fn persist_session_log(
     session_acc: &State<'_, SharedSessionAccumulator>,
     state: &State<'_, SharedState>,
     app_handle: &AppHandle,
+    audio_input: &State<'_, SharedAudioInput>,
+    telemetry: crate::session_log::SessionTelemetry,
 ) -> Result<(), String> {
     // Snapshot accumulator state under its own lock window, then drop
     // the guard before any IO so we don't hold it across `fs::write`.
-    let (feedbacks, segments, start_secs, start_ms) = {
+    //
+    // We tolerate an empty accumulator: per-segment mini-reports invoke
+    // `clearSession()` mid-session (so a new segment doesn't accumulate
+    // INTO the prior segment's data, see `useSession.ts:361`), which
+    // wipes feedbacks/segments/session_start. If the user presses End
+    // Session right after a segment auto-ends via ActivityGap, the
+    // accumulator is empty BUT the analyzer's telemetry buffer still
+    // carries the full session's raw onset/beat/match stream. Persist
+    // whatever we have; skip only when both sources are empty.
+    let (feedbacks, segments, mut start_secs, mut start_ms) = {
         let acc = session_acc
             .lock()
             .map_err(|e| format!("session_acc lock failed: {e}"))?;
-        if acc.is_empty() {
-            // Nothing to log — successful no-op.
-            return Ok(());
-        }
         (
             acc.feedbacks().to_vec(),
             acc.segments().to_vec(),
@@ -957,6 +994,29 @@ fn persist_session_log(
             acc.session_start_ms().unwrap_or(0),
         )
     };
+
+    let telemetry_has_content = !telemetry.expected_beats.is_empty()
+        || !telemetry.detected_onsets.is_empty()
+        || !telemetry.matches.is_empty();
+    if feedbacks.is_empty() && !telemetry_has_content {
+        return Ok(());
+    }
+
+    // When the accumulator was cleared mid-session, its session_start_*
+    // is None → unwrap_or(0) above. Recover the session epoch from the
+    // earliest telemetry timestamp so the JSON's `timestamp` /
+    // `durationMs` reflect the real session window instead of 1970.
+    if start_ms == 0 {
+        let earliest = telemetry
+            .expected_beats
+            .first()
+            .map(|b| b.timestamp_ms)
+            .or_else(|| telemetry.detected_onsets.first().map(|o| o.timestamp_ms));
+        if let Some(ms) = earliest {
+            start_ms = ms;
+            start_secs = ms / 1000;
+        }
+    }
 
     let (bpm, time_signature, subdivision, instrument) = {
         let s = state.lock().map_err(|e| format!("state lock failed: {e}"))?;
@@ -978,10 +1038,37 @@ fn persist_session_log(
         instrument,
         &feedbacks,
         segments,
+        telemetry,
     );
 
     let dir = diagnostics_dir(app_handle)?;
-    crate::session_log::save_log(&dir, &log).map(|_| ())
+    let json_path = crate::session_log::save_log(&dir, &log)?;
+
+    // Dev-only: if session-audio recording was enabled, the AudioInput
+    // has a `.wav.partial` waiting. Rename it to match the JSON stem so
+    // the two files pair up obviously in `session_logs/`. Best-effort —
+    // any failure logs but doesn't break the stop path.
+    let partial_wav = audio_input
+        .lock()
+        .map_err(|e| format!("audio_input lock failed: {e}"))?
+        .take_last_session_audio_path();
+    if let Some(partial) = partial_wav {
+        if let Some(target) = crate::session_audio::paired_wav_path(&json_path) {
+            if let Err(e) = std::fs::rename(&partial, &target) {
+                eprintln!(
+                    "[session-audio] rename {} → {} failed: {e}",
+                    partial.display(),
+                    target.display()
+                );
+                // Leave the partial in place rather than deleting — the
+                // raw bytes are still useful for manual debugging even if
+                // the pairing didn't land.
+            } else {
+                eprintln!("[session-audio] paired WAV saved: {}", target.display());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1352,6 +1439,7 @@ pub fn is_coach_loaded(engine: State<'_, SharedCoachEngine>) -> bool {
 
 #[tauri::command]
 pub async fn tts_speak(
+    app_handle: AppHandle,
     tts: State<'_, SharedTts>,
     state: State<'_, SharedState>,
     dim_state: State<'_, SharedTtsDim>,
@@ -1394,9 +1482,15 @@ pub async fn tts_speak(
     // tokio's dedicated blocking pool so async workers stay free.
     let tts_arc: SharedTts = tts.inner().clone();
     let text_owned = text;
+    // Emit `tts-speech-started` right before audio playback begins so
+    // the UI can swap a spinner for the actual text in lockstep with
+    // the first audible sample. See `useSession.ts::speakAndReveal`.
+    let app_handle_for_emit = app_handle.clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut tts_engine = tts_arc.lock().map_err(|e| format!("Lock failed: {e}"))?;
-        tts_engine.speak(&text_owned)
+        tts_engine.speak(&text_owned, || {
+            let _ = app_handle_for_emit.emit("tts-speech-started", ());
+        })
     })
     .await
     .map_err(|e| format!("TTS task join failed: {e}"))?;

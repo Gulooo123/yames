@@ -379,7 +379,7 @@ export function onAudioDevicesChanged(callback: (devices: AudioOutputDevice[]) =
 // ---------------------------------------------------------------------------
 // Audio Input / Evaluation
 // ---------------------------------------------------------------------------
-import type { AudioInputDevice, AudioSpectrum, BeatFeedback, SessionReport } from "./types";
+import type { AudioInputDevice, AudioSpectrum, BeatFeedback, InferredGridChanged, SessionReport } from "./types";
 
 export async function listAudioInputDevices(): Promise<AudioInputDevice[]> {
   return invoke<AudioInputDevice[]>("list_audio_input_devices");
@@ -423,6 +423,21 @@ export function onAudioSpectrum(callback: (spectrum: AudioSpectrum) => void) {
 
 export function onBeatFeedback(callback: (feedback: BeatFeedback) => void) {
   return listen<BeatFeedback>("beat-feedback", (e) => callback(e.payload));
+}
+
+/**
+ * Path B — subscribe to rhythm-inference state changes. The Rust
+ * matcher's `RhythmInference` decides what divisor (1/2/3/4/6) the
+ * user is actually playing and emits an event whenever the locked
+ * state or divisor changes. The coach UI uses this to render the
+ * subtle "Tracking 16ths" caption (see `useInferredGrid` hook).
+ *
+ * The Rust side debounces — this callback only fires when the
+ * user-visible state actually changes, not on every refit (which runs
+ * every 5ms).
+ */
+export function onInferredGridChanged(callback: (grid: InferredGridChanged) => void) {
+  return listen<InferredGridChanged>("inferred-grid-changed", (e) => callback(e.payload));
 }
 
 // Note: the Rust side still emits `practice-segment-ended` (see
@@ -652,6 +667,18 @@ export async function isCoachLoaded(): Promise<boolean> {
 
 export async function ttsSpeak(text: string): Promise<void> {
   return invoke("tts_speak", { text });
+}
+
+/**
+ * Subscribe to the "TTS audio is about to play" signal. The Rust side
+ * emits this AFTER Piper synthesis finishes but BEFORE `afplay` is
+ * launched — i.e. when the spinner-to-text swap should fire so the
+ * visible text lands within ~10-30ms of the first audible sample. The
+ * payload is empty; the consumer maintains its own pending-speech
+ * queue (FIFO) and pops the head on each event.
+ */
+export function onTtsSpeechStarted(callback: () => void) {
+  return listen<null>("tts-speech-started", () => callback());
 }
 
 export async function ttsSetVoice(voice: string): Promise<void> {

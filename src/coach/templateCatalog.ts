@@ -44,89 +44,86 @@ const GENERIC: ScenarioCatalog = {
       "Quick dip. Slow the pulse in your head and pick it back up.",
     ],
     neutral: [
-      "Accuracy dropped from {priorAccuracyPct}% to {recentAccuracyPct}% over the last {windowBeats} beats.",
-      "Hit rate slipped — {recentAccuracyPct}% in the last {windowBeats} versus {priorAccuracyPct}% before.",
-      "Last {windowBeats} beats: {recentAccuracyPct}%. Prior block: {priorAccuracyPct}%.",
+      "Hit rate's slipped a bit — reset on the next bar.",
+      "Accuracy is sliding. Let it settle on the next downbeat.",
+      "Things are slipping — slow it in your head, then back in.",
     ],
     correction: [
-      "{recentAccuracyPct}% accuracy is below your previous block of {priorAccuracyPct}%. Consider slowing the tempo until it stabilises.",
-      "You've dropped {priorAccuracyPct} → {recentAccuracyPct}%. Dial it back 5 BPM and rebuild.",
-      "The slip is sustained. Slow down, get one clean bar, then climb again.",
+      "The slip is sustained — consider dialing the tempo back a few BPM.",
+      "Hits are scattering. Slow down and rebuild from clean.",
+      "Get one clean bar, then climb again.",
     ],
   },
   rushing_trend: {
     encouragement: [
-      "You're sitting {offsetMs}ms ahead — bring your awareness to the next click.",
-      "Slight rush developing. Plant your foot, let the metronome lead.",
-      "About {offsetMs}ms early. Inhale, settle, ride the beat.",
+      "Sitting just ahead of the click — breathe and ride it.",
+      "Slight rush creeping in. Plant your foot, let the metronome lead.",
+      "A little early — settle into the next click.",
     ],
     neutral: [
-      "Last {windowBeats} beats averaged {offsetMs}ms early (prior block: {priorOffsetMs}ms).",
-      "Trending early — {offsetMs}ms ahead, was {priorOffsetMs}ms.",
-      "You're rushing the click by ~{offsetMs}ms over the last few bars.",
+      "Trending a touch early — try riding the back of the beat.",
+      "You're nudging ahead of the click — let it come to you.",
+      "Drifting early. Sit deeper into each click.",
     ],
     correction: [
-      "Sustained rushing — {offsetMs}ms early. Subdivide internally and place each note ON the click, not before it.",
-      "{offsetMs}ms ahead of the beat for {windowBeats} beats running. Slow down and feel the AND of each beat.",
-      "The rush isn't fading. Pause, count yourself in slow, and re-enter.",
+      "Still leaning early — subdivide and place each note ON the click.",
+      "The rush is sticking. Slow it down, feel the AND of each beat.",
+      "Pause, count yourself in slow, and re-enter.",
     ],
   },
   dragging_trend: {
     encouragement: [
-      "Sitting {offsetMs}ms behind — lift the tempo back up under your fingers.",
-      "Slight drag. Take a breath and push back into the beat.",
-      "About {offsetMs}ms late. You're close — keep leaning forward.",
+      "Sitting just behind the click — lift the tempo back under your fingers.",
+      "Slight drag. Breathe and push back into the beat.",
+      "A little behind — lean forward, you're close.",
     ],
     neutral: [
-      "Last {windowBeats} beats averaged {offsetMs}ms late (prior block: {priorOffsetMs}ms).",
-      "Trending late — {offsetMs}ms behind, was {priorOffsetMs}ms.",
-      "You're dragging the click by ~{offsetMs}ms over the last few bars.",
+      "Trending a touch late — try anticipating the click.",
+      "You're sitting behind the beat — push into each one.",
+      "Drifting late. Reach for the front of each click.",
     ],
     correction: [
-      "Sustained drag — {offsetMs}ms late. Anticipate the click slightly; don't wait for it to arrive.",
-      "{offsetMs}ms behind the beat for {windowBeats} beats running. Push the tempo with your right hand.",
-      "The drag is sticking. Stop, reset, and re-enter with intent on beat 1.",
+      "Still hanging back — anticipate the click instead of waiting for it.",
+      "The drag is sticking. Push the tempo with your fingers.",
+      "Stop, reset, and re-enter with intent on beat 1.",
     ],
   },
   personal_best_streak: {
-    // v0.10: shortened to single-beat affirmations. Earlier copy
-    // ("{streak} clean beats — new best this session. Keep
-    // breathing.") tested fine in isolation but landed mid-flow like
-    // an interruption. A positive tip is most useful as a quick
-    // "you're doing the thing" — diagnostics belong in the neutral/
-    // correction tiers below. Numeric `{streak}` stays so the praise
-    // is grounded, not generic.
+    // v0.11: per user feedback, drop the numeric streak count from the
+    // in-play affirmations — a glanceable "nice" lands better than a
+    // figure the player has to register mid-bar. The numeric detail
+    // still surfaces in the post-segment mini-report card.
     encouragement: [
-      "{streak} clean — keep it going.",
-      "{streak} in a row. Nice.",
-      "{streak} straight — stay there.",
+      "Locked in — keep it going.",
+      "Streak's going. Nice.",
+      "On a run — stay there.",
     ],
     neutral: [
-      "{streak}-beat clean streak — beats your previous best of {previousBest}.",
-      "New streak: {streak} beats unbroken (was {previousBest}).",
-      "{streak} clean — your best run today.",
+      "New session best — locked in.",
+      "Cleanest stretch so far. Hold it.",
+      "Best run yet today. Don't change a thing.",
     ],
     correction: [
-      "{streak}-beat run — locked in. Hold tempo, don't push faster yet.",
-      "{streak} clean. Stay at this BPM until it's automatic.",
-      "{streak} in a row — exactly where you want to live for a minute.",
+      "Locked in — hold tempo, don't push faster yet.",
+      "Streak's clean. Stay at this BPM until it's automatic.",
+      "Exactly where you want to live for a minute.",
     ],
   },
   new_band_locked: {
     encouragement: [
-      "{bpmLow} BPM, {accuracyPct}% — yours now.",
+      "{bpmLow} BPM — yours now.",
       "Locked at {bpmLow} BPM. Nice.",
-      "{accuracyPct}% sustained — new ceiling.",
+      "Held this tempo clean — new ceiling.",
     ],
     neutral: [
-      "Sustained ≥{accuracyPct}% accuracy at {bpmLow}-{bpmHigh} BPM for 60+ seconds.",
-      "{bpmLow}-{bpmHigh} BPM band: {accuracyPct}% sustained.",
-      "New BPM band locked in: {bpmLow}-{bpmHigh}, {accuracyPct}% accuracy.",
+      "Sustained clean play at {bpmLow}–{bpmHigh} BPM for a minute.",
+      "{bpmLow}–{bpmHigh} BPM band: locked in.",
+      "New BPM band owned: {bpmLow}–{bpmHigh}.",
     ],
     correction: [
-      "{bpmLow}-{bpmHigh} is stable. Stay here, then push ~5 BPM.",
-      "Held {bpmLow}-{bpmHigh} clean. Ready to climb when you are.",
-      "{bpmLow}-{bpmHigh} feels owned. Next session, start here.",
+      "{bpmLow}–{bpmHigh} is stable. Stay here, then push a touch.",
+      "Held {bpmLow}–{bpmHigh} clean. Ready to climb when you are.",
+      "{bpmLow}–{bpmHigh} feels owned. Next session, start here.",
     ],
   },
   check_in: {
@@ -170,14 +167,14 @@ const GENERIC: ScenarioCatalog = {
       "Recovered — keep this exact feel.",
     ],
     neutral: [
-      "Score recovered from rough patch back to {recentAccuracyPct}%.",
-      "Back to clean after a dip. Keep the new pace.",
-      "Recovery confirmed — accuracy back above threshold.",
+      "Back to clean after the dip. Keep this pace.",
+      "Score's back up — hold it.",
+      "Recovery confirmed — accuracy steady again.",
     ],
     correction: [
-      "Recovery's holding. Don't push the tempo until 30 more seconds clean.",
+      "Recovery's holding. Don't push the tempo for a bit.",
       "Back from the dip — stay flat, no climbing yet.",
-      "You salvaged it. Now hold this exact BPM for a full minute.",
+      "You salvaged it. Hold this exact BPM for a full minute.",
     ],
   },
   tempo_milestone: {
@@ -257,37 +254,37 @@ const GENERIC: ScenarioCatalog = {
 const DRUMS: ScenarioCatalog = {
   accuracy_drop: {
     correction: [
-      "{recentAccuracyPct}% — your kick is drifting. Lock the right foot to the click before the snare.",
-      "Hits scattered the last {windowBeats} beats. Bring the bass-snare conversation back to the grid.",
-      "Drop to {recentAccuracyPct}%. Stop, count a bar, restart with the foot only.",
+      "Kick is drifting. Lock the right foot to the click before the snare.",
+      "Hits are scattering. Bring the bass-snare conversation back to the grid.",
+      "Stop, count a bar, restart with the foot only.",
     ],
   },
   rushing_trend: {
     correction: [
-      "{offsetMs}ms ahead — your right hand is leading the kick. Lay it back.",
-      "Snare's rushing by {offsetMs}ms. Subdivide 16ths between hits and place beat 2 ON the click.",
-      "You're driving the click {offsetMs}ms. Slow the right hand; the foot will follow.",
+      "Right hand is leading the kick — lay it back.",
+      "Snare's rushing. Subdivide 16ths between hits and place beat 2 ON the click.",
+      "You're driving the click. Slow the right hand; the foot will follow.",
     ],
   },
   dragging_trend: {
     correction: [
-      "{offsetMs}ms behind — your right hand is lagging the kick. Lean into the hi-hat.",
-      "Snare's dragging by {offsetMs}ms. Anticipate beat 2 and 4 slightly, don't wait for the click.",
-      "You're behind by {offsetMs}ms. Push the hi-hat ahead; the kick should sit ON the click, not after.",
+      "Right hand is lagging the kick — lean into the hi-hat.",
+      "Snare's dragging. Anticipate beat 2 and 4 slightly, don't wait for the click.",
+      "Push the hi-hat ahead; the kick should sit ON the click, not after.",
     ],
   },
   personal_best_streak: {
     encouragement: [
-      "{streak} clean — kick-snare locked.",
-      "{streak} in a row. Pocket.",
-      "{streak} clean — stay there.",
+      "Kick-snare locked.",
+      "Pocket. Stay.",
+      "Streak going — stay there.",
     ],
   },
   new_band_locked: {
     neutral: [
-      "{bpmLow}-{bpmHigh} BPM band sustained at {accuracyPct}% — kick-snare relationship is locked.",
-      "Pocket holding at {bpmLow}-{bpmHigh} BPM, {accuracyPct}% sustained.",
-      "{accuracyPct}% sustained at {bpmLow}-{bpmHigh} BPM — that's the new floor.",
+      "{bpmLow}–{bpmHigh} BPM band sustained — kick-snare relationship is locked.",
+      "Pocket holding at {bpmLow}–{bpmHigh} BPM.",
+      "Sustained at {bpmLow}–{bpmHigh} BPM — that's the new floor.",
     ],
   },
   recovery: {
@@ -328,37 +325,37 @@ const DRUMS: ScenarioCatalog = {
 const ELECTRIC_GUITAR: ScenarioCatalog = {
   accuracy_drop: {
     correction: [
-      "{recentAccuracyPct}% — your picking hand is losing the grid. Anchor with your palm.",
-      "Hits scattered the last {windowBeats} beats. Slow the picking pattern, accent beat 1.",
-      "Drop to {recentAccuracyPct}%. Mute the strings, alternate-pick one bar to the click, then re-enter.",
+      "Picking hand is losing the grid. Anchor with your palm.",
+      "Hits are scattering. Slow the picking pattern, accent beat 1.",
+      "Mute the strings, alternate-pick one bar to the click, then re-enter.",
     ],
   },
   rushing_trend: {
     correction: [
-      "{offsetMs}ms ahead — your downstrokes are leading. Anchor the upstrokes ON the click.",
-      "Picking hand rushing by {offsetMs}ms. Plant the wrist; let the metronome lead the downstroke.",
-      "You're ahead by {offsetMs}ms. Subdivide eighths inside each beat and feel the AND.",
+      "Downstrokes are leading — anchor the upstrokes ON the click.",
+      "Picking hand's rushing. Plant the wrist; let the metronome lead the downstroke.",
+      "Subdivide eighths inside each beat and feel the AND.",
     ],
   },
   dragging_trend: {
     correction: [
-      "{offsetMs}ms behind — your upstrokes are lagging. Lift the wrist; meet the click on the down.",
-      "Picking hand dragging by {offsetMs}ms. Anticipate slightly; don't wait for the click to arrive.",
-      "You're behind by {offsetMs}ms. Push from the forearm, not the fingers — let the pick lead.",
+      "Upstrokes are lagging — lift the wrist; meet the click on the down.",
+      "Picking hand's dragging. Anticipate slightly; don't wait for the click to arrive.",
+      "Push from the forearm, not the fingers — let the pick lead.",
     ],
   },
   personal_best_streak: {
     encouragement: [
-      "{streak} clean picks — keep going.",
-      "{streak} in a row. Picking's locked.",
-      "{streak} clean — stay there.",
+      "Picking's locked — keep going.",
+      "Clean run going. Stay there.",
+      "Streak holding — don't change anything.",
     ],
   },
   new_band_locked: {
     neutral: [
-      "{bpmLow}-{bpmHigh} BPM band sustained at {accuracyPct}% — alternate picking is locked.",
-      "Picking-hand pocket holding at {bpmLow}-{bpmHigh} BPM, {accuracyPct}% sustained.",
-      "{accuracyPct}% sustained at {bpmLow}-{bpmHigh} BPM — new floor for this riff.",
+      "{bpmLow}–{bpmHigh} BPM band sustained — alternate picking is locked.",
+      "Picking-hand pocket holding at {bpmLow}–{bpmHigh} BPM.",
+      "Sustained at {bpmLow}–{bpmHigh} BPM — new floor for this riff.",
     ],
   },
   recovery: {
@@ -399,37 +396,37 @@ const ELECTRIC_GUITAR: ScenarioCatalog = {
 const BASS: ScenarioCatalog = {
   accuracy_drop: {
     correction: [
-      "{recentAccuracyPct}% — your right hand is drifting from the kick. Re-anchor on beat 1.",
-      "Hits scattered the last {windowBeats} beats. Slow the fingering, lock to the kick.",
-      "Drop to {recentAccuracyPct}%. Stop, play just root notes to the click, then add the line.",
+      "Right hand is drifting from the kick. Re-anchor on beat 1.",
+      "Hits are scattering. Slow the fingering, lock to the kick.",
+      "Stop, play just root notes to the click, then add the line.",
     ],
   },
   rushing_trend: {
     correction: [
-      "{offsetMs}ms ahead — your plucking hand is leading the kick. Lay it back.",
-      "Right hand rushing by {offsetMs}ms. Sit deeper behind the beat with the drummer.",
-      "You're ahead by {offsetMs}ms. Subdivide; place each pluck ON the click, not before it.",
+      "Plucking hand is leading the kick — lay it back.",
+      "Right hand's rushing. Sit deeper behind the beat with the drummer.",
+      "Subdivide; place each pluck ON the click, not before it.",
     ],
   },
   dragging_trend: {
     correction: [
-      "{offsetMs}ms behind — your plucks are lagging the kick. Push slightly into each note.",
-      "Right hand dragging by {offsetMs}ms. Anticipate the click; don't wait for the kick to land.",
-      "You're behind by {offsetMs}ms. Lift the plucking finger sooner — meet the click on the front of the note.",
+      "Plucks are lagging the kick — push slightly into each note.",
+      "Right hand's dragging. Anticipate the click; don't wait for the kick to land.",
+      "Lift the plucking finger sooner — meet the click on the front of the note.",
     ],
   },
   personal_best_streak: {
     encouragement: [
-      "{streak} clean — locked with the kick.",
-      "{streak} in a row. Pocket.",
-      "{streak} clean — stay there.",
+      "Locked with the kick.",
+      "Pocket. Stay.",
+      "Streak going — stay there.",
     ],
   },
   new_band_locked: {
     neutral: [
-      "{bpmLow}-{bpmHigh} BPM band sustained at {accuracyPct}% — bass-kick lock is solid.",
-      "Root-note pocket holding at {bpmLow}-{bpmHigh} BPM, {accuracyPct}% sustained.",
-      "{accuracyPct}% sustained at {bpmLow}-{bpmHigh} BPM — new floor for this groove.",
+      "{bpmLow}–{bpmHigh} BPM band sustained — bass-kick lock is solid.",
+      "Root-note pocket holding at {bpmLow}–{bpmHigh} BPM.",
+      "Sustained at {bpmLow}–{bpmHigh} BPM — new floor for this groove.",
     ],
   },
   recovery: {
@@ -470,37 +467,37 @@ const BASS: ScenarioCatalog = {
 const ACOUSTIC_GUITAR: ScenarioCatalog = {
   accuracy_drop: {
     correction: [
-      "{recentAccuracyPct}% — your strumming hand is losing the grid. Anchor with the thumb.",
-      "Hits scattered the last {windowBeats} beats. Soften the strum, accent the downbeat.",
-      "Drop to {recentAccuracyPct}%. Just open-string downstrokes to the click, then re-enter.",
+      "Strumming hand is losing the grid. Anchor with the thumb.",
+      "Hits are scattering. Soften the strum, accent the downbeat.",
+      "Just open-string downstrokes to the click, then re-enter.",
     ],
   },
   rushing_trend: {
     correction: [
-      "{offsetMs}ms ahead — your strumming arm is leading. Anchor the downstroke ON the click.",
-      "Strumming hand rushing by {offsetMs}ms. Slow the wrist; let the click drive the strum.",
-      "You're ahead by {offsetMs}ms. Feel the AND of each beat between strums.",
+      "Strumming arm is leading — anchor the downstroke ON the click.",
+      "Strumming hand's rushing. Slow the wrist; let the click drive the strum.",
+      "Feel the AND of each beat between strums.",
     ],
   },
   dragging_trend: {
     correction: [
-      "{offsetMs}ms behind — your strum is lagging. Lift the wrist earlier; meet the click on the down.",
-      "Strumming hand dragging by {offsetMs}ms. Anticipate; don't wait for the click to land.",
-      "You're behind by {offsetMs}ms. Drive from the elbow, not just the wrist.",
+      "Strum is lagging — lift the wrist earlier; meet the click on the down.",
+      "Strumming hand's dragging. Anticipate; don't wait for the click to land.",
+      "Drive from the elbow, not just the wrist.",
     ],
   },
   personal_best_streak: {
     encouragement: [
-      "{streak} clean strums — keep going.",
-      "{streak} in a row. Nice groove.",
-      "{streak} clean — stay there.",
+      "Strumming's locked — keep going.",
+      "Nice groove going. Stay.",
+      "Streak holding — stay there.",
     ],
   },
   new_band_locked: {
     neutral: [
-      "{bpmLow}-{bpmHigh} BPM band sustained at {accuracyPct}% — strumming is locked.",
-      "Strumming pocket holding at {bpmLow}-{bpmHigh} BPM, {accuracyPct}% sustained.",
-      "{accuracyPct}% sustained at {bpmLow}-{bpmHigh} BPM — new floor for this pattern.",
+      "{bpmLow}–{bpmHigh} BPM band sustained — strumming is locked.",
+      "Strumming pocket holding at {bpmLow}–{bpmHigh} BPM.",
+      "Sustained at {bpmLow}–{bpmHigh} BPM — new floor for this pattern.",
     ],
   },
   recovery: {
@@ -541,37 +538,37 @@ const ACOUSTIC_GUITAR: ScenarioCatalog = {
 const PIANO: ScenarioCatalog = {
   accuracy_drop: {
     correction: [
-      "{recentAccuracyPct}% — your hands are drifting apart. Lock the left hand to the click first.",
-      "Hits scattered the last {windowBeats} beats. Slow down; hands separately, then together.",
-      "Drop to {recentAccuracyPct}%. Just left hand to the click for a bar, then add the right.",
+      "Hands are drifting apart. Lock the left hand to the click first.",
+      "Hits are scattering. Slow down; hands separately, then together.",
+      "Just left hand to the click for a bar, then add the right.",
     ],
   },
   rushing_trend: {
     correction: [
-      "{offsetMs}ms ahead — your right hand is leading the left. Anchor the bass note ON the click.",
-      "Rushing by {offsetMs}ms. Sit deeper into the keybed; let the click pull each note.",
-      "You're ahead by {offsetMs}ms. Subdivide; place each note where the click lands, not before.",
+      "Right hand is leading the left — anchor the bass note ON the click.",
+      "Rushing — sit deeper into the keybed; let the click pull each note.",
+      "Subdivide; place each note where the click lands, not before.",
     ],
   },
   dragging_trend: {
     correction: [
-      "{offsetMs}ms behind — your left hand is lagging. Lead with the bass, not the melody.",
-      "Dragging by {offsetMs}ms. Anticipate the downbeat with the left hand; don't wait for the click.",
-      "You're behind by {offsetMs}ms. Lift the wrists earlier — meet the click on the front of each note.",
+      "Left hand is lagging — lead with the bass, not the melody.",
+      "Dragging — anticipate the downbeat with the left hand; don't wait for the click.",
+      "Lift the wrists earlier — meet the click on the front of each note.",
     ],
   },
   personal_best_streak: {
     encouragement: [
-      "{streak} clean — hands locked.",
-      "{streak} in a row. Both hands synced.",
-      "{streak} clean — stay there.",
+      "Hands locked. Stay.",
+      "Both hands synced.",
+      "Streak going — stay there.",
     ],
   },
   new_band_locked: {
     neutral: [
-      "{bpmLow}-{bpmHigh} BPM band sustained at {accuracyPct}% — both hands locked to the click.",
-      "Hand-sync pocket holding at {bpmLow}-{bpmHigh} BPM, {accuracyPct}% sustained.",
-      "{accuracyPct}% sustained at {bpmLow}-{bpmHigh} BPM — new floor for this voicing.",
+      "{bpmLow}–{bpmHigh} BPM band sustained — both hands locked to the click.",
+      "Hand-sync pocket holding at {bpmLow}–{bpmHigh} BPM.",
+      "Sustained at {bpmLow}–{bpmHigh} BPM — new floor for this voicing.",
     ],
   },
   recovery: {

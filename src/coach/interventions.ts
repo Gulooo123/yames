@@ -189,7 +189,7 @@ export const INTERVENTION_CATALOG: readonly Intervention[] = Object.freeze([
         event.scenario === "new_band_locked") &&
       ctx.score >= BPM_BUMP_SCORE_FLOOR &&
       ctx.bpm < BPM_BUMP_MAX_BPM,
-    template: "Locked at {bpm} ({score}%). Try {newBpm}?",
+    template: "Locked at {bpm} BPM — try {newBpm}?",
     cooldownMs: 90_000,
     action: { kind: "set-bpm", bpmDelta: 10 },
     actionLabel: "Bump to {newBpm} BPM",

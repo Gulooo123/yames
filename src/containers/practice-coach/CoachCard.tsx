@@ -1,9 +1,21 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { getSessionHistory, deleteSession, clearAllSessions } from "../../ipc";
-import type { FeedMessage, SavedSession, AudioSpectrum } from "../../types";
+import { rescoreReport } from "../../coach/reportStats";
+import type { FeedMessage, SavedSession, AudioSpectrum, InferredGridChanged } from "../../types";
 import { FeedMessageItem, type ChipAction } from "./CoachFeedMessage";
 import { CoachHistoryList } from "./CoachHistoryList";
 import { CoachSessionDetail } from "./CoachSessionDetail";
+
+/**
+ * Apply the JS-side legacy scoring formula to every loaded session.
+ * Sessions saved before the scoring fix have the old segment-aware
+ * Rust score baked in (often demotivating sub-30 grades on otherwise
+ * fine 70%-accuracy runs); re-deriving on read keeps the history view
+ * consistent with newly-saved sessions without a destructive migration.
+ */
+function rescoreHistory(sessions: SavedSession[]): SavedSession[] {
+  return sessions.map((s) => ({ ...s, report: rescoreReport(s.report) }));
+}
 import "../../styles/coach-card.css";
 import "../../styles/evaluation-panel.css";
 
@@ -34,12 +46,32 @@ interface CoachCardProps {
    *  `onPause` from `togglePlayback`. */
   isPlaying?: boolean;
   onPause?: () => void;
+  /** Path B — rhythm-inference lock state. When the matcher decides the
+   *  user is playing a specific divisor (e.g. 4 → 16ths), this carries
+   *  the locked divisor. Used to render the subtle "Tracking 16ths"
+   *  caption next to the title. `null` or `locked === false` → no
+   *  caption. */
+  inferredGrid?: InferredGridChanged | null;
+}
+
+/** Path B — map a locked divisor to a human-readable label.
+ *  Returns `null` for divisors we don't have a single-word label for,
+ *  which causes the caption to be hidden. */
+function divisorLabel(divisor: number): string | null {
+  switch (divisor) {
+    case 1: return "quarters";
+    case 2: return "8ths";
+    case 3: return "triplets";
+    case 4: return "16ths";
+    case 6: return "sextuplets";
+    default: return null;
+  }
 }
 
 type CardTab = "feed" | "history";
 type HistoryView = "list" | "detail";
 
-export default function CoachCard({ open, active, messages, onToggle, onStartSession, onEndSession, onSendChat, onChipAction, onRegisterChatFocus, listening, hasSignal, spectrum, isPlaying, onPause }: CoachCardProps) {
+export default function CoachCard({ open, active, messages, onToggle, onStartSession, onEndSession, onSendChat, onChipAction, onRegisterChatFocus, listening, hasSignal, spectrum, isPlaying, onPause, inferredGrid }: CoachCardProps) {
   const feedRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const [chatInput, setChatInput] = useState("");
@@ -128,7 +160,7 @@ export default function CoachCard({ open, active, messages, onToggle, onStartSes
   // Load history when switching to history tab
   useEffect(() => {
     if (tab === "history" && open) {
-      getSessionHistory().then(setHistory);
+      getSessionHistory().then((h) => setHistory(rescoreHistory(h)));
     }
   }, [tab, open]);
 
@@ -200,6 +232,11 @@ export default function CoachCard({ open, active, messages, onToggle, onStartSes
                     const level = i * step < bands.length ? bands[i * step] : 0;
                     return <span key={i} className="coach-title-spectrum-bar" style={{ height: `${Math.max(2, level * 100)}%` }} />;
                   })}
+                </span>
+              )}
+              {active && inferredGrid?.locked && divisorLabel(inferredGrid.divisor) && (
+                <span className="coach-tracking-caption">
+                  Tracking {divisorLabel(inferredGrid.divisor)}
                 </span>
               )}
             </span>

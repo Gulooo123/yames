@@ -6,23 +6,49 @@ use std::time::Duration;
 
 use crate::instrument::InstrumentProfile;
 use crate::onset::Onset;
-use crate::session_log::{ComponentScores, SegmentEndReason};
+use crate::session_log::{
+    Classification, ComponentScores, DetectedOnset, ExpectedBeat, MatchDecision, MatchReason,
+    SegmentEndReason, SessionTelemetry,
+};
 
 /// A logged beat tick from the metronome engine.
+///
+/// Path B — every audible tick (downbeat AND every subdivision in
+/// between) is logged. The matcher's rhythm-inference picks which
+/// ticks are "active" for scoring based on what the player is
+/// actually playing — see `RhythmInference` below.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BeatTick {
     /// Monotonic timestamp in nanoseconds (shared clock)
     #[serde(rename = "tsNs")]
     pub ts_ns: u64,
-    /// Sequential beat index (0-based, resets each play session)
+    /// Sequential beat index (0-based, resets each play session).
+    /// Same beat_index repeats for each subdivision within the beat —
+    /// `subdivision_index` disambiguates.
     #[serde(rename = "beatIndex")]
     pub beat_index: u32,
-    /// Whether this is the first beat of a measure
+    /// Whether this is the first beat of a measure (only true on
+    /// subdivision_index == 0 of the bar's first quarter).
     #[serde(rename = "isDownbeat")]
     pub is_downbeat: bool,
-    /// Expected interval to next beat in ms (derived from current BPM)
+    /// Expected interval BETWEEN quarter-note beats in ms. All
+    /// subdivision ticks for the same beat carry the SAME value
+    /// (the quarter-note interval). The per-tick interval is
+    /// `expected_interval_ms / subdivision_total`.
     #[serde(rename = "expectedIntervalMs")]
     pub expected_interval_ms: f64,
+    /// Path B — which subdivision within the beat this tick represents.
+    /// 0 = on the quarter; 1..subdivision_total-1 = subdivision ticks.
+    /// Used by `RhythmInference` to decide whether to score this tick
+    /// against the inferred grid.
+    #[serde(rename = "subdivisionIndex")]
+    pub subdivision_index: u8,
+    /// Path B — the user-configured subdivision (1 = quarters only,
+    /// 2 = eighths, 3 = triplets, 4 = sixteenths, 6 = sextuplets).
+    /// Together with `subdivision_index`, this lets the matcher map
+    /// each tick to its absolute phase within the beat.
+    #[serde(rename = "subdivisionTotal")]
+    pub subdivision_total: u8,
 }
 
 /// Feedback for a single beat after matching with an onset.
@@ -108,6 +134,33 @@ pub struct PracticeSegmentEnded {
     /// random noodling.
     #[serde(rename = "onsetEfficiency")]
     pub onset_efficiency: f32,
+    /// Path B — divisor the rhythm-inference settled on while this
+    /// segment was active (1 = quarters, 2 = 8ths, 3 = triplets, 4 =
+    /// 16ths, 6 = sextuplets). Surfaced for telemetry and post-hoc
+    /// review; the UI also uses it in the coach summary.
+    #[serde(rename = "inferredDivisor")]
+    pub inferred_divisor: u8,
+    /// Path B — confidence in the inferred divisor at segment close.
+    /// 0.0 means the inference never crystallized (segment too short
+    /// or play too erratic); ≥ 0.65 means the lock was confident.
+    #[serde(rename = "inferredDivisorConfidence")]
+    pub inferred_divisor_confidence: f64,
+}
+
+/// Path B — UI event emitted whenever the rhythm-inference's locked
+/// divisor or lock-state changes. Drives the coach card's "Tracking
+/// 16ths" subtle caption.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InferredGridChanged {
+    /// Divisor the matcher is currently scoring against (1, 2, 3, 4, 6).
+    pub divisor: u8,
+    /// Whether the inference has crystallized (fit ≥ MIN_LOCK_FIT).
+    /// When false, `divisor` reflects the cold-start fallback and the
+    /// UI should NOT show the "Tracking …" caption — the inference is
+    /// still guessing.
+    pub locked: bool,
+    /// Fit ratio of the locked divisor (0.0–1.0). 0.0 when not locked.
+    pub confidence: f64,
 }
 
 /// D4 Signal-B trigger: minimum sustained-play duration before a
@@ -174,6 +227,10 @@ pub struct TimingAnalyzer {
     /// SettingsChange goes via Signal A"). The analysis loop polls
     /// this once per iteration and clears it on close.
     settings_changed: Arc<AtomicBool>,
+    /// Per-session raw telemetry — populated by the analysis loop,
+    /// drained by `drain_telemetry()` at session end. See
+    /// `SessionTelemetry` for the schema and why it exists.
+    telemetry: Arc<Mutex<SessionTelemetry>>,
 }
 
 impl TimingAnalyzer {
@@ -184,7 +241,18 @@ impl TimingAnalyzer {
             onset_log: Arc::new(Mutex::new(VecDeque::with_capacity(64))),
             beat_log,
             settings_changed: Arc::new(AtomicBool::new(false)),
+            telemetry: Arc::new(Mutex::new(SessionTelemetry::default())),
         }
+    }
+
+    /// Drain the per-session telemetry buffer and reset for the next
+    /// session. Must be called AFTER `stop()` so the analysis loop
+    /// can't race a push against the take. Returns an empty
+    /// `SessionTelemetry` if the loop never ran or was stopped before
+    /// any events flowed through.
+    pub fn drain_telemetry(&self) -> SessionTelemetry {
+        let mut tel = self.telemetry.lock().unwrap();
+        std::mem::take(&mut *tel)
     }
 
     /// Feed an onset into the analyzer (called from onset detector callback).
@@ -230,7 +298,7 @@ impl TimingAnalyzer {
     /// real samples (confidence == 1.0). The callee writes the value
     /// back to the cache. It does not fire when the cached pre-seed is
     /// what filled the buffer — only genuine on-device learning counts.
-    pub fn start<F, G, H>(
+    pub fn start<F, G, H, I>(
         &mut self,
         profile: InstrumentProfile,
         instrument_id: String,
@@ -239,20 +307,28 @@ impl TimingAnalyzer {
         on_feedback: F,
         on_segment_end: G,
         on_calibration_converged: H,
+        on_inferred_grid: I,
     ) where
         F: Fn(BeatFeedback) + Send + 'static,
         G: Fn(PracticeSegmentEnded) + Send + 'static,
         H: Fn(f64) + Send + 'static,
+        I: Fn(InferredGridChanged) + Send + 'static,
     {
         self.stop();
         // Clear any stale Signal A flag from a prior session so a
         // brand-new segment isn't immediately closed by leftover state.
         self.settings_changed.store(false, Ordering::SeqCst);
+        // Reset telemetry buffer so the new session starts fresh.
+        // `stop()` deliberately preserves it so `drain_telemetry()` can
+        // still extract the prior session's data; the responsibility
+        // for clearing lives here at the start of the next session.
+        *self.telemetry.lock().unwrap() = SessionTelemetry::default();
         self.alive.store(true, Ordering::SeqCst);
         let alive = self.alive.clone();
         let onset_log = self.onset_log.clone();
         let beat_log = self.beat_log.clone();
         let settings_changed = self.settings_changed.clone();
+        let telemetry = self.telemetry.clone();
 
         self.thread_handle = Some(thread::spawn(move || {
             Self::analysis_loop(
@@ -260,6 +336,7 @@ impl TimingAnalyzer {
                 beat_log,
                 onset_log,
                 settings_changed,
+                telemetry,
                 profile,
                 instrument_id,
                 preset_id,
@@ -267,6 +344,7 @@ impl TimingAnalyzer {
                 on_feedback,
                 on_segment_end,
                 on_calibration_converged,
+                on_inferred_grid,
             );
         }));
     }
@@ -288,11 +366,12 @@ impl TimingAnalyzer {
         self.alive.load(Ordering::SeqCst)
     }
 
-    fn analysis_loop<F, G, H>(
+    fn analysis_loop<F, G, H, I>(
         alive: Arc<AtomicBool>,
         beat_log: BeatLog,
         onset_log: Arc<Mutex<VecDeque<Onset>>>,
         settings_changed: Arc<AtomicBool>,
+        telemetry: Arc<Mutex<SessionTelemetry>>,
         profile: InstrumentProfile,
         instrument_id: String,
         preset_id: Option<String>,
@@ -300,10 +379,12 @@ impl TimingAnalyzer {
         on_feedback: F,
         on_segment_end: G,
         on_calibration_converged: H,
+        on_inferred_grid: I,
     ) where
         F: Fn(BeatFeedback) + Send + 'static,
         G: Fn(PracticeSegmentEnded) + Send + 'static,
         H: Fn(f64) + Send + 'static,
+        I: Fn(InferredGridChanged) + Send + 'static,
     {
         // D4 — profile-driven pause tolerance. Beats are tempo-aware
         // (N silent beats is shorter wall-clock at 200 BPM than at 60),
@@ -347,8 +428,30 @@ impl TimingAnalyzer {
         // Track previous onset time for interval analysis
         let mut prev_onset_ns: Option<u64> = None;
 
-        // Track which beat index we last processed
-        let mut last_processed_beat: Option<u32> = None;
+        // Track which tick we last processed. Path B widened this from
+        // a plain `beat_index` to `(beat_index, subdivision_index)`
+        // because the engine now emits every subdivision (not just
+        // downbeats) — the per-beat dedup must therefore key on the
+        // tick within the beat too. See `BeatTick.subdivision_index`.
+        let mut last_processed_tick: Option<(u32, u8)> = None;
+
+        // Path B — per-session rhythm inference. Tracks what divisor
+        // (quarter / 8th / triplet / 16th / sextuplet) the player is
+        // actually playing, independent of the user-selected click
+        // pattern. Cold-starts with the user's selected subdivision as
+        // the fallback; locks onto the smallest divisor that fits ≥
+        // `MIN_LOCK_FIT` of recent onsets, with hysteresis to avoid
+        // flapping mid-phrase. Drives:
+        //   * which beat ticks are SCORED (`is_active_tick`),
+        //   * the matching window (`effective_interval_ms`),
+        //   * the segment's `inferred_divisor` telemetry,
+        //   * the UI "Tracking 16ths" caption (via the divisor-locked
+        //     event, emitted when the lock state changes).
+        let mut rhythm_inference = RhythmInference::new();
+        // Last divisor we surfaced to the JS layer — used to debounce
+        // the divisor-changed callback so we don't fire on every refit.
+        let mut last_surfaced_divisor: Option<u8> = None;
+        let mut last_surfaced_lock_state: bool = false;
 
         // D3a — tempo-aware tolerance window. Computed per-beat from
         // `beat.expected_interval_ms` (see `tempo_aware_window_ms`).
@@ -358,8 +461,44 @@ impl TimingAnalyzer {
         // we'd ever match below 20 BPM, so nothing legit gets pruned.
         let match_window_ns: u64 = 200_000_000;
 
-        // Accumulate unmatched onsets between beat processing rounds
-        let mut pending_onsets: Vec<Onset> = Vec::with_capacity(32);
+        // Accumulate unmatched onsets between beat processing rounds.
+        // Each entry pairs the onset with its stable index in the
+        // session-wide `telemetry.detected_onsets` vector (so
+        // `MatchDecision.onset_indices` and `spurious_onset_indices`
+        // can reference it). `None` when the telemetry buffer was
+        // already at cap when this onset arrived — match decisions
+        // for capped onsets emit an empty `onset_indices` list.
+        let mut pending_onsets: Vec<(Onset, Option<u32>)> = Vec::with_capacity(32);
+
+        // Defer beat processing until late onsets have had time to
+        // arrive in `pending_onsets`. Without this, an onset played
+        // ON the beat (deviation ≈ 0) loses a race against the matcher
+        // loop: the beat-tick lands in `beat_log` immediately at the
+        // click moment, but the corresponding onset doesn't reach
+        // `onset_log` until ~20–40ms later (audio capture buffer →
+        // FFT hop → onset-detector decision lag). With a 5ms loop
+        // tick, the matcher processes the beat with an empty pending
+        // queue, fails to match, then prunes the onset as "spurious"
+        // a few hundred ms later when its own deadline passes. The
+        // dropped-on-the-beat session log
+        // (session_1779002802_*.json, 2026-05-17) showed 18 such
+        // misses out of 52 beats — onsets at +7ms / -10ms / -14ms
+        // that should have been hits classed as outside-window.
+        //
+        // We buffer beats here instead of consuming them immediately.
+        // Each loop iteration moves only the beats whose
+        // `ts_ns + matching_window + onset_pipeline_latency` deadline
+        // has passed — by which point any onset the user intended for
+        // that beat has reached `pending_onsets`.
+        let mut held_beats: Vec<BeatTick> = Vec::with_capacity(8);
+        // Headroom above the per-beat matching window. Covers the
+        // worst-case onset-detector pipeline latency: FFT hop = 10ms
+        // (50% overlap of 1024-sample FFT at 48kHz) + 1–2 hops of
+        // decision smoothing + audio driver buffering. 30ms is a
+        // conservative cap that still leaves plenty of room for the
+        // matcher to react before the next beat arrives (smallest
+        // realistic interval at 200 BPM 16ths = 75ms).
+        const ONSET_PIPELINE_LATENCY_NS: u64 = 30_000_000;
 
         // ─── Grid correlation ──────────────────────────────────────
         // Track recent onset timestamps to measure alignment with the
@@ -392,9 +531,14 @@ impl TimingAnalyzer {
 
         while alive.load(Ordering::SeqCst) {
             thread::sleep(Duration::from_millis(5));
-            if !alive.load(Ordering::SeqCst) {
-                break;
-            }
+            // On stop, fall through and complete one final iteration
+            // instead of breaking immediately. This lets us flush any
+            // beats still parked in `held_beats` (their deadline may
+            // not have passed yet, but no more onsets can arrive once
+            // the audio input is being torn down). The loop exits on
+            // the next while-check; the duplicate alive-check at the
+            // bottom is what actually terminates after the flush.
+            let stopping = !alive.load(Ordering::SeqCst);
 
             // D4 — Signal A poll. If the JS layer called
             // `notify_settings_change`, close the open segment with
@@ -418,45 +562,182 @@ impl TimingAnalyzer {
             // Drain new onsets into pending buffer
             {
                 let mut log = onset_log.lock().unwrap();
+                // Snapshot wall-clock + monotonic NS together so we
+                // can convert each onset's `ts_ns` to wall-clock ms
+                // for the telemetry log. Drift between the two clocks
+                // over the ~5ms loop iteration is sub-microsecond.
+                let base_wall_ms = now_wall_ms();
+                let base_ns = crate::clock::now_ns();
                 for onset in log.drain(..) {
                     // Record for grid correlation
                     grid_onset_times.push_back(onset.ts_ns);
                     while grid_onset_times.len() > 64 {
                         grid_onset_times.pop_front();
                     }
+                    // Path B — feed every onset into the rhythm-inference
+                    // window. Matched and spurious onsets BOTH inform
+                    // "what is the player playing?" — spurious onsets
+                    // matter because they're exactly the off-grid hits
+                    // that signal a higher divisor than the matcher
+                    // currently scores.
+                    rhythm_inference.push_onset(onset.ts_ns);
                     // D3b — count every observed onset against the
                     // active segment. Matched ones are bumped on the
                     // matching path; the difference is "spurious".
                     if let Some(seg) = segment.as_mut() {
                         seg.total_onsets = seg.total_onsets.saturating_add(1);
                     }
-                    pending_onsets.push(onset);
+                    // Push raw onset into session telemetry. The
+                    // returned index is what `MatchDecision` /
+                    // `spurious_onset_indices` will reference. `None`
+                    // when the buffer is capped — match decisions
+                    // downstream will emit an empty `onset_indices`.
+                    let onset_idx = {
+                        let mut tel = telemetry.lock().unwrap();
+                        tel.push_onset(DetectedOnset {
+                            timestamp_ms: ts_ns_to_wall_ms(onset.ts_ns, base_wall_ms, base_ns),
+                            amplitude: onset.amplitude,
+                            centroid: onset.centroid,
+                            confidence: onset.confidence,
+                        })
+                    };
+                    pending_onsets.push((onset, onset_idx));
                 }
             }
 
-            // Drain new beats
-            let beats: Vec<BeatTick> = {
+            // Drain new beats into the held buffer. We process them
+            // below only once the onset-arrival deadline has passed —
+            // see `ONSET_PIPELINE_LATENCY_NS` above for the rationale.
+            {
                 let mut log = beat_log.lock().unwrap();
-                log.drain(..).collect()
-            };
+                held_beats.extend(log.drain(..));
+            }
+
+            // Pull every held beat whose deadline has passed. The
+            // deadline is `beat.ts_ns + matching_window + pipeline
+            // latency` — past this point we know no useful onset for
+            // that beat is still in flight. Beats whose deadline is
+            // still in the future stay in `held_beats` for a later
+            // iteration. Result ordering preserved (drain_filter-style)
+            // so downstream beat-index monotonicity is intact.
+            let now_ns = crate::clock::now_ns();
+            let mut beats: Vec<BeatTick> = Vec::with_capacity(held_beats.len());
+            held_beats.retain(|b| {
+                let window_ns =
+                    (tempo_aware_window_ms(b.expected_interval_ms) * 1_000_000.0) as u64;
+                let deadline_ns =
+                    b.ts_ns.saturating_add(window_ns).saturating_add(ONSET_PIPELINE_LATENCY_NS);
+                // On stop, force-flush every remaining beat so the
+                // last 1–2 beats of a session aren't silently dropped
+                // (their deadline may sit a few tens of ms in the
+                // future when the user presses End Session).
+                if stopping || now_ns >= deadline_ns {
+                    beats.push(b.clone());
+                    false // remove from held
+                } else {
+                    true // keep for later
+                }
+            });
 
             if beats.is_empty() {
                 continue;
             }
 
+            // Path B — refresh rhythm-inference state from the latest
+            // beat tick (downbeat anchor + interval + subdivision_total)
+            // and re-run the divisor selection. Must happen BEFORE the
+            // per-beat match loop so `is_active_tick` decisions reflect
+            // the freshest fit.
+            if let Some(latest_beat) = beats.last() {
+                rhythm_inference.update_reference(latest_beat);
+            }
+            rhythm_inference.refit();
+
+            // Path B — surface lock-state / divisor changes to the JS
+            // layer so the coach card can render the "Tracking 16ths"
+            // caption. Debounced via `last_surfaced_divisor` /
+            // `last_surfaced_lock_state` so the callback only fires when
+            // the user-visible state ACTUALLY changes — not on every
+            // refit pass (which runs every 5ms).
+            let current_divisor = rhythm_inference.current_divisor();
+            let current_locked = rhythm_inference.is_locked();
+            if Some(current_divisor) != last_surfaced_divisor
+                || current_locked != last_surfaced_lock_state
+            {
+                last_surfaced_divisor = Some(current_divisor);
+                last_surfaced_lock_state = current_locked;
+                on_inferred_grid(InferredGridChanged {
+                    divisor: current_divisor,
+                    locked: current_locked,
+                    confidence: rhythm_inference.confidence(),
+                });
+            }
+
+            // Snapshot wall + monotonic NS so we can convert beat
+            // timestamps to wall-clock ms for the telemetry log. Same
+            // sampling pattern as the onset-drain path above.
+            let beat_base_wall_ms = now_wall_ms();
+            let beat_base_ns = crate::clock::now_ns();
+
             // Match each beat to the closest onset within the window
             for beat in &beats {
-                // Skip if already processed
-                if let Some(last) = last_processed_beat {
-                    if beat.beat_index <= last {
+                // Skip if already processed (Path B — composite key
+                // (beat_index, subdivision_index) because the same
+                // beat_index now appears multiple times per beat at
+                // higher subdivisions).
+                let tick_key = (beat.beat_index, beat.subdivision_index);
+                if let Some(last_key) = last_processed_tick {
+                    if tick_key <= last_key {
                         continue;
                     }
                 }
-                last_processed_beat = Some(beat.beat_index);
+                last_processed_tick = Some(tick_key);
 
-                // Grace period — first 4 beats are always skipped
+                // Path B — non-active ticks are NOT scored. The
+                // rhythm-inference has decided the player is not on
+                // this subdivision (e.g., user clicks 16ths, plays
+                // quarters → only every 4th tick is active). Inactive
+                // ticks skip telemetry, classification, grace
+                // decrement, and the consecutive-misses counter.
+                // They're effectively invisible to the matcher.
+                if !rhythm_inference.is_active_tick(beat) {
+                    continue;
+                }
+
+                // Push expected beat to telemetry. We log every beat
+                // the matcher actually processes — including grace
+                // beats — so the downstream JSON has a complete
+                // record of what the engine ticked vs. what the
+                // matcher decided.
+                let beat_bpm: u16 = if beat.expected_interval_ms > 0.0 {
+                    (60_000.0 / beat.expected_interval_ms).round() as u16
+                } else {
+                    0
+                };
+                {
+                    let mut tel = telemetry.lock().unwrap();
+                    tel.push_beat(ExpectedBeat {
+                        index: beat.beat_index,
+                        timestamp_ms: ts_ns_to_wall_ms(
+                            beat.ts_ns,
+                            beat_base_wall_ms,
+                            beat_base_ns,
+                        ),
+                        is_accent: beat.is_downbeat,
+                        expected_bpm: beat_bpm,
+                    });
+                }
+
+                // Grace period — first 4 BEATS (quarters) are always
+                // skipped. Path B: decrement only on quarter-on-beat
+                // ticks (`subdivision_index == 0`) so the grace count
+                // stays "4 quarters" regardless of inferred divisor.
+                // Without this, at divisor=4 grace would expire after
+                // just 1 quarter, leaving calibration unwarmed.
                 if grace_beats_remaining > 0 {
-                    grace_beats_remaining -= 1;
+                    if beat.subdivision_index == 0 {
+                        grace_beats_remaining -= 1;
+                    }
                     on_feedback(BeatFeedback {
                         beat_index: beat.beat_index,
                         deviation_ms: 0.0,
@@ -467,6 +748,20 @@ impl TimingAnalyzer {
                         calibration_confidence: 0.0,
                         grid_correlation,
                     });
+                    // Record the grace-skip as a NoActivity match —
+                    // the matcher wasn't even allowed to look for an
+                    // onset, so it's distinct from a real "no onset
+                    // arrived" classification.
+                    {
+                        let mut tel = telemetry.lock().unwrap();
+                        tel.push_match(MatchDecision {
+                            beat_index: beat.beat_index,
+                            onset_indices: Vec::new(),
+                            deviation_ms: 0,
+                            classification: Classification::Skipped,
+                            reason: MatchReason::NoActivity,
+                        });
+                    }
                     continue;
                 }
 
@@ -477,8 +772,18 @@ impl TimingAnalyzer {
                     beat.ts_ns.saturating_sub((-calibration_offset_ms * 1_000_000.0) as u64)
                 };
 
-                // D3a — tempo-aware matching window for this beat.
-                let window_ms = tempo_aware_window_ms(beat.expected_interval_ms);
+                // Path B — matching window uses the EFFECTIVE interval
+                // (quarter_interval / inferred_divisor), not the raw
+                // quarter-note interval. At 80 BPM 16ths, this shrinks
+                // the window from ~80ms to ~75ms — close, but at 200
+                // BPM 16ths it tightens from 80ms to ~30ms which
+                // matters for fast playing. The thresholds derived
+                // below (`perfect`/`good`/`ok`) then scale with that
+                // window, so classification stays calibrated to the
+                // grid the player is actually playing.
+                let effective_interval_ms =
+                    rhythm_inference.effective_interval_ms(beat.expected_interval_ms);
+                let window_ms = tempo_aware_window_ms(effective_interval_ms);
                 let beat_window_ns = (window_ms * 1_000_000.0) as u64;
                 let thresholds = window_thresholds(window_ms);
 
@@ -487,7 +792,7 @@ impl TimingAnalyzer {
                 let mut best_idx: Option<usize> = None;
                 let mut best_distance: u64 = u64::MAX;
 
-                for (i, onset) in pending_onsets.iter().enumerate() {
+                for (i, (onset, _)) in pending_onsets.iter().enumerate() {
                     let distance = if onset.ts_ns >= calibrated_beat_ns {
                         onset.ts_ns - calibrated_beat_ns
                     } else {
@@ -501,7 +806,7 @@ impl TimingAnalyzer {
                 }
 
                 if let Some(idx) = best_idx {
-                    let onset = pending_onsets.remove(idx);
+                    let (onset, onset_tel_idx) = pending_onsets.remove(idx);
 
                     // Onset matched — transition to Active
                     activity = Activity::Active;
@@ -536,11 +841,16 @@ impl TimingAnalyzer {
                     // Deviation after calibration (what the player feels)
                     let deviation_ms = raw_offset_ms - calibration_offset_ms;
 
-                    // Interval error: compare actual inter-onset interval to expected
+                    // Interval error: compare actual inter-onset interval
+                    // to the EFFECTIVE expected interval (under the
+                    // inferred divisor). At 16ths against 80 BPM, the
+                    // expected gap between active ticks is 187.5ms —
+                    // comparing to the raw 750ms quarter would mark
+                    // every 16th onset as way ahead of "expected".
                     let interval_error_ms = if let Some(prev_ns) = prev_onset_ns {
                         let actual_interval_ms =
                             (onset.ts_ns as f64 - prev_ns as f64) / 1_000_000.0;
-                        actual_interval_ms - beat.expected_interval_ms
+                        actual_interval_ms - effective_interval_ms
                     } else {
                         0.0
                     };
@@ -589,10 +899,13 @@ impl TimingAnalyzer {
                             last_onset_wall_ms: now_wall,
                             start_bpm,
                             // D3c — snapshot tempo + onset floor at
-                            // segment open. Both are stable for the
-                            // segment's lifetime (BPM changes fire
-                            // Signal A, ending this segment).
-                            start_interval_ms: beat.expected_interval_ms,
+                            // segment open. Path B: the interval the
+                            // scorer uses is the EFFECTIVE one (per
+                            // inferred divisor), not the raw quarter
+                            // interval. This keeps `interval_consistency`'s
+                            // tolerance `k` proportional to the grid
+                            // the player is actually playing.
+                            start_interval_ms: effective_interval_ms,
                             onset_floor_per_beat: *profile
                                 .expected_onsets_per_beat
                                 .start(),
@@ -677,6 +990,25 @@ impl TimingAnalyzer {
                         calibration_confidence: confidence,
                         grid_correlation,
                     });
+
+                    // Telemetry — record the match decision so the D1
+                    // log carries beat→onset pairing details. The
+                    // onset's telemetry index can be None if it was
+                    // pushed while the buffer was at cap; in that case
+                    // we still log the match but with an empty
+                    // `onset_indices` list.
+                    {
+                        let mut tel = telemetry.lock().unwrap();
+                        tel.push_match(MatchDecision {
+                            beat_index: beat.beat_index,
+                            onset_indices: onset_tel_idx
+                                .map(|i| vec![i])
+                                .unwrap_or_default(),
+                            deviation_ms: deviation_ms.round() as i32,
+                            classification: Classification::from_str(classification),
+                            reason: MatchReason::InsideWindow,
+                        });
+                    }
                 } else {
                     // No onset matched — apply activity state machine
                     consecutive_misses += 1;
@@ -792,6 +1124,10 @@ impl TimingAnalyzer {
                                     total_onsets: seg.total_onsets,
                                     spurious_onsets,
                                     onset_efficiency,
+                                    inferred_divisor: rhythm_inference
+                                        .current_divisor(),
+                                    inferred_divisor_confidence:
+                                        rhythm_inference.confidence(),
                                 });
                                 segment = None;
                             }
@@ -808,6 +1144,32 @@ impl TimingAnalyzer {
                         calibration_confidence: confidence,
                         grid_correlation,
                     });
+
+                    // Telemetry — record the no-match decision. The
+                    // reason distinguishes "we know you weren't
+                    // playing" (NoActivity, when state is Idle/Resting)
+                    // from "you were playing but nothing landed inside
+                    // ±window_ms of this beat" (OutsideWindow). This
+                    // is the single most useful signal for diagnosing
+                    // onset under-detection: a session full of
+                    // OutsideWindow decisions with empty
+                    // `onset_indices` means the detector failed to
+                    // fire, not the player.
+                    let no_match_reason = if classification == "miss" {
+                        MatchReason::OutsideWindow
+                    } else {
+                        MatchReason::NoActivity
+                    };
+                    {
+                        let mut tel = telemetry.lock().unwrap();
+                        tel.push_match(MatchDecision {
+                            beat_index: beat.beat_index,
+                            onset_indices: Vec::new(),
+                            deviation_ms: 0,
+                            classification: Classification::from_str(classification),
+                            reason: no_match_reason,
+                        });
+                    }
                 }
             }
 
@@ -880,6 +1242,10 @@ impl TimingAnalyzer {
                                         total_onsets: seg.total_onsets,
                                         spurious_onsets,
                                         onset_efficiency,
+                                        inferred_divisor: rhythm_inference
+                                            .current_divisor(),
+                                        inferred_divisor_confidence:
+                                            rhythm_inference.confidence(),
                                     });
                                 }
                                 segment = None;
@@ -911,14 +1277,38 @@ impl TimingAnalyzer {
             // spurious so onset_efficiency can penalize noodly play.
             if let Some(latest_beat) = beats.last() {
                 let cutoff = latest_beat.ts_ns.saturating_sub(match_window_ns);
+                // Collect telemetry indices for the pruned (spurious)
+                // onsets BEFORE we mutate the active segment / vec, so
+                // we can push them to the session-wide telemetry log.
+                let mut spurious_tel_indices: Vec<u32> = Vec::new();
                 if let Some(seg) = segment.as_mut() {
-                    for o in pending_onsets.iter() {
+                    for (o, tel_idx) in pending_onsets.iter() {
                         if o.ts_ns < cutoff {
                             seg.spurious_amplitudes.push(o.amplitude);
+                            if let Some(i) = tel_idx {
+                                spurious_tel_indices.push(*i);
+                            }
+                        }
+                    }
+                } else {
+                    // No active segment (warmup / between segments).
+                    // Still record telemetry — these onsets really
+                    // didn't match anything; the JSON log should say so.
+                    for (o, tel_idx) in pending_onsets.iter() {
+                        if o.ts_ns < cutoff {
+                            if let Some(i) = tel_idx {
+                                spurious_tel_indices.push(*i);
+                            }
                         }
                     }
                 }
-                pending_onsets.retain(|o| o.ts_ns >= cutoff);
+                if !spurious_tel_indices.is_empty() {
+                    let mut tel = telemetry.lock().unwrap();
+                    for i in spurious_tel_indices {
+                        tel.push_spurious(i);
+                    }
+                }
+                pending_onsets.retain(|(o, _)| o.ts_ns >= cutoff);
             }
         }
     }
@@ -928,6 +1318,335 @@ impl Drop for TimingAnalyzer {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// RhythmInference — Path B
+// ──────────────────────────────────────────────────────────────────────
+//
+// The scoring pipeline's bug pre-Path-B: the matcher only saw downbeat
+// ticks, regardless of the user's subdivision setting or what they
+// were actually playing. A user playing clean 16th notes at 80 BPM
+// scored 28/100 because three out of every four onsets fell BETWEEN
+// the only ticks the matcher could see, marking them all as
+// "spurious" — even though they were musically perfect 16ths.
+//
+// Path B fixes this with **multi-hypothesis adaptive grid inference**.
+// The engine now emits every audible tick into the beat-log. This
+// module looks at the rolling window of recent onsets and asks: "what
+// divisor of the beat does this player's playing actually align to?"
+// — testing each candidate (quarter, eighth, triplet, 16th, sextuplet)
+// and locking the smallest one that fits.
+//
+// "Smallest that fits" is the key trick. Every onset that lands on a
+// quarter ALSO lands on an eighth and a 16th (since 16ths divide
+// quarters). So a quarter-note player has fit ≈ 1.0 against divisor 1,
+// 2, AND 4. Coverage breaks the tie: only 1 of 4 16th-grid points
+// gets hit, so divisor 1 wins.  Equivalently, we just pick the lowest
+// divisor whose fit clears `MIN_LOCK_FIT` (0.65) — a 16th-note player
+// fails divisor 1 (only 25% of their onsets land on quarter ticks) and
+// passes divisor 4 (≈100%), so the smallest-that-fits is 4.
+//
+// Hysteresis: once locked, switching divisor requires the new candidate
+// to win by at least `HYSTERESIS_MARGIN` (0.05) for
+// `HYSTERESIS_STREAK_REQUIRED` (4) consecutive refits. This prevents
+// noisy flapping when the player phrases between subdivisions.
+//
+// Cold-start: until `MIN_ONSETS_FOR_LOCK` (8) onsets are in the rolling
+// window, `current_divisor()` falls back to the user-selected
+// subdivision (clamped to the candidate set [1, 2, 3, 4, 6]).
+
+/// Minimum fit ratio a divisor candidate must achieve before
+/// `RhythmInference` will lock onto it.
+const MIN_LOCK_FIT: f64 = 0.65;
+/// Hysteresis margin: a competing divisor must beat the locked one by
+/// at least this much before being considered for a swap.
+const HYSTERESIS_MARGIN: f64 = 0.05;
+/// Hysteresis streak: how many consecutive refits the competing divisor
+/// must keep winning before the lock actually swaps.
+const HYSTERESIS_STREAK_REQUIRED: u32 = 4;
+/// Cold-start gate: at least this many onsets must be in the rolling
+/// window before `refit` will attempt to lock onto a divisor. Below
+/// this, `current_divisor()` falls back to the user-selected
+/// subdivision.
+const MIN_ONSETS_FOR_LOCK: usize = 8;
+/// Rolling window of onsets considered by the inference. Long enough
+/// to be stable, short enough to react when the player switches feel.
+const ONSET_WINDOW_CAP: usize = 24;
+
+/// Path B — per-segment adaptive grid inference.
+#[derive(Debug, Clone)]
+pub struct RhythmInference {
+    /// Recent onset timestamps (ns, monotonic clock).
+    onset_history: VecDeque<u64>,
+    /// Reference: most recent downbeat (`subdivision_index == 0`).
+    /// Phase of each onset is measured against this anchor.
+    last_downbeat_ns: Option<u64>,
+    /// Most recent quarter-note interval in ms (from a `BeatTick`).
+    last_beat_interval_ms: f64,
+    /// User-selected subdivision (from the latest beat tick). Drives
+    /// the candidate set: `candidate_divisors(subdivision_total)`.
+    subdivision_total: u8,
+    /// Currently locked divisor. `None` during cold-start (use
+    /// `current_divisor()` for the safe fallback).
+    locked_divisor: Option<u8>,
+    /// Fit ratio at the last successful lock/refresh.
+    locked_fit: f64,
+    /// Hysteresis state: divisor that's been winning consecutively.
+    hysteresis_candidate: Option<u8>,
+    /// Hysteresis state: how many consecutive refits the candidate has won.
+    hysteresis_streak: u32,
+    /// Refit counter — incremented every time `refit` runs. Used by the
+    /// UI-event emitter to debounce.
+    refit_count: u32,
+}
+
+impl RhythmInference {
+    pub fn new() -> Self {
+        Self {
+            onset_history: VecDeque::with_capacity(ONSET_WINDOW_CAP),
+            last_downbeat_ns: None,
+            last_beat_interval_ms: 0.0,
+            subdivision_total: 1,
+            locked_divisor: None,
+            locked_fit: 0.0,
+            hysteresis_candidate: None,
+            hysteresis_streak: 0,
+            refit_count: 0,
+        }
+    }
+
+    /// Push a new onset into the rolling window. Older onsets are
+    /// evicted to keep the window at `ONSET_WINDOW_CAP`.
+    pub fn push_onset(&mut self, ts_ns: u64) {
+        self.onset_history.push_back(ts_ns);
+        while self.onset_history.len() > ONSET_WINDOW_CAP {
+            self.onset_history.pop_front();
+        }
+    }
+
+    /// Refresh the inference's reference frame from the latest beat
+    /// tick. Tracks both the downbeat anchor and the user-selected
+    /// subdivision (which may change mid-session via Signal A).
+    pub fn update_reference(&mut self, beat: &BeatTick) {
+        if beat.subdivision_index == 0 {
+            self.last_downbeat_ns = Some(beat.ts_ns);
+        }
+        if beat.expected_interval_ms > 0.0 {
+            self.last_beat_interval_ms = beat.expected_interval_ms;
+        }
+        if beat.subdivision_total >= 1 {
+            self.subdivision_total = beat.subdivision_total;
+        }
+    }
+
+    /// Run the inference: pick the smallest divisor whose fit ≥
+    /// `MIN_LOCK_FIT`, update the lock per hysteresis rules.
+    /// Idempotent; safe to call every loop iteration.
+    pub fn refit(&mut self) {
+        self.refit_count = self.refit_count.saturating_add(1);
+        if self.onset_history.len() < MIN_ONSETS_FOR_LOCK {
+            return;
+        }
+        let Some(reference_ns) = self.last_downbeat_ns else {
+            return;
+        };
+        if self.last_beat_interval_ms <= 0.0 {
+            return;
+        }
+        let beat_interval_ns =
+            (self.last_beat_interval_ms * 1_000_000.0) as u64;
+        let candidates = candidate_divisors(self.subdivision_total);
+
+        // "Smallest divisor that fits" — iterate ascending and pick the
+        // first whose fit clears the threshold.
+        let mut picked: Option<(u8, f64)> = None;
+        for &d in &candidates {
+            let fit = compute_divisor_fit(
+                &self.onset_history,
+                reference_ns,
+                beat_interval_ns,
+                d,
+            );
+            if fit >= MIN_LOCK_FIT {
+                picked = Some((d, fit));
+                break;
+            }
+        }
+
+        let Some((best_d, best_fit)) = picked else {
+            // Nothing clears the threshold this pass — hold prior lock
+            // (or stay unlocked). Don't reset hysteresis state; let it
+            // decay only when a *different* divisor consistently wins.
+            return;
+        };
+
+        match self.locked_divisor {
+            None => {
+                self.locked_divisor = Some(best_d);
+                self.locked_fit = best_fit;
+                self.hysteresis_candidate = None;
+                self.hysteresis_streak = 0;
+            }
+            Some(current_d) if current_d == best_d => {
+                self.locked_fit = best_fit;
+                self.hysteresis_candidate = None;
+                self.hysteresis_streak = 0;
+            }
+            Some(_) => {
+                // Different divisor wins this pass — only swap after
+                // it wins by `HYSTERESIS_MARGIN` for
+                // `HYSTERESIS_STREAK_REQUIRED` consecutive refits.
+                if best_fit >= self.locked_fit + HYSTERESIS_MARGIN {
+                    if self.hysteresis_candidate == Some(best_d) {
+                        self.hysteresis_streak =
+                            self.hysteresis_streak.saturating_add(1);
+                    } else {
+                        self.hysteresis_candidate = Some(best_d);
+                        self.hysteresis_streak = 1;
+                    }
+                    if self.hysteresis_streak >= HYSTERESIS_STREAK_REQUIRED
+                    {
+                        self.locked_divisor = Some(best_d);
+                        self.locked_fit = best_fit;
+                        self.hysteresis_candidate = None;
+                        self.hysteresis_streak = 0;
+                    }
+                } else {
+                    self.hysteresis_candidate = None;
+                    self.hysteresis_streak = 0;
+                }
+            }
+        }
+    }
+
+    /// The divisor to score against right now. During cold-start (no
+    /// lock yet, not enough onsets), falls back to the user-selected
+    /// subdivision clamped to the candidate set.
+    pub fn current_divisor(&self) -> u8 {
+        if let Some(d) = self.locked_divisor {
+            return d;
+        }
+        // Cold-start fallback: user-selected subdivision, restricted to
+        // the candidate set.  If the user picked something exotic like
+        // 5, drop to the nearest candidate ≤ 5 (= 4).
+        let s = self.subdivision_total.max(1);
+        for d in [6u8, 4, 3, 2, 1] {
+            if d <= s && s % d == 0 {
+                return d;
+            }
+        }
+        1
+    }
+
+    /// Confidence in the current lock. 0.0 during cold-start; equal
+    /// to `locked_fit` once locked.
+    pub fn confidence(&self) -> f64 {
+        if self.locked_divisor.is_some() {
+            self.locked_fit
+        } else {
+            0.0
+        }
+    }
+
+    /// Should this beat tick be scored under the current divisor?
+    /// Returns true for ticks that land on the inferred grid.
+    pub fn is_active_tick(&self, beat: &BeatTick) -> bool {
+        let d = self.current_divisor();
+        let total = beat.subdivision_total.max(1);
+        if total % d == 0 {
+            let step = (total / d) as u32;
+            if step == 0 {
+                return beat.subdivision_index == 0;
+            }
+            (beat.subdivision_index as u32) % step == 0
+        } else {
+            // Divisor incompatible with engine's tick resolution
+            // (shouldn't happen — `candidate_divisors` filters these
+            // out). Be defensive and fall back to downbeats only.
+            beat.subdivision_index == 0
+        }
+    }
+
+    /// Effective inter-onset interval the matcher should expect, in ms.
+    /// E.g., 80 BPM quarters → 750ms; 80 BPM 16ths → 187.5ms.
+    pub fn effective_interval_ms(&self, beat_interval_ms: f64) -> f64 {
+        let d = self.current_divisor().max(1) as f64;
+        beat_interval_ms / d
+    }
+
+    /// Whether the lock has crystallized (`locked_divisor` set AND
+    /// `locked_fit ≥ MIN_LOCK_FIT`). Drives the UI "Tracking 16ths"
+    /// caption.
+    pub fn is_locked(&self) -> bool {
+        self.locked_divisor.is_some() && self.locked_fit >= MIN_LOCK_FIT
+    }
+}
+
+impl Default for RhythmInference {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Candidate divisors usable for a given engine subdivision_total.
+/// Restricts to divisors `d` where `subdivision_total % d == 0` so that
+/// the matcher's `is_active_tick` test always identifies real engine
+/// ticks. Sorted ascending so "smallest that fits" wins on iteration.
+fn candidate_divisors(subdivision_total: u8) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5);
+    for d in [1u8, 2, 3, 4, 6] {
+        if subdivision_total >= d && subdivision_total % d == 0 {
+            out.push(d);
+        }
+    }
+    if out.is_empty() {
+        out.push(1);
+    }
+    out
+}
+
+/// Compute the fit of a single divisor candidate: the fraction of
+/// recent onsets that land within tolerance of the divisor's grid
+/// points (any of them, modulo a beat). Returns 0.0–1.0.
+fn compute_divisor_fit(
+    onset_history: &VecDeque<u64>,
+    reference_ns: u64,
+    beat_interval_ns: u64,
+    divisor: u8,
+) -> f64 {
+    if onset_history.is_empty() || beat_interval_ns == 0 || divisor == 0 {
+        return 0.0;
+    }
+    let grid_step_ns = beat_interval_ns / divisor as u64;
+    if grid_step_ns == 0 {
+        return 0.0;
+    }
+    // Tolerance: 20% of the grid step, floored at 10ms (room for human
+    // jitter), capped at 40ms (so divisor 1 at 60 BPM doesn't claim
+    // every onset is "on grid"). The 20% / 10ms / 40ms triplet matches
+    // the empirical window we tuned for `compute_grid_correlation`.
+    let tol_ns =
+        ((grid_step_ns * 20) / 100).max(10_000_000).min(40_000_000);
+    let interval = beat_interval_ns as i64;
+    let mut on_grid: usize = 0;
+    for &onset_ns in onset_history.iter() {
+        let diff = onset_ns as i64 - reference_ns as i64;
+        let phase = ((diff % interval) + interval) % interval;
+        let grid = grid_step_ns as i64;
+        let nearest = ((phase + grid / 2) / grid) * grid;
+        // Wrap-around: an onset just before the next beat is closest
+        // to grid[0] of the NEXT beat, not the last grid point of this
+        // one. Take the min over phase, phase-interval, phase+interval.
+        let dist = (phase - nearest)
+            .abs()
+            .min((phase - (nearest - interval)).abs())
+            .min((phase - (nearest + interval)).abs());
+        if dist <= tol_ns as i64 {
+            on_grid += 1;
+        }
+    }
+    on_grid as f64 / onset_history.len() as f64
 }
 
 /// D3a — tempo-aware classification thresholds derived from the
@@ -974,6 +1693,25 @@ pub fn window_thresholds(window_ms: f64) -> WindowThresholds {
     let good = (window_ms * 0.50).max(perfect);
     let ok = (window_ms * 0.80).max(good);
     WindowThresholds { perfect, good, ok }
+}
+
+/// Convert a monotonic-NS timestamp (from `clock::now_ns()`) to wall-clock
+/// milliseconds using a co-sampled `(base_wall_ms, base_ns)` pair. The
+/// caller is responsible for sampling both bases close together
+/// (within the same loop iteration); drift between the monotonic and
+/// wall clocks over <100ms is sub-microsecond in practice.
+///
+/// Used by the telemetry buffer (`SessionTelemetry`) to produce
+/// portable `timestamp_ms` values without storing both clock bases in
+/// every event.
+fn ts_ns_to_wall_ms(ts_ns: u64, base_wall_ms: u64, base_ns: u64) -> u64 {
+    if ts_ns >= base_ns {
+        let delta_ms = ((ts_ns - base_ns) / 1_000_000) as u64;
+        base_wall_ms.saturating_add(delta_ms)
+    } else {
+        let delta_ms = ((base_ns - ts_ns) / 1_000_000) as u64;
+        base_wall_ms.saturating_sub(delta_ms)
+    }
 }
 
 /// Wall-clock milliseconds since the Unix epoch. Used by D4 to stamp

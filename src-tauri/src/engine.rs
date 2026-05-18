@@ -417,6 +417,10 @@ struct BeatNotification {
     session: u64,
     beat: u32,
     subdivision: u32,
+    /// Path B — user-configured subdivision count (1, 2, 3, 4, 6).
+    /// Mirrored to BeatTick so the matcher's rhythm-inference can map
+    /// each tick to its phase within the beat.
+    subdivision_total: u8,
     is_downbeat: bool,
     ts_ns: u64,
     expected_interval_ms: f64,
@@ -1095,6 +1099,7 @@ impl MetronomeEngine {
                                 session,
                                 beat: notif_beat,
                                 subdivision: notif_sub,
+                                subdivision_total: subdivision.clamp(1, 255) as u8,
                                 is_downbeat,
                                 ts_ns,
                                 expected_interval_ms: beat_duration_secs * 1000.0,
@@ -1227,18 +1232,33 @@ impl MetronomeEngine {
                     },
                 );
 
-                // ---- Log BeatTick (downbeats only) ----
-                if notif.is_downbeat {
-                    if let Ok(mut log) = beat_log.lock() {
-                        log.push_back(BeatTick {
-                            ts_ns: notif.ts_ns,
-                            beat_index: notif.beat,
-                            is_downbeat: true,
-                            expected_interval_ms: notif.expected_interval_ms,
-                        });
-                        while log.len() > 64 {
-                            log.pop_front();
-                        }
+                // ---- Log BeatTick (Path B — every tick, not just downbeats) ----
+                //
+                // Pre-Path-B this gate emitted only `is_downbeat` ticks,
+                // which meant the matcher only ever saw quarter notes —
+                // even when the user had selected 8ths / 16ths and was
+                // playing on them. Every off-beat onset then counted as
+                // spurious (see session 1779004784: 80 BPM 16ths, 303
+                // spurious onsets, score crashed to 28/100). Path B
+                // pushes every tick AND tags it with `subdivision_index`
+                // / `subdivision_total` so the matcher's
+                // `RhythmInference` can pick the actual grid the user
+                // is playing and score against THAT.
+                if let Ok(mut log) = beat_log.lock() {
+                    log.push_back(BeatTick {
+                        ts_ns: notif.ts_ns,
+                        beat_index: notif.beat,
+                        is_downbeat: notif.is_downbeat,
+                        expected_interval_ms: notif.expected_interval_ms,
+                        subdivision_index: notif.subdivision.min(255) as u8,
+                        subdivision_total: notif.subdivision_total.max(1),
+                    });
+                    // 64 quarters worth of ticks = up to 64 × 6 = 384
+                    // entries at the highest configured subdivision.
+                    // Bump the cap so a brief stall in the matcher
+                    // loop doesn't lose subdivision-tick coverage.
+                    while log.len() > 384 {
+                        log.pop_front();
                     }
                 }
 

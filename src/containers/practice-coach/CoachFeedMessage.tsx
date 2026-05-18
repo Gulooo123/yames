@@ -50,8 +50,8 @@ export function FeedMessageItem({
           message.type === "coach-chat" ? "coach-feed-msg-coach" :
           "coach-feed-msg-system"
         }`}>
-          <span>{message.content}</span>
-          {message.affordance && !message.affordanceResolved && (
+          {message.pending ? <TtsThinkingSpinner /> : <span>{message.content}</span>}
+          {message.affordance && !message.affordanceResolved && !message.pending && (
             <AffordanceRow
               messageId={message.id}
               affordance={message.affordance}
@@ -125,11 +125,15 @@ export function FeedMessageItem({
       return (
         <div className="coach-feed-msg coach-feed-msg-session-end">
           <div className="coach-end-report-title">Session Complete</div>
-          {message.content && <div className="coach-end-report-comment">{message.content}</div>}
+          {message.pending ? (
+            <div className="coach-end-report-comment"><TtsThinkingSpinner /></div>
+          ) : (
+            message.content && <div className="coach-end-report-comment">{message.content}</div>
+          )}
           {message.report ? (
             <EndReportSummary report={message.report} />
           ) : (
-            <span className="coach-mini-report-text">{message.content}</span>
+            !message.pending && <span className="coach-mini-report-text">{message.content}</span>
           )}
           {message.segments && message.segments.length > 1 && (
             <SegmentTimeline segments={message.segments} sessionStart={message.segments[0].startTime ?? message.timestamp} />
@@ -141,6 +145,24 @@ export function FeedMessageItem({
     default:
       return null;
   }
+}
+
+/**
+ * Three-dot "thinking" indicator shown in place of feed-message text
+ * while the coach is preparing speech. Cleared the moment the matching
+ * `tts-speech-started` event fires (see `useSession.ts::speakAndReveal`
+ * / `pendingSpeechQueueRef`). The pulse is staggered so the eye reads
+ * "the coach is about to say something" rather than "the app is
+ * loading something heavy."
+ */
+function TtsThinkingSpinner() {
+  return (
+    <span className="coach-tts-thinking" aria-label="Coach is preparing to speak">
+      <span className="coach-tts-thinking-dot" />
+      <span className="coach-tts-thinking-dot" />
+      <span className="coach-tts-thinking-dot" />
+    </span>
+  );
 }
 
 function EndReportSummary({ report }: { report: SessionReport }) {

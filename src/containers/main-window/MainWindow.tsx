@@ -699,6 +699,7 @@ export function MainWindow() {
         spectrum={evaluation.spectrum}
         isPlaying={state.isPlaying}
         onPause={() => state.isPlaying && togglePlayback()}
+        inferredGrid={evaluation.inferredGrid}
       />
       )}
       </div>{/* main-body */}

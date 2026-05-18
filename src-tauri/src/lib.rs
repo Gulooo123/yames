@@ -9,6 +9,7 @@ mod midi;
 mod models;
 mod onset;
 mod session;
+mod session_audio;
 mod session_log;
 mod state;
 mod timing;
@@ -55,6 +56,24 @@ use tauri_plugin_store::StoreExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Loud, one-shot banner so the dev can see at process start whether
+    // the session-audio WAV dump is armed. In release builds the gate is
+    // always false (cfg(debug_assertions) gate inside is_enabled).
+    if session_audio::is_enabled() {
+        eprintln!(
+            "[yames] session-audio recording ENABLED (debug build default). \
+             Each session will dump a paired .wav next to its .json log. \
+             Set {}=1 to disable.",
+            session_audio::DISABLE_ENV_VAR
+        );
+    } else {
+        // We only reach this branch in two cases: (1) release build,
+        // where recording is hard-coded off, or (2) the dev explicitly
+        // set DISABLE_ENV_VAR. The banner doesn't try to distinguish —
+        // either way, no WAVs will be written.
+        eprintln!("[yames] session-audio recording disabled.");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())

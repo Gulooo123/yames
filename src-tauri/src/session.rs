@@ -690,6 +690,10 @@ mod tests {
                 onset_efficiency: score_0_1,
             },
             end_reason: crate::session_log::SegmentEndReason::SettingsChange,
+            // Path B — fixtures don't exercise rhythm-inference; use
+            // the sentinel-unknown 0/0.0 to mirror historic-log defaults.
+            inferred_divisor: 0,
+            inferred_divisor_confidence: 0.0,
         }
     }
 

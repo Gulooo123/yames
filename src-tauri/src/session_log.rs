@@ -216,6 +216,17 @@ pub struct PracticeSegment {
     pub component_scores: ComponentScores,
     #[serde(rename = "endReason")]
     pub end_reason: SegmentEndReason,
+    /// Path B — divisor the rhythm-inference settled on for this
+    /// segment. 1 = quarters, 2 = 8ths, 3 = triplets, 4 = 16ths,
+    /// 6 = sextuplets. `#[serde(default)]` so historic logs (written
+    /// before Path B) still deserialize cleanly: missing field is read
+    /// as 0 and the JS / post-hoc tooling can treat 0 as "unknown".
+    #[serde(rename = "inferredDivisor", default)]
+    pub inferred_divisor: u8,
+    /// Path B — confidence of the inferred divisor at segment close
+    /// (fit ratio, 0.0–1.0). 0.0 if the matcher never locked.
+    #[serde(rename = "inferredDivisorConfidence", default)]
+    pub inferred_divisor_confidence: f64,
 }
 
 /// D3c — four-component scoring breakdown. Each component is in `[0, 1]`
@@ -763,23 +774,94 @@ pub fn build_log_from_raw(
     }
 }
 
+/// Per-session raw telemetry buffer. Populated by the live timing
+/// analyzer (`TimingAnalyzer::analysis_loop`) so the D1 diagnostic log
+/// can carry the full streams of detected onsets, expected beats,
+/// match decisions, and spurious onsets — not just the aggregated
+/// report.
+///
+/// History: D1 originally shipped these as empty `Vec`s (see the prior
+/// comment on `build_log_from_session`) because no upstream stage
+/// buffered them across a whole session. That left us unable to
+/// diagnose "user played 90 16ths but only 60 onsets were detected"
+/// scenarios — we had no record of what the detector saw vs. what the
+/// matcher matched. Phase 2 (this struct) fixes that: the analyzer
+/// pushes events into a shared buffer as they happen, and the buffer
+/// is drained at `stop_evaluation` time.
+///
+/// All timestamps are wall-clock ms (Unix epoch) so the JSON is
+/// human-readable without a clock-offset conversion. `expected_beats`
+/// and `detected_onsets` are dense (every observation), `matches` is
+/// one entry per processed beat, and `spurious_onset_indices` lists
+/// indices into `detected_onsets` of onsets that never matched a beat
+/// (matches the `SessionLog::spurious_onsets` schema).
+///
+/// Buffer cap (`TELEMETRY_BUFFER_CAP`) defends against pathological
+/// long-running sessions: each stream is capped at 50,000 events
+/// (~4 hours of dense 16th-note playing at 200 BPM). On cap we stop
+/// pushing for that stream — we don't rotate, because rotation would
+/// invalidate the indices in `matches` and `spurious_onset_indices`.
+#[derive(Debug, Default, Clone)]
+pub struct SessionTelemetry {
+    pub expected_beats: Vec<ExpectedBeat>,
+    pub detected_onsets: Vec<DetectedOnset>,
+    pub matches: Vec<MatchDecision>,
+    pub spurious_onset_indices: Vec<u32>,
+}
+
+/// Hard cap on each telemetry stream. Beyond this we stop pushing
+/// rather than evict (eviction would invalidate `matches` /
+/// `spurious_onset_indices` cross-references). 50k events ≈ 4h of
+/// dense playing — well beyond any realistic single session.
+pub const TELEMETRY_BUFFER_CAP: usize = 50_000;
+
+impl SessionTelemetry {
+    /// Append a detected onset. Returns its stable index for use in
+    /// downstream `MatchDecision.onset_indices` / `spurious_onset_indices`.
+    /// Returns `None` when the buffer is full (caller should still
+    /// process the onset musically; we just stop telemetry-logging it).
+    pub fn push_onset(&mut self, o: DetectedOnset) -> Option<u32> {
+        if self.detected_onsets.len() >= TELEMETRY_BUFFER_CAP {
+            return None;
+        }
+        let idx = self.detected_onsets.len() as u32;
+        self.detected_onsets.push(o);
+        Some(idx)
+    }
+
+    /// Append an expected beat tick.
+    pub fn push_beat(&mut self, b: ExpectedBeat) {
+        if self.expected_beats.len() >= TELEMETRY_BUFFER_CAP {
+            return;
+        }
+        self.expected_beats.push(b);
+    }
+
+    /// Append a match decision (one per processed beat).
+    pub fn push_match(&mut self, m: MatchDecision) {
+        if self.matches.len() >= TELEMETRY_BUFFER_CAP {
+            return;
+        }
+        self.matches.push(m);
+    }
+
+    /// Mark an onset index as spurious (no beat matched it within the
+    /// pending-cutoff window).
+    pub fn push_spurious(&mut self, onset_idx: u32) {
+        if self.spurious_onset_indices.len() >= TELEMETRY_BUFFER_CAP {
+            return;
+        }
+        self.spurious_onset_indices.push(onset_idx);
+    }
+}
+
 /// Build a `SessionLog` from accumulator state (final report + any
 /// Signal-B segments) plus the AppState snapshot taken at stop time.
 ///
-/// **Why minimal raw-data fields?** D1 ships the *types* and *storage*
-/// for `expected_beats`, `detected_onsets`, `matches`, and
-/// `spurious_onsets`. The live pipeline (engine → onset detector →
-/// timing analyzer) doesn't currently buffer those primitives across
-/// the whole session — only the matched `BeatFeedback`. Capturing the
-/// raw streams would require an audit of every callback chain and
-/// noticeable memory growth for long sessions. Phase-1 ships the
-/// **persistence path** so the report + segments land on disk; future
-/// phases can opportunistically populate the raw fields when the
-/// upstream stages buffer them.
-///
-/// The returned log always has `report` populated and `segments` filled
-/// when Signal B fired; everything else stays as empty Vecs so the
-/// JSON schema stays consistent with the D1 spec.
+/// `telemetry` carries the per-session raw streams populated by the
+/// live timing analyzer (see `SessionTelemetry`). Pass
+/// `SessionTelemetry::default()` for code paths that don't run the
+/// live analyzer (synthetic tests, fixture sessions).
 pub fn build_log_from_session(
     bpm: u16,
     time_signature: u8,
@@ -789,6 +871,7 @@ pub fn build_log_from_session(
     instrument: Instrument,
     feedbacks: &[BeatFeedback],
     segments: Vec<PracticeSegment>,
+    telemetry: SessionTelemetry,
 ) -> SessionLog {
     let report = score_feedbacks(feedbacks);
     SessionLog {
@@ -799,10 +882,10 @@ pub fn build_log_from_session(
         duration_ms,
         instrument,
         instrument_profile_version: INSTRUMENT_PROFILE_VERSION,
-        expected_beats: Vec::new(),
-        detected_onsets: Vec::new(),
-        matches: Vec::new(),
-        spurious_onsets: Vec::new(),
+        expected_beats: telemetry.expected_beats,
+        detected_onsets: telemetry.detected_onsets,
+        matches: telemetry.matches,
+        spurious_onsets: telemetry.spurious_onset_indices,
         activity_transitions: Vec::new(),
         segments,
         report,
@@ -1073,7 +1156,9 @@ mod tests {
     /// `build_log_from_session` is the production code path used at
     /// `stop_evaluation`. Verify it produces a roundtrippable, schema-
     /// compatible log even when raw onsets/expected beats are not
-    /// captured (the current default).
+    /// captured (the synthetic-test path passes a default empty
+    /// `SessionTelemetry`; the live analyzer populates it for real
+    /// sessions).
     #[test]
     fn build_log_from_session_minimal_roundtrips() {
         let feedbacks = generate_perfect_beats(8, 120);
@@ -1090,6 +1175,11 @@ mod tests {
                 onset_efficiency: 0.88,
             },
             end_reason: SegmentEndReason::ActivityGap,
+            // Path B — fixture data, divisor inference not exercised
+            // by this test. Sentinel 0 / 0.0 matches the default that
+            // historic logs deserialize with.
+            inferred_divisor: 0,
+            inferred_divisor_confidence: 0.0,
         }];
         let log = build_log_from_session(
             120,
@@ -1100,6 +1190,7 @@ mod tests {
             Instrument::ElectricGuitar,
             &feedbacks,
             segments.clone(),
+            SessionTelemetry::default(),
         );
 
         // Headline fields propagate.
@@ -1150,6 +1241,7 @@ mod tests {
             Instrument::Drums,
             &feedbacks,
             Vec::new(),
+            SessionTelemetry::default(),
         );
         let path = save_log(&dir, &log).expect("save log");
         assert!(path.exists(), "log file should exist on disk");
@@ -1176,6 +1268,7 @@ mod tests {
             Instrument::Piano,
             &[],
             Vec::new(),
+            SessionTelemetry::default(),
         );
         // Empty report grade should be F (consistent with SessionAccumulator).
         assert_eq!(log.report.grade, "F");

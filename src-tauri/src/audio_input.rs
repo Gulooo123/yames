@@ -1,11 +1,14 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::session_audio::{self, SessionAudioRecorder};
 
 /// Module-local dev-only logger. Expands to `println!` in debug builds
 /// (cargo run, vitest harness, tauri dev) and to nothing in release
@@ -98,6 +101,13 @@ pub struct AudioInput {
     playback_thread: Option<thread::JoinHandle<()>>,
     recorded_audio: Arc<Mutex<Option<(Vec<f32>, u32)>>>, // (samples, sample_rate)
     input_gain: Arc<AtomicU32>, // f32 linear multiplier stored as bits (1.0 = unity)
+    // Optional per-session raw audio dump (env-flag + debug-build gated).
+    // `session_recorder` is `Some` while a recording is in flight; the
+    // cpal callback feeds samples in via try_lock. `last_session_audio_path`
+    // is populated by `stop()` once the recorder is finalized so
+    // `commands::persist_session_log` can pair the WAV with the JSON log.
+    session_recorder: Arc<Mutex<Option<SessionAudioRecorder>>>,
+    last_session_audio_path: Arc<Mutex<Option<PathBuf>>>,
 }
 
 // Safety: AudioInput doesn't hold cpal::Stream — it lives on its own thread.
@@ -118,6 +128,8 @@ impl AudioInput {
             playback_thread: None,
             recorded_audio: Arc::new(Mutex::new(None)),
             input_gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            session_recorder: Arc::new(Mutex::new(None)),
+            last_session_audio_path: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -182,12 +194,46 @@ impl AudioInput {
             *ring = RingBuffer::new(sr as usize * 4);
         }
 
+        // Optional session-audio recording (dev-only, env-gated). Initialize
+        // BEFORE the capture thread launches so the cpal callback can see
+        // a non-None recorder from the first frame. `session_audio::is_enabled()`
+        // is a no-op in release builds, so this whole block costs zero in
+        // production.
+        {
+            *self.last_session_audio_path.lock().unwrap() = None;
+            let mut slot = self.session_recorder.lock().unwrap();
+            *slot = None;
+            if session_audio::is_enabled() {
+                match app_handle.path().app_data_dir() {
+                    Ok(app_dir) => {
+                        let dir = app_dir.join(crate::session_log::SESSION_LOGS_DIR);
+                        match SessionAudioRecorder::create(&dir, sr) {
+                            Ok(rec) => {
+                                eprintln!(
+                                    "[session-audio] recording enabled, writing to {}",
+                                    rec.path().display()
+                                );
+                                *slot = Some(rec);
+                            }
+                            Err(e) => {
+                                eprintln!("[session-audio] failed to open WAV writer: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[session-audio] could not resolve app data dir: {e}");
+                    }
+                }
+            }
+        }
+
         let alive = self.alive.clone();
         alive.store(true, Ordering::SeqCst);
         let ring = self.ring.clone();
         let is_recording = self.is_recording.clone();
         let recording_buf = self.recording_buf.clone();
         let input_gain = self.input_gain.clone();
+        let self_session_recorder = self.session_recorder.clone();
         let sample_rate = sr;
         let device_name_owned = device.name().unwrap_or_default();
 
@@ -213,12 +259,14 @@ impl AudioInput {
             let recording_buf_cb = recording_buf.clone();
             let max_recording_samples = sample_rate as usize * 10; // 10 second max
 
+            let session_rec_cb = self_session_recorder.clone();
             let stream_result = match sample_format {
                 SampleFormat::F32 => {
                     let is_rec = is_recording_cb.clone();
                     let rec_buf = recording_buf_cb.clone();
                     let max_rec = max_recording_samples;
                     let gain = input_gain.clone();
+                    let session_rec = session_rec_cb.clone();
                     device.build_input_stream(
                     &config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -234,6 +282,14 @@ impl AudioInput {
                                 }
                             }
                         }
+                        // Session-audio dump (dev-only). try_lock + drop-on-fail
+                        // so we never block the audio thread on disk I/O —
+                        // BufWriter absorbs the bulk of writes anyway.
+                        if let Ok(mut slot) = session_rec.try_lock() {
+                            if let Some(rec) = slot.as_mut() {
+                                let _ = rec.push_samples(&mono);
+                            }
+                        }
                     },
                     |err| eprintln!("Audio input error: {}", err),
                     None,
@@ -243,6 +299,7 @@ impl AudioInput {
                     let rec_buf = recording_buf_cb.clone();
                     let max_rec = max_recording_samples;
                     let gain = input_gain.clone();
+                    let session_rec = session_rec_cb.clone();
                     device.build_input_stream(
                     &config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
@@ -258,6 +315,11 @@ impl AudioInput {
                                 if buf.len() < max_rec {
                                     buf.extend_from_slice(&mono);
                                 }
+                            }
+                        }
+                        if let Ok(mut slot) = session_rec.try_lock() {
+                            if let Some(rec) = slot.as_mut() {
+                                let _ = rec.push_samples(&mono);
                             }
                         }
                     },
@@ -300,6 +362,26 @@ impl AudioInput {
         if let Some(handle) = self.capture_thread.take() {
             let _ = handle.join();
         }
+        // Capture thread has exited — no more callbacks will fire, so it's
+        // safe to finalize the session WAV here (writer.flush + header
+        // patch). Stash the resulting path for the JSON-pairing step.
+        let recorder = self.session_recorder.lock().unwrap().take();
+        if let Some(rec) = recorder {
+            let samples = rec.sample_count();
+            match rec.finish() {
+                Ok(path) => {
+                    audio_dbg!(
+                        "[session-audio] finalized {} samples → {}",
+                        samples,
+                        path.display()
+                    );
+                    *self.last_session_audio_path.lock().unwrap() = Some(path);
+                }
+                Err(e) => {
+                    eprintln!("[session-audio] failed to finalize WAV: {e}");
+                }
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -320,6 +402,15 @@ impl AudioInput {
         let clamped = gain_linear.clamp(0.0, 100.0); // 0 to +40dB ~ 100x
         audio_dbg!("[audio_input] set_input_gain: {:.2}x ({:.1} dB)", clamped, 20.0 * clamped.log10());
         self.input_gain.store(clamped.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Take ownership of the most recently finalized session-audio WAV
+    /// path, if any. Returns `None` when session-audio recording was
+    /// disabled, or when the file has already been claimed by an earlier
+    /// call. Consumed by `commands::persist_session_log` so it can
+    /// rename the partial WAV to match the JSON log's stem.
+    pub fn take_last_session_audio_path(&self) -> Option<PathBuf> {
+        self.last_session_audio_path.lock().unwrap().take()
     }
 
     // ─── Recording ──────────────────────────────────────────────────

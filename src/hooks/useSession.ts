@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { getSessionReport, getSessionHistory, saveSession, clearSession, coachGenerate, loadCoachModel, isCoachLoaded, ttsSpeak, onBeatFeedback, onAdaptiveEval, setAdaptiveDecision, notifySettingsChange, clearCalibrationCacheEntry } from "../ipc";
+import { getSessionReport, getSessionHistory, saveSession, clearSession, coachGenerate, loadCoachModel, isCoachLoaded, ttsSpeak, onBeatFeedback, onAdaptiveEval, setAdaptiveDecision, notifySettingsChange, clearCalibrationCacheEntry, onTtsSpeechStarted } from "../ipc";
 import type { AdaptiveEvalRequest } from "../ipc";
 import type { BeatFeedback, FeedChip, FeedMessage, SessionReport, SessionSegment } from "../types";
 import type { useEvaluation } from "./useEvaluation";
@@ -55,7 +55,7 @@ import {
   type InterventionRateState,
   type SelectedIntervention,
 } from "../coach/interventions";
-import { accuracyPct, accuracyRatio, scoredBeats } from "../coach/reportStats";
+import { accuracyPct, accuracyRatio, computeLegacyScore, gradeForScore, rescoreReport, scoredBeats } from "../coach/reportStats";
 import { createSessionToken } from "../coach/sessionGuard";
 import { coachDebug } from "../coach/debug";
 
@@ -250,6 +250,75 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     ttsSpeak(text).catch(() => {});
   }, [voiceMode]);
 
+  // ── Pending-speech sync (spinner-to-text on tts-speech-started) ──
+  //
+  // The Rust TTS side emits `tts-speech-started` after Piper synthesis
+  // finishes but BEFORE `afplay` is launched (see `tts.rs::speak`). We
+  // maintain a FIFO queue of pending message IDs — each call to
+  // `speakAndReveal` pushes its messageId, each event pops the head
+  // and clears that message's `pending` flag. Because `tts_speak` is
+  // gated by a single Mutex on the Rust side, speeches run
+  // sequentially and the FIFO ordering holds.
+  const pendingSpeechQueueRef = useRef<string[]>([]);
+  useEffect(() => {
+    const unlistenP = onTtsSpeechStarted(() => {
+      const id = pendingSpeechQueueRef.current.shift();
+      if (!id) return;
+      setMessages(prev => prev.map(m =>
+        m.id === id ? { ...m, pending: false } : m
+      ));
+    });
+    return () => { unlistenP.then(fn => fn()); };
+  }, []);
+
+  /** Speak `text` and reveal the message with `messageId` exactly when
+   *  the audio is about to start. Inserts the message ID into the
+   *  pending queue; the tts-speech-started listener clears the pending
+   *  flag when its turn comes up. Fallback behavior:
+   *    - voiceMode != "voice"  → reveal immediately, no TTS call
+   *    - ttsSpeak() rejects    → force-reveal so the spinner doesn't
+   *                              get stuck on a TTS error
+   *    - 5s safety timeout     → force-reveal if event never fires
+   *
+   *  The caller is responsible for having already inserted the message
+   *  into `messages` with `pending: true`. This helper does not touch
+   *  the message body — it only owns the reveal timing. */
+  const speakAndReveal = useCallback((messageId: string, text: string, _urgency: "urgent" | "normal" = "urgent") => {
+    const forceReveal = () => {
+      setMessages(prev => prev.map(m =>
+        m.id === messageId ? { ...m, pending: false } : m
+      ));
+      pendingSpeechQueueRef.current = pendingSpeechQueueRef.current.filter(qid => qid !== messageId);
+    };
+
+    if (voiceMode !== "voice") {
+      forceReveal();
+      return;
+    }
+
+    pendingSpeechQueueRef.current.push(messageId);
+
+    // Safety net: if the started-event never fires (Rust panicked,
+    // event got dropped, etc.) reveal after 5s so the spinner isn't
+    // stuck forever.
+    const safetyTimer = window.setTimeout(forceReveal, 5000);
+
+    ttsSpeak(text)
+      .then(() => {
+        // Audio finished. The reveal happened on the started event;
+        // if it somehow didn't, force it now (covers the path where
+        // the event was dropped but afplay still ran).
+        window.clearTimeout(safetyTimer);
+        forceReveal();
+      })
+      .catch(() => {
+        window.clearTimeout(safetyTimer);
+        forceReveal();
+      });
+  }, [voiceMode]);
+  const speakAndRevealRef = useRef(speakAndReveal);
+  useEffect(() => { speakAndRevealRef.current = speakAndReveal; }, [speakAndReveal]);
+
   // ── Stable refs for values consumed by long-lived event listeners ──
   // The beat-feedback listener (mounted once per active+isPlaying
   // cycle) reads `vocab`, `instrumentLabel`, and `maybeSpeak`. If we
@@ -313,7 +382,16 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     if (wasPlayingRef.current && !isPlaying && active) {
       const segmentBpm = playBpmRef.current;
       const token = createSessionToken(sessionIdRef, activeRef);
-      getSessionReport().then(async (report) => {
+      getSessionReport().then(async (raw) => {
+        // Re-score the backend report through the same legacy formula
+        // every displayed score uses (`computeLegacyScore`). The
+        // segment-aware Rust score depends on DSP plumbing
+        // (idle gaps, spurious onsets) that produces inconsistent
+        // mini-report scores while the DSP doubling bug is open — see
+        // `rescoreReport`'s docstring. Wrapping here ensures the
+        // narrative, coach generation, and the aggregate built from
+        // these mini-reports all see the same score.
+        const report = raw ? rescoreReport(raw) : raw;
         // Discard if a new session started OR the session ended while
         // `getSessionReport` was in-flight — would otherwise land a
         // stale segment summary in the next session's feed.
@@ -689,11 +767,15 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
           coachDebug("realtime-tip.discard-stale-or-inactive", { capturedAt: token.capturedAt, current: sessionIdRef.current, active: activeRef.current });
           return;
         }
+        const tipId = crypto.randomUUID();
         const msg: FeedMessage = {
-          id: crypto.randomUUID(),
+          id: tipId,
           type: "coach-tip",
           timestamp: Date.now(),
           content: comment,
+          // Hide the tip behind a spinner until voice arrives — only
+          // for the spoken tier. Written-only tips appear instantly.
+          pending: effectivelySpoken,
           ...(intervention && {
             affordance: {
               actionLabel: intervention.actionLabel,
@@ -715,7 +797,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         // Interventions force-speak (see urgency above). "More"
         // verbosity also promotes written → spoken.
         if (effectivelySpoken) {
-          maybeSpeakRef.current(comment, urgency);
+          speakAndRevealRef.current(tipId, comment, urgency);
         }
       };
       generateTip();
@@ -944,19 +1026,21 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       });
       if (!template) return;
 
+      const msgId = crypto.randomUUID();
       const msg: FeedMessage = {
-        id: crypto.randomUUID(),
+        id: msgId,
         type: "coach-tip",
         timestamp: Date.now(),
         content: template,
         urgency: "urgent",
+        pending: voiceMode === "voice",
       };
       setMessages((prev) => [...prev, msg]);
       if (narrativeRef.current) {
         narrativeRef.current = appendCoachUtterance(narrativeRef.current, template);
       }
       // Signal A is always-spoken (per plan + gatekeeper ALWAYS_SPOKEN).
-      maybeSpeak(template, "urgent");
+      speakAndReveal(msgId, template, "urgent");
     }, BOUNDARY_DEBOUNCE_MS);
     boundaryDebounceRef.current = timerId;
 
@@ -969,7 +1053,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         boundaryDebounceRef.current = null;
       }
     };
-  }, [active, bpm, presetId, presetName, timeSignature, instrument, vocab, maybeSpeak]);
+  }, [active, bpm, presetId, presetName, timeSignature, instrument, vocab, maybeSpeak, voiceMode, speakAndReveal]);
 
   const startSession = useCallback(async () => {
     if (active) {
@@ -1067,15 +1151,22 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       type: "session-start",
       timestamp: now,
       content: greeting.text,
+      // Spinner-until-audio: hide the text until the matching
+      // `tts-speech-started` event fires (or until `speakAndReveal`
+      // safety-net force-reveals). Without this the user reads the
+      // greeting seconds before they hear it — see the comment on
+      // `speakAndReveal`.
+      pending: true,
     }]);
 
-    // Show the template greeting in the feed immediately, but defer TTS
-    // until we know whether the LLM is going to rephrase it — otherwise
-    // we'd speak the template, then speak the rephrased version a moment
-    // later, and the user hears the greeting twice. When no LLM is
-    // loaded, speak the template right away since it's all we'll get.
+    // Defer TTS until we know whether the LLM is going to rephrase the
+    // greeting — otherwise we'd speak the template, then speak the
+    // rephrased version a moment later, and the user hears the
+    // greeting twice. When no LLM is loaded, speak the template right
+    // away since it's all we'll get; the spinner reveals in lockstep
+    // with the audio.
     if (!coachLoadedRef.current) {
-      maybeSpeak(greeting.text);
+      speakAndReveal(greetingId, greeting.text);
     }
 
     // Record the greeting as the first coach utterance in the narrative.
@@ -1115,14 +1206,15 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
           if (token.isStaleOrInactive()) return;
           if (!rephrased || !rephrased.trim()) {
             // LLM returned nothing useful — fall back to speaking the
-            // template greeting we've already shown in the feed.
-            maybeSpeak(tierGreeting.text);
+            // template greeting we've already shown in the feed. The
+            // message stays `pending: true` until the audio starts.
+            speakAndRevealRef.current(greetingId, tierGreeting.text);
             return;
           }
           setMessages((prev) => prev.map((m) =>
             m.id === greetingId ? { ...m, content: rephrased } : m
           ));
-          maybeSpeak(rephrased);
+          speakAndRevealRef.current(greetingId, rephrased);
           // Replace the template coach utterance with the LLM rephrase
           // so downstream LLM calls see the actual greeting the user heard.
           if (narrativeRef.current) {
@@ -1135,12 +1227,12 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
           // LLM errored — fall back to the template greeting, but only
           // if the session is still live (same sid AND still active).
           if (!token.isStaleOrInactive()) {
-            maybeSpeak(tierGreeting.text);
+            speakAndRevealRef.current(greetingId, tierGreeting.text);
           }
         }
       })();
     }
-  }, [active, evaluation, presetId, presetName, maybeSpeak, instrumentLabel]);
+  }, [active, evaluation, presetId, presetName, maybeSpeak, instrumentLabel, speakAndReveal]);
 
   const endSession = useCallback(async () => {
     if (!active) {
@@ -1161,7 +1253,11 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     // check (which only triggers on a NEW session, not on idle).
     activeRef.current = false;
 
-    const lastReport = await getSessionReport();
+    // Same rescoring rationale as the mini-report path above — see
+    // `rescoreReport`. Without this the appendSegmentEnd call below
+    // would slip the segment-aware backend score into the narrative.
+    const rawLast = await getSessionReport();
+    const lastReport = rawLast ? rescoreReport(rawLast) : rawLast;
     if (lastReport) {
       coachDebug("endSession.lastReport", {
         scoredBeats: scoredBeats(lastReport),
@@ -1190,6 +1286,12 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     // End session immediately — no freeze
     const endMsgId = crypto.randomUUID();
     const placeholderComment = aggregated ? "Session complete." : "Session ended — no data recorded.";
+    // Only mark pending when we know an LLM summary will be generated
+    // AND voice mode is on — otherwise the placeholder text is the
+    // final text and there's no spinner-to-text swap to do. The actual
+    // LLM rephrase path below converts the message to its final form
+    // and calls speakAndReveal in the same tick.
+    const willSpeakSummary = !!aggregated && coachLoadedRef.current && voiceMode === "voice";
     const endMsg: FeedMessage = {
       id: endMsgId,
       type: "session-end",
@@ -1198,6 +1300,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       report: aggregated ?? undefined,
       meta: { bpm, timeSignature },
       segments: segments.length > 1 ? segments : undefined,
+      pending: willSpeakSummary,
     };
     setMessages((prev) => [...prev, endMsg]);
 
@@ -1266,8 +1369,16 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
             summaryComment,
           );
         }
-        maybeSpeak(summaryComment);
-      }).catch(() => {});
+        speakAndRevealRef.current(endMsgId, summaryComment, "normal");
+      }).catch(() => {
+        // LLM crashed — make sure the pending spinner doesn't get
+        // stuck on the placeholder forever. Reveal the placeholder
+        // text so the user sees "Session complete." instead of a
+        // spinner.
+        setMessages((prev) => prev.map((m) =>
+          m.id === endMsgId ? { ...m, pending: false } : m
+        ));
+      });
     }
 
     // ── Centralised state reset ────────────────────────────────────
@@ -1394,11 +1505,17 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         return;
       }
 
+      const replyId = crypto.randomUUID();
       const replyMsg: FeedMessage = {
-        id: crypto.randomUUID(),
+        id: replyId,
         type: "coach-chat",
         timestamp: Date.now(),
         content: reply,
+        // Hide chat replies behind a spinner until voice arrives so
+        // the user doesn't read the answer seconds before they hear
+        // it. When voice mode is off, speakAndReveal force-reveals
+        // immediately.
+        pending: voiceMode === "voice",
       };
       setMessages((prev) => [...prev, replyMsg]);
       if (narrativeRef.current) {
@@ -1407,9 +1524,9 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
           reply,
         );
       }
-      maybeSpeak(reply);
+      speakAndRevealRef.current(replyId, reply);
     })();
-  }, [bpm, presetId, presetName, maybeSpeak, instrumentLabel]);
+  }, [bpm, presetId, presetName, maybeSpeak, instrumentLabel, voiceMode]);
 
   /**
    * Phase 5 — route a chip tap (or its follow-up affordance) into the feed.
@@ -1457,12 +1574,15 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         }
         if (chip.answer != null) {
           // Canned / template-fill — answer was resolved at chip
-          // selection time. Land it immediately.
+          // selection time. Land it immediately, but spin until voice
+          // arrives so the text doesn't beat the audio.
+          const coachMsgId = crypto.randomUUID();
           const coachMsg: FeedMessage = {
-            id: crypto.randomUUID(),
+            id: coachMsgId,
             type: "coach-chat",
             timestamp: Date.now(),
             content: chip.answer,
+            pending: voiceMode === "voice",
           };
           setMessages((prev) => [...prev, coachMsg]);
           if (narrativeRef.current) {
@@ -1471,7 +1591,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
               chip.answer,
             );
           }
-          maybeSpeak(chip.answer, "normal");
+          speakAndRevealRef.current(coachMsgId, chip.answer, "normal");
         } else {
           // LLM pathway — fall through to the chat pipeline so the
           // model can handle the chip label as a question.
@@ -1550,7 +1670,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         break;
       }
     }
-  }, [bpm, setBpm, maybeSpeak, instrument, evaluation.selectedDevice]);
+  }, [bpm, setBpm, maybeSpeak, instrument, evaluation.selectedDevice, voiceMode]);
 
   // `sendChatRef` lets `handleChipAction` reach `sendChat` without
   // declaring a circular `useCallback` dependency (handleChipAction →
@@ -1897,9 +2017,31 @@ function shortPocketNote(report: SessionReport): string | undefined {
 }
 
 
-/** Aggregate multiple segment reports into a single session report. */
+/**
+ * Aggregate multiple segment reports into a single session report.
+ *
+ * History: the previous implementation had two bugs.
+ *   1. A single-report fast-path returned the backend report verbatim,
+ *      so a session that only generated one mini-report kept the
+ *      segment-aware (DSP-quirk-sensitive) score even though every
+ *      other displayed path uses the legacy formula.
+ *   2. The multi-report branch used a hand-rolled formula
+ *      (`hitRate*30 + (100 - meanAbsDev*2)*0.5 + (100 - stdDev*1.5)*0.2`)
+ *      that bore no resemblance to either the Rust legacy formula or
+ *      the Rust segment formula. This produced scores that disagreed
+ *      with displayed hit-rate trends.
+ *
+ * Both are fixed by always going through `computeLegacyScore` — the
+ * same helper used for mini-reports and the displayed end-of-session
+ * card — so every score the user sees uses one consistent formula
+ * based on counts they can read off the report.
+ */
 function aggregateReports(reports: SessionReport[]): SessionReport {
-  if (reports.length === 1) return reports[0];
+  if (reports.length === 1) {
+    // Still re-score the single report so the displayed end-of-session
+    // score matches the formula used for multi-segment aggregates.
+    return rescoreReport(reports[0]);
+  }
 
   let totalBeats = 0, hitsCount = 0, missCount = 0, skippedBeats = 0;
   let perfectCount = 0, goodCount = 0, okCount = 0;
@@ -1924,10 +2066,6 @@ function aggregateReports(reports: SessionReport[]): SessionReport {
     if (r.gridCorrelation > 0) allGridCorrelations.push(r.gridCorrelation);
   }
 
-  // accuracyRatio() returns hits/(hits+miss) with a 0 floor when no
-  // beats were scored — matches the helper's contract in reportStats.ts.
-  const hitRate = accuracyRatio({ hitsCount, missCount });
-
   const meanDev = allDeviations.length > 0
     ? allDeviations.reduce((a, b) => a + b, 0) / allDeviations.length
     : 0;
@@ -1950,14 +2088,18 @@ function aggregateReports(reports: SessionReport[]): SessionReport {
     ? Math.sqrt(allIntervalErrors.reduce((s, e) => s + (e - meanIntervalError) ** 2, 0) / (allIntervalErrors.length - 1))
     : 0;
 
-  // Score: same formula as backend
-  const accuracyScore = meanAbsDev > 0 ? Math.max(0, 100 - meanAbsDev * 2) : 100;
-  const consistencyScore = stdDev > 0 ? Math.max(0, 100 - stdDev * 1.5) : 100;
-  const score = Math.round(hitRate * 30 + accuracyScore * 0.5 + consistencyScore * 0.2);
-  const clampedScore = Math.min(100, Math.max(0, score));
-
-  const grade = clampedScore >= 95 ? "S" : clampedScore >= 85 ? "A" : clampedScore >= 70 ? "B"
-    : clampedScore >= 55 ? "C" : clampedScore >= 40 ? "D" : "F";
+  // Use the SAME formula as `rescoreReport` / `computeLegacyScore` so
+  // a multi-mini-report session and a single-mini-report session that
+  // sum to the same counts get the same score.
+  const score = computeLegacyScore({
+    hitsCount,
+    missCount,
+    perfectCount,
+    goodCount,
+    okCount,
+    stdDeviationMs: stdDev,
+  });
+  const grade = gradeForScore(score);
 
   return {
     totalBeats, hitsCount, missCount, skippedBeats,
@@ -1967,7 +2109,7 @@ function aggregateReports(reports: SessionReport[]): SessionReport {
     meanAbsDeviationMs: meanAbsDev,
     meanIntervalErrorMs: meanIntervalError,
     grade,
-    score: clampedScore,
+    score,
     deviations: allDeviations,
     dynamicsStd,
     meanAmplitude: meanAmp,

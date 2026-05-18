@@ -7,10 +7,11 @@ import {
   onAudioSpectrum,
   onAudioInputDevicesChanged,
   onBeatFeedback,
+  onInferredGridChanged,
   storeLoad,
   storeSave,
 } from "../ipc";
-import type { AudioInputDevice, AudioSpectrum, BeatFeedback } from "../types";
+import type { AudioInputDevice, AudioSpectrum, BeatFeedback, InferredGridChanged } from "../types";
 
 /** Colors matching feedback classifications — reads theme CSS vars */
 export const FEEDBACK_COLORS = {
@@ -34,6 +35,11 @@ export function useEvaluation() {
   const [dotFeedback, setDotFeedback] = useState<Map<number, BeatFeedback>>(new Map());
   const [recentDeviations, setRecentDeviations] = useState<number[]>([]);
   const feedbackUnlistenRef = useRef<(() => void) | null>(null);
+
+  // Rhythm-inference (Path B): which divisor the matcher decided the
+  // user is playing. Null when not locked / not enabled.
+  const [inferredGrid, setInferredGrid] = useState<InferredGridChanged | null>(null);
+  const gridUnlistenRef = useRef<(() => void) | null>(null);
 
   // Load saved preferences on mount
   useEffect(() => {
@@ -111,6 +117,32 @@ export function useEvaluation() {
     };
   }, [enabled]);
 
+  // Subscribe to inferred-grid changes when enabled (Path B caption)
+  useEffect(() => {
+    if (!enabled) {
+      setInferredGrid(null);
+      return;
+    }
+    let cancelled = false;
+    onInferredGridChanged((grid) => {
+      if (cancelled) return;
+      setInferredGrid(grid);
+    }).then((unlisten) => {
+      if (cancelled) {
+        unlisten();
+      } else {
+        gridUnlistenRef.current = unlisten;
+      }
+    });
+    return () => {
+      cancelled = true;
+      if (gridUnlistenRef.current) {
+        gridUnlistenRef.current();
+        gridUnlistenRef.current = null;
+      }
+    };
+  }, [enabled]);
+
   // Sync with backend state on mount
   useEffect(() => {
     getEvaluationState().then(setEnabled);
@@ -176,5 +208,7 @@ export function useEvaluation() {
     dotFeedback,
     recentDeviations,
     avgDeviation,
+    // Rhythm inference (Path B caption)
+    inferredGrid,
   };
 }

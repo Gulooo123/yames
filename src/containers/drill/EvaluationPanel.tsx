@@ -3,8 +3,18 @@ import { clearSession, getSessionHistory, deleteSession, clearAllSessions } from
 import { FEEDBACK_COLORS } from "../../hooks/useEvaluation";
 import { ScoreRing, BreakdownBar, Histogram, ScoreBadge, MiniSparkline } from "./evaluation";
 import type { SessionReport, SavedSession } from "../../types";
-import { accuracyPct, scoredBeats } from "../../coach/reportStats";
+import { accuracyPct, rescoreReport, scoredBeats } from "../../coach/reportStats";
 import "../../styles/evaluation-panel.css";
+
+/**
+ * Apply the JS-side legacy scoring formula to every loaded session.
+ * Mirrors `CoachCard.rescoreHistory` — see that file for the rationale
+ * (sessions saved with the pre-fix segment-aware Rust score get
+ * re-derived on read so the history view is internally consistent).
+ */
+function rescoreHistory(sessions: SavedSession[]): SavedSession[] {
+  return sessions.map((s) => ({ ...s, report: rescoreReport(s.report) }));
+}
 
 interface EvaluationPanelProps {
   open: boolean;
@@ -29,7 +39,7 @@ export default function EvaluationPanel({ open, onClose, onToggle, currentReport
   // Load history when panel opens
   useEffect(() => {
     if (open) {
-      getSessionHistory().then(setHistory);
+      getSessionHistory().then((h) => setHistory(rescoreHistory(h)));
       // If we have a fresh report from playback stop, show it
       if (currentReport) {
         setSelectedReport(currentReport);

@@ -121,16 +121,24 @@ impl TtsEngine {
     /// Speak text using Piper TTS.
     /// Generates a WAV file then plays it with afplay.
     /// Blocks until playback is complete — call from a background thread.
-    pub fn speak(&mut self, text: &str) -> Result<(), String> {
+    /// Synthesize the text and play it. The `on_ready_to_play` callback
+    /// fires AFTER synthesis has finished but BEFORE audio playback
+    /// starts — that is the moment to reveal the text in the UI so the
+    /// spinner-to-text swap lands within ~10-30ms of the first audible
+    /// sample (the typical `afplay`/`say` launch latency).
+    ///
+    /// The callback is `FnOnce` so it cannot fire twice even if both
+    /// the Piper and the `say` fallback paths get hit (only one will).
+    pub fn speak<F: FnOnce()>(&mut self, text: &str, on_ready_to_play: F) -> Result<(), String> {
         let dir = self.models_dir.as_ref().ok_or("Models directory not set")?;
         let piper_bin = dir.join("piper").join("piper");
         let model_path = dir.join("voice").join(format!("en_US-{}-medium.onnx", self.voice));
 
         if !piper_bin.exists() {
-            return self.speak_fallback(text);
+            return self.speak_fallback(text, on_ready_to_play);
         }
         if !model_path.exists() {
-            return self.speak_fallback(text);
+            return self.speak_fallback(text, on_ready_to_play);
         }
 
         self.speaking = true;
@@ -157,6 +165,11 @@ impl TtsEngine {
 
         match piper_result {
             Ok(status) if status.success() && tmp_wav.exists() => {
+                // Synth done — fire the "audio about to play" signal so
+                // the UI can swap the spinner for the actual text right
+                // before sound starts.
+                on_ready_to_play();
+
                 // Play the WAV file. `afplay -v <gain>` accepts 0.0..1.0+
                 // (1.0 = no change). Anything below ~0.001 silences the
                 // clip entirely on macOS, which is what we want when the
@@ -188,9 +201,17 @@ impl TtsEngine {
         }
     }
 
-    /// Fallback to macOS `say` if Piper isn't available.
-    fn speak_fallback(&mut self, text: &str) -> Result<(), String> {
+    /// Fallback to macOS `say` if Piper isn't available. `say`
+    /// synthesizes and plays in one step, so the `on_ready_to_play`
+    /// callback fires immediately before launching the subprocess —
+    /// `say` typically begins audible output within ~100ms of launch.
+    fn speak_fallback<F: FnOnce()>(&mut self, text: &str, on_ready_to_play: F) -> Result<(), String> {
         self.speaking = true;
+        // Signal "about to play" — `say` does its synth+play in a single
+        // subprocess so we can't get a tighter sync without a different
+        // backend. ~100ms is close enough that the UI swap reads as
+        // simultaneous with the first audible sample.
+        on_ready_to_play();
         let result = Command::new("say")
             .arg("-r")
             .arg("175")
