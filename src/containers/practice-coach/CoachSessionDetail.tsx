@@ -3,6 +3,7 @@ import { FEEDBACK_COLORS } from "../../hooks/useEvaluation";
 import type { SavedSession } from "../../types";
 import { formatDate } from "./coachCardHelpers";
 import { accuracyPct, scoredBeats } from "../../coach/reportStats";
+import { SessionNarrativeView } from "../../coach/SessionNarrativeView";
 
 /**
  * Detail view for a single saved session — shown when the user picks a
@@ -37,6 +38,18 @@ export function CoachSessionDetail({
         )}
       </div>
 
+      {/*
+        Narrative goes BEFORE the rule-based insights. The narrative
+        explains what the score means relative to the underlying
+        components (e.g. "65 with tight consistency is closer to an A
+        than the number suggests"); the insights below are concrete
+        rule-fired observations ("you dragged ~20 ms behind the click").
+        Reading the narrative first gives the user the framing they
+        need to interpret the insights instead of treating each one as
+        an isolated complaint.
+      */}
+      <SessionNarrativeView report={report} />
+
       {report.insights.length > 0 && (
         <div className="coach-detail-insights">
           {report.insights.map((insight, i) => (
@@ -70,10 +83,16 @@ export function CoachSessionDetail({
             <span className="coach-detail-stat-value">{hitRate}%</span>
           </div>
           <div className="coach-detail-stat">
-            <span className="coach-detail-stat-label">Avg deviation</span>
-            <span className="coach-detail-stat-value">
-              {report.meanDeviationMs >= 0 ? "+" : ""}{report.meanDeviationMs.toFixed(1)}ms
-            </span>
+            {/*
+              "Avg timing error" uses the MAGNITUDE (meanAbsDeviationMs) — not
+              the signed mean (meanDeviationMs), which cancels to ~0 whenever
+              early/late errors are symmetric and produced the misleading
+              "+0.0 ms" display on sloppy sessions. The signed mean still
+              carries information ("rushing" vs "dragging") and is surfaced
+              in the narrative block / Bias row below.
+            */}
+            <span className="coach-detail-stat-label">Avg timing error</span>
+            <span className="coach-detail-stat-value">{"\u00B1"}{report.meanAbsDeviationMs.toFixed(1)}ms</span>
           </div>
           <div className="coach-detail-stat">
             <span className="coach-detail-stat-label">Consistency</span>

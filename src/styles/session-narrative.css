@@ -1,0 +1,57 @@
+/* ─── Session narrative card ─────────────────────────────────────────
+ *
+ * Shared by `EvaluationPanel.ReportDetail` (end-of-session) and
+ * `CoachSessionDetail` (history). Sits between the ScoreRing and the
+ * rule-based insights. The block has four lines max:
+ *
+ *   * headline (always)     — what the score actually means
+ *   * praise   (optional)   — strongest genuine positive
+ *   * focus    (optional)   — one concrete thing to work on next
+ *   * caveat   (optional)   — audio/data-quality red flag
+ *
+ * The headline carries the most visual weight (slightly larger,
+ * primary text color). The remaining lines are smaller and tinted so
+ * the eye lands on the headline first, then scans down. The accent
+ * left border anchors the block as a single semantic unit rather than
+ * a loose stack of paragraphs.
+ */
+
+.session-narrative {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  border-left: 3px solid var(--accent);
+}
+
+.session-narrative-headline {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+.session-narrative-praise {
+  font-size: 11px;
+  line-height: 1.4;
+  color: color-mix(in srgb, var(--accent) 80%, var(--text-primary));
+}
+
+.session-narrative-focus {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.session-narrative-caveat {
+  font-size: 11px;
+  line-height: 1.4;
+  font-style: italic;
+  color: var(--feedback-miss, var(--text-muted));
+  padding-top: 4px;
+  border-top: 1px dashed color-mix(in srgb, var(--feedback-miss, var(--border)) 30%, transparent);
+}

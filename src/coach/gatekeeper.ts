@@ -74,9 +74,30 @@ export const DRILL_STALENESS_BPM = 5;
 export const STREAK_SUPPRESSION_HIT_RATE = 0.85;
 export const STREAK_SUPPRESSION_MIN_LEN = 16;
 
-/** Accuracy-drop trigger thresholds. */
-export const ACCURACY_DROP_DELTA = 0.20;
+/** Accuracy-drop trigger thresholds.
+ *
+ * Bumped 0.20 → 0.25 on 2026-05-18 after player feedback that the old
+ * 20% delta over a single 16-beat window fired on any temporary
+ * stumble. The new 25% delta paired with `ACCURACY_DROP_CONFIRMATIONS`
+ * (require two consecutive detections before emitting) means the
+ * scenario only fires when the drop is both larger AND sustained.
+ * Pairs with the new 60s per-scenario cooldown (was 25s) so even a
+ * confirmed drop can't re-fire chattily.
+ */
+export const ACCURACY_DROP_DELTA = 0.25;
 export const ACCURACY_DROP_WINDOW = 16;
+/**
+ * Number of consecutive evaluations that must detect a drop before
+ * the scenario is emitted. Mirrors `TREND_CONFIRMATION_REQUIRED` — a
+ * one-shot dip is a stumble, two in a row is a real slip.
+ *
+ * The counter is held in `GatekeeperState.accuracyDropConfirmations`,
+ * incremented when a drop is detected, reset when a non-drop
+ * evaluation runs. Detector returns a sub-threshold "pending" state
+ * for the first detection so the caller can still update the counter
+ * without committing an event.
+ */
+export const ACCURACY_DROP_CONFIRMATIONS = 2;
 /**
  * Minimum number of attempted (hits + miss) beats required in BOTH
  * the prior and recent windows before `detectAccuracyDrop` will fire.
@@ -256,6 +277,14 @@ export type GatekeeperState = {
    * two consecutive confirmations before escalating to spoken.
    */
   trendConfirmations: { rushing: number; dragging: number };
+  /**
+   * Rolling confirmations of the accuracy-drop detector. The drop has
+   * to show up on `ACCURACY_DROP_CONFIRMATIONS` consecutive evaluations
+   * before the scenario is emitted — a single stumble bumps the
+   * counter but doesn't fire. Reset to 0 whenever a non-drop evaluation
+   * runs OR when the detector emits.
+   */
+  accuracyDropConfirmations: number;
   /** Best clean-streak the gatekeeper has seen this session. */
   bestStreak: number;
   /** Latest BPM band low ("locked-in" band detection). */
@@ -375,6 +404,7 @@ export function createGatekeeper(sessionStartMs: number): GatekeeperState {
     lastWrittenMs: sessionStartMs,
     lastEventMs: {},
     trendConfirmations: { rushing: 0, dragging: 0 },
+    accuracyDropConfirmations: 0,
     bestStreak: 0,
     lockedBpmLow: null,
     bandLockedSinceMs: null,
@@ -601,7 +631,12 @@ const PER_SCENARIO_COOLDOWN_MS: Partial<Record<ScenarioTag, number>> = {
   // through; this only debounces the SAME tag.
   rushing_trend: 25_000,
   dragging_trend: 25_000,
-  accuracy_drop: 25_000,
+  // accuracy_drop sits at 60s (vs 25s for the trend pairs) because
+  // confirmation + cooldown both feed the same "actually slipping"
+  // bar. A confirmed drop tells the player something real; a second
+  // confirmed drop one minute later tells them the first message
+  // didn't land — anything tighter would feel like the coach piling on.
+  accuracy_drop: 60_000,
   fatigue: 25_000,
 };
 
@@ -658,28 +693,56 @@ type Detection = {
   partialState?: Partial<GatekeeperState>;
 };
 
-function detectAccuracyDrop(
+/**
+ * Result of the accuracy-drop probe. Decoupled from `Detection`
+ * because we want to update the confirmation counter even when the
+ * drop is *pending* (1 confirmation, not yet escalated to a fireable
+ * `Detection`). The caller (`evaluate`) inspects this and decides:
+ *
+ *   - `kind: "drop"` with `confirmations >= ACCURACY_DROP_CONFIRMATIONS`
+ *     → return a `Detection` and reset the counter.
+ *   - `kind: "drop"` below threshold → no event, but persist the
+ *     incremented counter via `partialState`.
+ *   - `kind: "clean"` → reset the counter to 0 via `partialState`
+ *     (only if it was non-zero, to avoid spurious state writes).
+ */
+type AccuracyDropProbe =
+  | {
+      kind: "drop";
+      detection: Detection;
+      confirmations: number;
+    }
+  | { kind: "clean" };
+
+function probeAccuracyDrop(
+  state: GatekeeperState,
   window: BeatFeedback[],
-): Detection | null {
-  if (window.length < ACCURACY_DROP_WINDOW * 2) return null;
+): AccuracyDropProbe {
+  if (window.length < ACCURACY_DROP_WINDOW * 2) return { kind: "clean" };
   const recent = window.slice(-ACCURACY_DROP_WINDOW);
   const prior = window.slice(-ACCURACY_DROP_WINDOW * 2, -ACCURACY_DROP_WINDOW);
   // Require a minimum number of ATTEMPTED beats in both halves before
   // we trust the rate comparison. Otherwise a quiet pause (window full
   // of `skipped`) reads as a 0% recent rate and the detector fires a
   // bogus accuracy-drop tip — see ACCURACY_DROP_MIN_SCORED docstring.
-  if (scoredCount(recent) < ACCURACY_DROP_MIN_SCORED) return null;
-  if (scoredCount(prior) < ACCURACY_DROP_MIN_SCORED) return null;
+  if (scoredCount(recent) < ACCURACY_DROP_MIN_SCORED) return { kind: "clean" };
+  if (scoredCount(prior) < ACCURACY_DROP_MIN_SCORED) return { kind: "clean" };
   const recentRate = hitRate(recent);
   const priorRate = hitRate(prior);
-  if (priorRate - recentRate < ACCURACY_DROP_DELTA) return null;
+  if (priorRate - recentRate < ACCURACY_DROP_DELTA) return { kind: "clean" };
+  const confirmations = state.accuracyDropConfirmations + 1;
   return {
-    scenario: "accuracy_drop",
-    tier: "spoken",
-    context: {
-      priorAccuracyPct: Math.round(priorRate * 100),
-      recentAccuracyPct: Math.round(recentRate * 100),
-      windowBeats: ACCURACY_DROP_WINDOW,
+    kind: "drop",
+    confirmations,
+    detection: {
+      scenario: "accuracy_drop",
+      tier: "spoken",
+      context: {
+        priorAccuracyPct: Math.round(priorRate * 100),
+        recentAccuracyPct: Math.round(recentRate * 100),
+        windowBeats: ACCURACY_DROP_WINDOW,
+        confirmations,
+      },
     },
   };
 }
@@ -970,14 +1033,45 @@ export function evaluate(
   let working = state;
 
   // 2. Accuracy drop (intervention). Always escalates to spoken,
-  // bypasses streak suppression.
-  const drop = detectAccuracyDrop(ctx.window);
-  if (drop && passesAllGates(working, drop.scenario, drop.tier, ctx.now)) {
-    return commit(
-      working,
-      ctx.now,
-      applyFirstBeatsRule(toEvent(drop, ctx.bpm), ctx),
-    );
+  // bypasses streak suppression. Requires
+  // `ACCURACY_DROP_CONFIRMATIONS` consecutive detections before
+  // emitting — see the `probeAccuracyDrop` docstring. Both branches
+  // (drop / clean) update `accuracyDropConfirmations`; only a
+  // confirmed drop also commits an event.
+  const dropProbe = probeAccuracyDrop(working, ctx.window);
+  if (dropProbe.kind === "drop") {
+    if (dropProbe.confirmations < ACCURACY_DROP_CONFIRMATIONS) {
+      // Sub-threshold: persist the bumped counter so the next
+      // detection can escalate, but emit nothing.
+      working = {
+        ...working,
+        accuracyDropConfirmations: dropProbe.confirmations,
+      };
+    } else {
+      // Confirmed: reset the counter so the next firing has to
+      // re-confirm from zero, then run the normal commit path.
+      working = { ...working, accuracyDropConfirmations: 0 };
+      if (
+        passesAllGates(
+          working,
+          dropProbe.detection.scenario,
+          dropProbe.detection.tier,
+          ctx.now,
+        )
+      ) {
+        return commit(
+          working,
+          ctx.now,
+          applyFirstBeatsRule(toEvent(dropProbe.detection, ctx.bpm), ctx),
+        );
+      }
+    }
+  } else if (working.accuracyDropConfirmations > 0) {
+    // Clean window after a pending drop wipes the confirmation
+    // counter — the player recovered, so we don't want a later
+    // unrelated dip to inherit the half-count and fire on first
+    // contact.
+    working = { ...working, accuracyDropConfirmations: 0 };
   }
 
   // 3. Personal best streak — always speakable.

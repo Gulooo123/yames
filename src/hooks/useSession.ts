@@ -55,7 +55,7 @@ import {
   type InterventionRateState,
   type SelectedIntervention,
 } from "../coach/interventions";
-import { accuracyPct, accuracyRatio, computeLegacyScore, gradeForScore, rescoreReport, scoredBeats } from "../coach/reportStats";
+import { accuracyPct, accuracyRatio, commentForScore, computeLegacyScore, gradeForScore, rescoreReport, scoredBeats } from "../coach/reportStats";
 import { createSessionToken } from "../coach/sessionGuard";
 import { coachDebug } from "../coach/debug";
 
@@ -732,6 +732,40 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         // drop to 140?") and shouldn't be paraphrased away. The
         // gatekeeper's template still drives non-intervention events.
         let comment = intervention ? intervention.text : template;
+        // First-event grace window: if the coach model is still loading
+        // when an event fires, hold for up to 1 second so the rephrase
+        // path can run instead of shipping the raw template. After 1s
+        // we fall through and the player sees the template-only copy —
+        // better than waiting indefinitely and silencing real-time
+        // feedback. Only matters for non-intervention events because
+        // interventions use their own catalog text verbatim.
+        if (!intervention && !coachLoadedRef.current) {
+          const COACH_LOAD_GRACE_MS = 1000;
+          const POLL_MS = 50;
+          const start = Date.now();
+          while (
+            !coachLoadedRef.current &&
+            Date.now() - start < COACH_LOAD_GRACE_MS
+          ) {
+            await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+            if (token.isStaleOrInactive()) {
+              coachDebug("realtime-tip.discard-during-coach-wait", {
+                waitedMs: Date.now() - start,
+              });
+              return;
+            }
+          }
+          if (!coachLoadedRef.current) {
+            coachDebug("realtime-tip.coach-load-grace-expired", {
+              waitedMs: Date.now() - start,
+              scenario: event.scenario,
+            });
+          } else {
+            coachDebug("realtime-tip.coach-loaded-after-wait", {
+              waitedMs: Date.now() - start,
+            });
+          }
+        }
         if (!intervention && coachLoadedRef.current) {
           try {
             const narrativeBlock = narrativeRef.current
@@ -743,6 +777,13 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
               context: event.context,
               instrumentLabel: instrumentLabelRef.current,
               narrativeBlock,
+              // Feed the LLM the last 3 things it just said so we get
+              // anti-repetition pressure even when the shuffle bag's
+              // similarity ring failed to keep tonally-distinct phrasings.
+              // The shuffle ring captures both template picks AND prior
+              // rephrases (see `recordUtterance` call below), so this is
+              // genuinely "what the user just heard."
+              recentUtterances: shuffleStateRef.current.ring.slice(-3),
             });
             const rephrased = await coachGenerate(llmPrompt);
             if (rephrased && rephrased.trim()) {
@@ -2115,7 +2156,23 @@ function aggregateReports(reports: SessionReport[]): SessionReport {
     meanAmplitude: meanAmp,
     tempoStabilityMs: tempoStability,
     longestStreak,
-    comment: `${reports.length} segments played`,
+    // Grade-band one-liner (matches Rust `generate_comment` so the
+    // multi-segment path doesn't visibly change tone from a single
+    // segment). The narrative card below this comment carries the
+    // shape-aware "what does the score actually mean" framing; the
+    // segment count is appended as a small contextual suffix instead
+    // of being the entire comment as it was before.
+    comment: reports.length > 1
+      ? `${commentForScore(score, hitsCount + missCount)} (${reports.length} segments)`
+      : commentForScore(score, hitsCount + missCount),
+    // Insights stay empty: the `SessionNarrativeView` rendered on top
+    // of this report now produces the contextual interpretation that
+    // the rule-based insights used to provide, and the rule-based
+    // insights themselves (Rust `generate_insights`) operate on the
+    // per-segment level — running them on the aggregate would produce
+    // double-counted or misleading observations (e.g. "you rushed by
+    // 5ms" computed from a mean that cancelled segments where you
+    // dragged). The narrative is the right home for aggregate prose.
     insights: [],
     gridCorrelation: allGridCorrelations.length > 0
       ? allGridCorrelations.reduce((a, b) => a + b, 0) / allGridCorrelations.length
@@ -2190,16 +2247,53 @@ function buildRephrasePrompt(args: {
   context?: Record<string, number | string | boolean>;
   instrumentLabel: string;
   narrativeBlock: string;
+  /**
+   * The newest-last list of the most recent utterances the coach has
+   * shipped this session (across all scenarios). Passed straight to
+   * the LLM as an "avoid these phrasings" block so the model can
+   * actively diverge from anything it (or the template fallback)
+   * just emitted — addresses player feedback that even when the LLM
+   * does run, it tends to settle into the same paraphrases. The
+   * caller should pass at most ~3 entries; the prompt is short
+   * enough that more dilutes the rephrase task.
+   */
+  recentUtterances?: string[];
 }): string {
-  return [
+  // 2026-05-18 — prompt was loosened from
+  //
+  //     "Preserve EVERY number from the original exactly. DO NOT invent
+  //      new percentages, facts, or advice. If you cannot rephrase
+  //      while preserving every number, return the original verbatim."
+  //
+  // That phrasing was so strict the model often returned the original
+  // verbatim, producing the "I keep getting the same sentences"
+  // feedback. The numbers DO need to be preserved (mid-session tips
+  // refer to "20ms behind" or "85% accuracy" — paraphrasing those
+  // would silently mislead the player), but the rest of the sentence
+  // should breathe. The new copy locks the numbers AND
+  // instrument-specific words (so "snare" doesn't become "drum"),
+  // explicitly invites variation in structure / length / tone, and —
+  // critically — passes the last few utterances so the model has
+  // concrete anti-repetition pressure.
+  const lines: string[] = [
     `Rephrase this practice-coach observation for a player of ${args.instrumentLabel}.`,
     `Scenario: ${args.scenario}. Keep it 1 sentence, conversational, instrument-appropriate.`,
-    `Preserve EVERY number from the original exactly. DO NOT invent new percentages, facts, or advice.`,
-    `If you cannot rephrase while preserving every number, return the original verbatim.`,
-    ``,
-    `Original: "${args.template}"`,
-    args.narrativeBlock,
-  ].join("\n");
+    `Keep all numbers and instrument-specific words. Otherwise rewrite freely in your own voice — vary sentence structure, length, and tone. Do NOT invent new facts or percentages.`,
+  ];
+  // Anti-repetition block: only inject when we actually have prior
+  // utterances to avoid, otherwise the model would interpret an
+  // empty "avoid these" list as a no-op suggestion to repeat itself.
+  if (args.recentUtterances && args.recentUtterances.length > 0) {
+    lines.push(``);
+    lines.push(`Avoid these phrasings you just used (do not echo them):`);
+    for (const u of args.recentUtterances) {
+      lines.push(`- "${u}"`);
+    }
+  }
+  lines.push(``);
+  lines.push(`Original: "${args.template}"`);
+  lines.push(args.narrativeBlock);
+  return lines.join("\n");
 }
 
 /** Format context for the coach model to make an adaptive drill decision. */

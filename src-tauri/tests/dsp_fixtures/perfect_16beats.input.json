@@ -1,0 +1,22 @@
+{
+  "name": "perfect 16 beats",
+  "description": "Sixteen feedbacks all classified `perfect` with deviation 0 and amplitude 0.5. The reference 'best case' — any drop in score on this fixture means a serious formula regression.",
+  "feedbacks": [
+    {"beatIndex": 0,  "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 1,  "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 2,  "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 3,  "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 4,  "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 5,  "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 6,  "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 7,  "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 8,  "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 9,  "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 10, "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 11, "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 12, "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 13, "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 14, "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0},
+    {"beatIndex": 15, "deviationMs": 0.0, "intervalErrorMs": 0.0, "classification": "perfect", "amplitude": 0.5, "calibrationOffsetMs": 0.0, "calibrationConfidence": 1.0, "gridCorrelation": 1.0}
+  ]
+}

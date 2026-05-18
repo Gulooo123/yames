@@ -52,7 +52,13 @@ pub struct BeatTick {
 }
 
 /// Feedback for a single beat after matching with an onset.
-#[derive(Debug, Clone, serde::Serialize)]
+///
+/// `Deserialize` is derived so this type can round-trip through the
+/// JSON fixture format used by `tests/dsp_fixtures.rs`. The fixture
+/// suite captures real or synthetic streams of `BeatFeedback` and
+/// replays them through `SessionAccumulator::report()` to detect
+/// scoring regressions in DSP refactors.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BeatFeedback {
     /// Which beat this feedback is for
     #[serde(rename = "beatIndex")]

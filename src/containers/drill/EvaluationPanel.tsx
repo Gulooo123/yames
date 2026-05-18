@@ -4,6 +4,7 @@ import { FEEDBACK_COLORS } from "../../hooks/useEvaluation";
 import { ScoreRing, BreakdownBar, Histogram, ScoreBadge, MiniSparkline } from "./evaluation";
 import type { SessionReport, SavedSession } from "../../types";
 import { accuracyPct, rescoreReport, scoredBeats } from "../../coach/reportStats";
+import { SessionNarrativeView } from "../../coach/SessionNarrativeView";
 import "../../styles/evaluation-panel.css";
 
 /**
@@ -269,6 +270,16 @@ function ReportDetail({
         <div className="eval-comment">{report.comment}</div>
       </div>
 
+      {/*
+        Narrative sits between the ring and the rule-based insights so
+        the user reads the *interpretation* of their score before the
+        raw rule fires. A 65 might be "tight but scattered" or "loose
+        but accurate" — the narrative makes that distinction visible
+        instead of leaving the user to derive it from the stats grid.
+        Shared component with `CoachSessionDetail.tsx`.
+      */}
+      <SessionNarrativeView report={report} />
+
       {report.insights.length > 0 && (
         <div className="eval-insights">
           {report.insights.map((insight, i) => (
@@ -305,11 +316,14 @@ function ReportDetail({
           <span className="eval-stat-value">{hitRate}%</span>
         </div>
         <div className="eval-stat-row">
-          <span className="eval-stat-label">Avg deviation</span>
-          <span className="eval-stat-value">
-            {report.meanDeviationMs >= 0 ? "+" : ""}
-            {report.meanDeviationMs.toFixed(1)}ms
-          </span>
+          {/*
+            "Avg timing error" uses the MAGNITUDE (meanAbsDeviationMs) — the
+            signed mean (meanDeviationMs) cancels to ~0 when early/late
+            errors are balanced and was producing the misleading "+0.0 ms"
+            on sloppy sessions. Bias direction lives in the narrative.
+          */}
+          <span className="eval-stat-label">Avg timing error</span>
+          <span className="eval-stat-value">{"\u00B1"}{report.meanAbsDeviationMs.toFixed(1)}ms</span>
         </div>
         <div className="eval-stat-row">
           <span className="eval-stat-label">Consistency</span>

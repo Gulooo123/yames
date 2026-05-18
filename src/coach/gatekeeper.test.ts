@@ -11,6 +11,7 @@
 import { describe, it, expect } from "vitest";
 import type { BeatFeedback } from "../types";
 import {
+  ACCURACY_DROP_CONFIRMATIONS,
   ACCURACY_DROP_WINDOW,
   BURST_LONG_MAX,
   BURST_LONG_PENALTY_MS,
@@ -164,23 +165,54 @@ describe("isAlwaysSpoken", () => {
 // ---------------------------------------------------------------------------
 
 describe("evaluate — accuracy_drop", () => {
-  it("fires when recent hit rate drops by ≥20% vs prior window", () => {
-    const state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
-    const window = [
+  // Helper: a window with a 25%+ drop between prior (clean) and
+  // recent (sloppy) halves. Used by every "real drop" test below so
+  // the delta math doesn't drift across cases.
+  function dropWindow(): BeatFeedback[] {
+    return [
       ...manyHits(ACCURACY_DROP_WINDOW), // prior: 100%
-      ...manyMisses(10), // recent: 10 misses + 6 hits = ~37%
+      ...manyMisses(10), // recent: 10 misses + 6 hits = ~37% → 63% delta
       ...manyHits(ACCURACY_DROP_WINDOW - 10),
     ];
+  }
+
+  it("does NOT fire on first detection — drop must be confirmed", () => {
+    // A 25% drop on a single 16-beat slice is a stumble, not a slip.
+    // The detector should bump the confirmation counter but emit
+    // nothing. The corresponding "fires after confirmation" test
+    // below verifies that the next consecutive detection escalates.
+    const state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
+    const { event, state: next } = evaluate(state, {
+      now: T0 + 30_000,
+      bpm: 120,
+      window: dropWindow(),
+    });
+    expect(event).toBeNull();
+    expect(next.accuracyDropConfirmations).toBe(1);
+    expect(ACCURACY_DROP_CONFIRMATIONS).toBeGreaterThanOrEqual(2);
+  });
+
+  it("fires once the drop is confirmed on the next evaluation", () => {
+    // First evaluation primes the counter; second confirms and emits.
+    let state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
+    const window = dropWindow();
     expect(window.length).toBe(ACCURACY_DROP_WINDOW * 2);
-    // Allow enough session time to pass spoken cooldown.
-    const { event } = evaluate(state, {
+    state = evaluate(state, {
       now: T0 + 30_000,
       bpm: 120,
       window,
+    }).state;
+    const second = evaluate(state, {
+      now: T0 + 31_000,
+      bpm: 120,
+      window,
     });
-    expect(event).not.toBeNull();
-    expect(event!.scenario).toBe("accuracy_drop");
-    expect(event!.tier).toBe("spoken");
+    expect(second.event).not.toBeNull();
+    expect(second.event!.scenario).toBe("accuracy_drop");
+    expect(second.event!.tier).toBe("spoken");
+    // Counter must reset after the confirmed emit so a later
+    // unrelated dip has to re-confirm from zero.
+    expect(second.state.accuracyDropConfirmations).toBe(0);
   });
 
   it("does NOT fire when accuracy is steady", () => {
@@ -194,21 +226,52 @@ describe("evaluate — accuracy_drop", () => {
     expect(event).toBeNull();
   });
 
+  it("resets the confirmation counter when a non-drop evaluation runs between dips", () => {
+    // First drop bumps the counter to 1. A clean window comes in —
+    // counter resets. The next drop is treated as a fresh first
+    // detection and must NOT fire.
+    let state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
+    state = evaluate(state, {
+      now: T0 + 30_000,
+      bpm: 120,
+      window: dropWindow(),
+    }).state;
+    expect(state.accuracyDropConfirmations).toBe(1);
+
+    state = evaluate(state, {
+      now: T0 + 31_000,
+      bpm: 120,
+      window: manyHits(ACCURACY_DROP_WINDOW * 2), // clean
+    }).state;
+    expect(state.accuracyDropConfirmations).toBe(0);
+
+    const third = evaluate(state, {
+      now: T0 + 32_000,
+      bpm: 120,
+      window: dropWindow(),
+    });
+    expect(third.event).toBeNull();
+    expect(third.state.accuracyDropConfirmations).toBe(1);
+  });
+
   it("does NOT fire while inside the spoken cooldown window", () => {
-    const state = {
+    // Two consecutive drops would normally escalate, but the spoken
+    // cooldown still gates the final commit.
+    let state = {
       ...createGatekeeper(T0),
       lastSpokenMs: T0 + 25_000, // just spoke 5s ago at the 30s mark
     };
-    const window = [
-      ...manyHits(ACCURACY_DROP_WINDOW),
-      ...manyMisses(ACCURACY_DROP_WINDOW),
-    ];
-    const { event } = evaluate(state, {
+    state = evaluate(state, {
       now: T0 + 30_000,
       bpm: 120,
-      window,
+      window: dropWindow(),
+    }).state;
+    const second = evaluate(state, {
+      now: T0 + 30_500,
+      bpm: 120,
+      window: dropWindow(),
     });
-    expect(event).toBeNull();
+    expect(second.event).toBeNull();
   });
 
   // Regression — v0.9: the gatekeeper was firing
@@ -223,12 +286,19 @@ describe("evaluate — accuracy_drop", () => {
       ...manyHits(ACCURACY_DROP_WINDOW), // prior: 100% hits
       ...manySkipped(ACCURACY_DROP_WINDOW), // recent: nobody home
     ];
-    const { event } = evaluate(state, {
+    const first = evaluate(state, {
       now: T0 + 30_000,
       bpm: 120,
       window,
     });
-    expect(event).toBeNull();
+    expect(first.event).toBeNull();
+    expect(first.state.accuracyDropConfirmations).toBe(0);
+    const second = evaluate(first.state, {
+      now: T0 + 31_000,
+      bpm: 120,
+      window,
+    });
+    expect(second.event).toBeNull();
   });
 
   it("does NOT fire when the recent window has too few attempts to be meaningful", () => {
@@ -244,12 +314,18 @@ describe("evaluate — accuracy_drop", () => {
       ...manyHits(ACCURACY_DROP_WINDOW),
       ...recent,
     ];
-    const { event } = evaluate(state, {
+    const first = evaluate(state, {
       now: T0 + 30_000,
       bpm: 120,
       window,
     });
-    expect(event).toBeNull();
+    expect(first.event).toBeNull();
+    const second = evaluate(first.state, {
+      now: T0 + 31_000,
+      bpm: 120,
+      window,
+    });
+    expect(second.event).toBeNull();
   });
 });
 
@@ -638,13 +714,22 @@ describe("isFirstBeatsExempt", () => {
 
 describe("evaluate — first-4-beats TTS hard rule", () => {
   it("demotes spoken accuracy_drop to written during first 4 beats", () => {
-    const state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
+    // First pass primes the confirmation counter; second pass
+    // produces the event we actually assert on. Both passes use
+    // beatsInSegment under the floor so the final tier is written.
+    let state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
     const window = [
       ...manyHits(ACCURACY_DROP_WINDOW),
       ...manyMisses(ACCURACY_DROP_WINDOW),
     ];
-    const { event } = evaluate(state, {
+    state = evaluate(state, {
       now: T0 + 30_000,
+      bpm: 120,
+      window,
+      beatsInSegment: 2,
+    }).state;
+    const { event } = evaluate(state, {
+      now: T0 + 30_500,
       bpm: 120,
       window,
       beatsInSegment: 2,
@@ -654,13 +739,19 @@ describe("evaluate — first-4-beats TTS hard rule", () => {
   });
 
   it("speaks once the segment has crossed the FIRST_BEATS_TTS_FLOOR", () => {
-    const state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
+    let state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
     const window = [
       ...manyHits(ACCURACY_DROP_WINDOW),
       ...manyMisses(ACCURACY_DROP_WINDOW),
     ];
-    const { event } = evaluate(state, {
+    state = evaluate(state, {
       now: T0 + 30_000,
+      bpm: 120,
+      window,
+      beatsInSegment: FIRST_BEATS_TTS_FLOOR,
+    }).state;
+    const { event } = evaluate(state, {
+      now: T0 + 30_500,
       bpm: 120,
       window,
       beatsInSegment: FIRST_BEATS_TTS_FLOOR,
@@ -702,13 +793,20 @@ describe("evaluate — first-4-beats TTS hard rule", () => {
   });
 
   it("rule is bypassed when beatsInSegment is omitted (legacy callers)", () => {
-    const state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
+    // Confirmation gate still applies — first pass primes the
+    // counter, second pass produces the spoken event we assert on.
+    let state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
     const window = [
       ...manyHits(ACCURACY_DROP_WINDOW),
       ...manyMisses(ACCURACY_DROP_WINDOW),
     ];
-    const { event } = evaluate(state, {
+    state = evaluate(state, {
       now: T0 + 30_000,
+      bpm: 120,
+      window,
+    }).state;
+    const { event } = evaluate(state, {
+      now: T0 + 30_500,
       bpm: 120,
       window,
     });
@@ -858,13 +956,20 @@ describe("evaluate — warmup grace", () => {
   });
 
   it("allows non-always-spoken scenarios once warmup has elapsed", () => {
-    const state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
+    // Warmup also has to clear the confirmation gate — two
+    // consecutive drops well past warmup before accuracy_drop fires.
+    let state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
     const window = [
       ...manyHits(ACCURACY_DROP_WINDOW),
       ...manyMisses(ACCURACY_DROP_WINDOW),
     ];
+    state = evaluate(state, {
+      now: T0 + WARMUP_GRACE_MS + 30_000,
+      bpm: 120,
+      window,
+    }).state;
     const { event } = evaluate(state, {
-      now: T0 + WARMUP_GRACE_MS + 30_000, // well past warmup and past spoken cooldown
+      now: T0 + WARMUP_GRACE_MS + 30_500,
       bpm: 120,
       window,
     });
@@ -1011,13 +1116,21 @@ describe("evaluate — burst limiter", () => {
   it("allows events again once BURST_SHORT_PENALTY_MS has elapsed", () => {
     const lastFire = T0 + 60_000;
     const recentFires = [lastFire - 20_000, lastFire - 10_000, lastFire];
-    const state = seedFires(createGatekeeper(T0), recentFires);
+    let state = seedFires(createGatekeeper(T0), recentFires);
     const window = [
       ...manyHits(ACCURACY_DROP_WINDOW),
       ...manyMisses(ACCURACY_DROP_WINDOW),
     ];
-    const r = evaluate(state, {
+    // Accuracy_drop now needs two consecutive detections — the burst
+    // limiter is what we're testing, not the confirmation gate, so
+    // prime the counter with a first pass then confirm.
+    state = evaluate(state, {
       now: lastFire + BURST_SHORT_PENALTY_MS + 1_000,
+      bpm: 120,
+      window,
+    }).state;
+    const r = evaluate(state, {
+      now: lastFire + BURST_SHORT_PENALTY_MS + 1_500,
       bpm: 120,
       window,
     });
@@ -1118,14 +1231,21 @@ describe("evaluate — burst limiter", () => {
 
 describe("evaluate — repetition suppression", () => {
   it("blocks the same non-always-spoken scenario from firing twice in a row", () => {
-    // Fire accuracy_drop once.
+    // Fire accuracy_drop once. Confirmation gate now requires two
+    // consecutive detections, so we prime with one pass then commit
+    // on the second before the repetition gate gets exercised.
     let state = { ...createGatekeeper(T0), bestStreak: HIGH_PB };
     const window = [
       ...manyHits(ACCURACY_DROP_WINDOW),
       ...manyMisses(ACCURACY_DROP_WINDOW),
     ];
-    const r1 = evaluate(state, {
+    state = evaluate(state, {
       now: T0 + 30_000,
+      bpm: 120,
+      window,
+    }).state;
+    const r1 = evaluate(state, {
+      now: T0 + 30_500,
       bpm: 120,
       window,
     });
@@ -1136,10 +1256,16 @@ describe("evaluate — repetition suppression", () => {
     ]);
 
     // Try to fire accuracy_drop again at a time that would pass the
-    // spoken cooldown. Repetition gate should swallow it (same
-    // scenario + same tier as the immediately previous fire).
-    const r2 = evaluate(state, {
+    // spoken cooldown. Two passes again to clear confirmation; the
+    // repetition gate (same scenario + same tier) is what should
+    // swallow the second commit.
+    state = evaluate(state, {
       now: T0 + 30_000 + SPOKEN_COOLDOWN_CEILING_MS + 1_000,
+      bpm: 120,
+      window,
+    }).state;
+    const r2 = evaluate(state, {
+      now: T0 + 30_000 + SPOKEN_COOLDOWN_CEILING_MS + 1_500,
       bpm: 120,
       window,
     });
@@ -1152,8 +1278,13 @@ describe("evaluate — repetition suppression", () => {
       ...manyHits(ACCURACY_DROP_WINDOW),
       ...manyMisses(ACCURACY_DROP_WINDOW),
     ];
-    const r1 = evaluate(state, {
+    state = evaluate(state, {
       now: T0 + 30_000,
+      bpm: 120,
+      window: dropWindow,
+    }).state;
+    const r1 = evaluate(state, {
+      now: T0 + 30_500,
       bpm: 120,
       window: dropWindow,
     });

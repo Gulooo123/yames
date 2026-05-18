@@ -16,6 +16,30 @@ pub const VOICES: &[(&str, &str)] = &[
     ("ryan", "Ryan"),       // Male, deeper
 ];
 
+/// Map a Piper voice id to the closest macOS `say` voice for the
+/// fallback path (used when Piper isn't installed or the model file is
+/// missing). Picking by gender/timbre approximation:
+///
+///   * `lessac` / `amy`  — female US voices in Piper, map to common
+///     female system voices ("Samantha" / "Allison") that ship by
+///     default on macOS.
+///   * `ryan` — male US voice in Piper, maps to a male system voice
+///     ("Tom"). "Alex" is more famous but has been deprecated on
+///     recent macOS; "Tom" is the safer "available everywhere" pick.
+///
+/// Returns `None` for unknown ids so `speak_fallback` can omit the
+/// `-v` flag entirely (lets `say` use the system default). The mapping
+/// is pure and lives outside `TtsEngine` so it's covered by unit tests
+/// without spinning up subprocesses.
+pub fn piper_voice_to_say_voice(voice: &str) -> Option<&'static str> {
+    match voice {
+        "lessac" => Some("Samantha"),
+        "amy" => Some("Allison"),
+        "ryan" => Some("Tom"),
+        _ => None,
+    }
+}
+
 /// Shared TTS engine state.
 pub type SharedTts = Arc<Mutex<TtsEngine>>;
 
@@ -212,9 +236,17 @@ impl TtsEngine {
         // backend. ~100ms is close enough that the UI swap reads as
         // simultaneous with the first audible sample.
         on_ready_to_play();
-        let result = Command::new("say")
-            .arg("-r")
-            .arg("175")
+        // Map the selected Piper voice to a macOS `say` voice so the
+        // user's settings-page choice actually changes what they hear
+        // when Piper isn't installed. Without this, every fallback
+        // call used the system default voice regardless of UI state
+        // (the original "voice change doesn't work" bug).
+        let mut cmd = Command::new("say");
+        cmd.arg("-r").arg("175");
+        if let Some(say_voice) = piper_voice_to_say_voice(&self.voice) {
+            cmd.arg("-v").arg(say_voice);
+        }
+        let result = cmd
             .arg(text)
             .output()
             .map_err(|e| format!("TTS failed: {e}"));
@@ -328,6 +360,46 @@ pub fn dim_exit(dim: &mut TtsDimState) -> Option<f32> {
 pub fn dim_user_set(dim: &mut TtsDimState, new_volume: f32) {
     if dim.active_count > 0 {
         dim.original_volume = Some(new_volume);
+    }
+}
+
+#[cfg(test)]
+mod tts_voice_tests {
+    use super::*;
+
+    #[test]
+    fn each_piper_voice_maps_to_a_say_voice() {
+        // Every voice id in the public VOICES catalog MUST have a
+        // fallback mapping — otherwise the user picks "Ryan" in
+        // Settings, Piper isn't installed, and `say` silently uses the
+        // system default (the bug this regression test pins).
+        for (id, _name) in VOICES {
+            assert!(
+                piper_voice_to_say_voice(id).is_some(),
+                "voice '{id}' has no `say` mapping — fallback would use system default",
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_voice_returns_none() {
+        // Unknown ids fall through to the default `say` voice (no -v
+        // flag emitted) rather than mapping to a bogus name.
+        assert_eq!(piper_voice_to_say_voice("not-a-voice"), None);
+        assert_eq!(piper_voice_to_say_voice(""), None);
+    }
+
+    #[test]
+    fn ryan_and_lessac_map_to_different_voices() {
+        // The whole point of the fix: switching from one Piper voice
+        // to another must produce a different `say` voice in the
+        // fallback path, so the user actually hears the change.
+        let lessac = piper_voice_to_say_voice("lessac").unwrap();
+        let ryan = piper_voice_to_say_voice("ryan").unwrap();
+        assert_ne!(
+            lessac, ryan,
+            "lessac and ryan must map to distinct system voices",
+        );
     }
 }
 

@@ -940,13 +940,19 @@ pub async fn stop_evaluation(
     // `TimingAnalyzer::drain_telemetry()` requires the analyzer to be
     // stopped for that race-free guarantee; `start()` resets the
     // buffer for the next session.
-    let telemetry = {
+    let mut telemetry = {
         let mut ta = timing_analyzer
             .lock()
             .map_err(|e| format!("Lock failed: {e}"))?;
         ta.stop();
         ta.drain_telemetry()
     };
+    // Drain per-second input-level snapshots BEFORE stop() so we get
+    // the live atomic view; stop() then drops the cpal stream.
+    {
+        let ai = audio_input.lock().map_err(|e| format!("Lock failed: {e}"))?;
+        telemetry.audio_levels = ai.take_audio_levels();
+    }
     audio_input.lock().map_err(|e| format!("Lock failed: {e}"))?.stop();
 
     // D1 — persist a diagnostic session log. Best-effort: failures here

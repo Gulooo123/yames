@@ -128,9 +128,12 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
       await stopEvaluation();
       await startEvaluation(deviceName || undefined);
     }
-    // Restore saved gain for new device
+    // Restore saved gain for new device. Default to the same +20 dB baseline
+    // we use on first mount — anything else creates an inconsistency where
+    // switching devices silently drops your gain to 0 dB even though a
+    // brand-new device starts at +20.
     const savedGain = await storeLoad<number>(`inputGain_${deviceName || "__default"}`);
-    const gain = savedGain ?? 0;
+    const gain = savedGain ?? 20;
     setInputGainDb(gain);
     setInputGain(gain);
     // Reset recording state on device change

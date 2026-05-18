@@ -9,6 +9,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::session_audio::{self, SessionAudioRecorder};
+use crate::session_log::AudioLevelSnapshot;
 
 /// Module-local dev-only logger. Expands to `println!` in debug builds
 /// (cargo run, vitest harness, tauri dev) and to nothing in release
@@ -108,6 +109,12 @@ pub struct AudioInput {
     // `commands::persist_session_log` can pair the WAV with the JSON log.
     session_recorder: Arc<Mutex<Option<SessionAudioRecorder>>>,
     last_session_audio_path: Arc<Mutex<Option<PathBuf>>>,
+    /// Per-second input level snapshots, written by the cpal callback
+    /// and drained at session stop into the diagnostic log. Critical
+    /// for debugging "stream went silent mid-session" regressions when
+    /// the paired WAV itself is unreliable (the WAV writer suffers the
+    /// same stall as the DSP would).
+    audio_levels: Arc<Mutex<Vec<AudioLevelSnapshot>>>,
 }
 
 // Safety: AudioInput doesn't hold cpal::Stream — it lives on its own thread.
@@ -130,6 +137,7 @@ impl AudioInput {
             input_gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             session_recorder: Arc::new(Mutex::new(None)),
             last_session_audio_path: Arc::new(Mutex::new(None)),
+            audio_levels: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -227,6 +235,13 @@ impl AudioInput {
             }
         }
 
+        // Reset the per-session audio-level buffer so a new session
+        // doesn't inherit the previous session's snapshots.
+        {
+            let mut levels = self.audio_levels.lock().unwrap();
+            levels.clear();
+        }
+
         let alive = self.alive.clone();
         alive.store(true, Ordering::SeqCst);
         let ring = self.ring.clone();
@@ -234,7 +249,9 @@ impl AudioInput {
         let recording_buf = self.recording_buf.clone();
         let input_gain = self.input_gain.clone();
         let self_session_recorder = self.session_recorder.clone();
+        let audio_levels_cb = self.audio_levels.clone();
         let sample_rate = sr;
+        let session_start_instant = std::time::Instant::now();
         let device_name_owned = device.name().unwrap_or_default();
 
         self.capture_thread = Some(thread::spawn(move || {
@@ -260,6 +277,46 @@ impl AudioInput {
             let max_recording_samples = sample_rate as usize * 10; // 10 second max
 
             let session_rec_cb = self_session_recorder.clone();
+
+            // Per-second audio-level accumulator. Reset every time we
+            // emit a snapshot. The accumulator runs on the cpal thread
+            // (single-writer) so plain locals are fine.
+            //
+            // We close over `audio_levels_cb` to push completed snapshots
+            // out via try_lock (drop-on-contention, same pattern as the
+            // other shared mutexes — losing a snapshot is acceptable).
+            struct LevelAcc {
+                peak: f32,
+                sum_abs: f32,
+                frames: u32,
+            }
+            impl LevelAcc {
+                fn new() -> Self {
+                    Self { peak: 0.0, sum_abs: 0.0, frames: 0 }
+                }
+                fn observe(&mut self, samples: &[f32]) {
+                    for &s in samples {
+                        let a = s.abs();
+                        if a > self.peak { self.peak = a; }
+                        self.sum_abs += a;
+                    }
+                    self.frames += samples.len() as u32;
+                }
+                fn drain(&mut self) -> (f32, f32, u32) {
+                    let peak = self.peak;
+                    let mean = if self.frames > 0 {
+                        self.sum_abs / self.frames as f32
+                    } else {
+                        0.0
+                    };
+                    let frames = self.frames;
+                    self.peak = 0.0;
+                    self.sum_abs = 0.0;
+                    self.frames = 0;
+                    (peak, mean, frames)
+                }
+            }
+
             let stream_result = match sample_format {
                 SampleFormat::F32 => {
                     let is_rec = is_recording_cb.clone();
@@ -267,6 +324,10 @@ impl AudioInput {
                     let max_rec = max_recording_samples;
                     let gain = input_gain.clone();
                     let session_rec = session_rec_cb.clone();
+                    let levels_out = audio_levels_cb.clone();
+                    let start = session_start_instant;
+                    let sr_frames = sample_rate;
+                    let mut level_acc = LevelAcc::new();
                     device.build_input_stream(
                     &config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -290,8 +351,22 @@ impl AudioInput {
                                 let _ = rec.push_samples(&mono);
                             }
                         }
+                        // Per-second level snapshot — observable evidence
+                        // for "WAV went silent" regressions. Once we've
+                        // accumulated a full second of frames, push a
+                        // snapshot via try_lock; if contended (which
+                        // realistically only happens at session stop) we
+                        // drop the snapshot rather than block.
+                        level_acc.observe(&mono);
+                        if level_acc.frames >= sr_frames {
+                            let (peak, mean, frames) = level_acc.drain();
+                            let ts_ms = start.elapsed().as_millis() as u64;
+                            if let Ok(mut v) = levels_out.try_lock() {
+                                v.push(AudioLevelSnapshot { timestamp_ms: ts_ms, peak, mean, frames });
+                            }
+                        }
                     },
-                    |err| eprintln!("Audio input error: {}", err),
+                    |err| eprintln!("[audio_input] cpal stream error: {} — recovery path is print-only; subsequent silence in WAV / DSP may follow", err),
                     None,
                 )},
                 SampleFormat::I16 => {
@@ -300,6 +375,10 @@ impl AudioInput {
                     let max_rec = max_recording_samples;
                     let gain = input_gain.clone();
                     let session_rec = session_rec_cb.clone();
+                    let levels_out = audio_levels_cb.clone();
+                    let start = session_start_instant;
+                    let sr_frames = sample_rate;
+                    let mut level_acc = LevelAcc::new();
                     device.build_input_stream(
                     &config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
@@ -322,8 +401,16 @@ impl AudioInput {
                                 let _ = rec.push_samples(&mono);
                             }
                         }
+                        level_acc.observe(&mono);
+                        if level_acc.frames >= sr_frames {
+                            let (peak, mean, frames) = level_acc.drain();
+                            let ts_ms = start.elapsed().as_millis() as u64;
+                            if let Ok(mut v) = levels_out.try_lock() {
+                                v.push(AudioLevelSnapshot { timestamp_ms: ts_ms, peak, mean, frames });
+                            }
+                        }
                     },
-                    |err| eprintln!("Audio input error: {}", err),
+                    |err| eprintln!("[audio_input] cpal stream error: {} — recovery path is print-only; subsequent silence in WAV / DSP may follow", err),
                     None,
                 )},
                 _ => {
@@ -411,6 +498,16 @@ impl AudioInput {
     /// rename the partial WAV to match the JSON log's stem.
     pub fn take_last_session_audio_path(&self) -> Option<PathBuf> {
         self.last_session_audio_path.lock().unwrap().take()
+    }
+
+    /// Take ownership of all per-second input-level snapshots accumulated
+    /// during the most recent capture. Drains the internal buffer so the
+    /// next session starts fresh even without an intervening `start()`.
+    /// Consumed by `commands::persist_session_log` and merged into the
+    /// diagnostic JSON's `audioLevels` field.
+    pub fn take_audio_levels(&self) -> Vec<AudioLevelSnapshot> {
+        let mut guard = self.audio_levels.lock().unwrap();
+        std::mem::take(&mut *guard)
     }
 
     // ─── Recording ──────────────────────────────────────────────────

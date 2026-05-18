@@ -85,6 +85,15 @@ pub struct SessionLog {
     /// Practice segments (D4 emits these; D1 reserves the field).
     pub segments: Vec<PracticeSegment>,
 
+    /// Per-second input-level snapshots from the cpal callback.
+    /// Empty for legacy logs (`#[serde(default)]` keeps deserialization
+    /// of pre-monitoring logs working). Populated during live sessions
+    /// to make stalled-stream / silent-input regressions debuggable from
+    /// the JSON alone — without needing the paired WAV (which itself can
+    /// go silent if the stream stalls).
+    #[serde(rename = "audioLevels", default)]
+    pub audio_levels: Vec<AudioLevelSnapshot>,
+
     /// Final aggregate report.
     pub report: SessionReport,
 }
@@ -189,6 +198,29 @@ pub struct ActivityTransition {
     pub timestamp_ms: u64,
     /// e.g. "idle→active", "active→resting". Free-form to keep D4 nimble.
     pub transition: String,
+}
+
+/// A one-second snapshot of cpal callback input levels.
+///
+/// Logged so that "the WAV went silent for 9 minutes while the DSP kept
+/// detecting onsets" regressions are debuggable without re-running the
+/// session. If `peak` drops to near-zero while `frames` keeps incrementing,
+/// the stream is alive but the input is silent (user muted their guitar
+/// or the interface disconnected). If `frames` stops incrementing, the
+/// cpal callback itself stalled (Core Audio xrun, device reroute, OS
+/// power management) and the WAV recorder genuinely lost data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioLevelSnapshot {
+    /// Wall-clock timestamp (ms since session start) when this window closed.
+    #[serde(rename = "timestampMs")]
+    pub timestamp_ms: u64,
+    /// Peak absolute sample value across the window. 0.0 = digital silence.
+    pub peak: f32,
+    /// Mean absolute sample value across the window (RMS-ish but cheap).
+    pub mean: f32,
+    /// Number of samples in this window. Below `sample_rate` means the
+    /// cpal callback fired less than expected — possible stall / xrun.
+    pub frames: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -770,6 +802,7 @@ pub fn build_log_from_raw(
         spurious_onsets: spurious,
         activity_transitions: Vec::new(),
         segments: Vec::new(),
+        audio_levels: Vec::new(),
         report,
     }
 }
@@ -807,6 +840,11 @@ pub struct SessionTelemetry {
     pub detected_onsets: Vec<DetectedOnset>,
     pub matches: Vec<MatchDecision>,
     pub spurious_onset_indices: Vec<u32>,
+    /// Per-second input level snapshots from the cpal callback. Drained
+    /// at session stop. Capped at `TELEMETRY_BUFFER_CAP` like the other
+    /// streams. A 50k cap = ~14 hours of monitoring, which is well past
+    /// any realistic session.
+    pub audio_levels: Vec<AudioLevelSnapshot>,
 }
 
 /// Hard cap on each telemetry stream. Beyond this we stop pushing
@@ -853,6 +891,14 @@ impl SessionTelemetry {
         }
         self.spurious_onset_indices.push(onset_idx);
     }
+
+    /// Append a per-second input level snapshot.
+    pub fn push_audio_level(&mut self, snap: AudioLevelSnapshot) {
+        if self.audio_levels.len() >= TELEMETRY_BUFFER_CAP {
+            return;
+        }
+        self.audio_levels.push(snap);
+    }
 }
 
 /// Build a `SessionLog` from accumulator state (final report + any
@@ -888,6 +934,7 @@ pub fn build_log_from_session(
         spurious_onsets: telemetry.spurious_onset_indices,
         activity_transitions: Vec::new(),
         segments,
+        audio_levels: telemetry.audio_levels,
         report,
     }
 }

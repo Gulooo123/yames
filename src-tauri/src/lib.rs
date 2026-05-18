@@ -8,11 +8,17 @@ mod instrument;
 mod midi;
 mod models;
 mod onset;
-mod session;
+// `session`, `session_log`, and `timing` are exposed `pub` so the
+// integration tests in `tests/dsp_fixtures.rs` can import
+// `score_feedbacks`, `BeatFeedback`, and `SessionReport` directly.
+// The crate's actual API surface is still defined by the Tauri command
+// handlers in `commands.rs` — these `pub` modules are an
+// implementation detail visible only to the test harness.
+pub mod session;
 mod session_audio;
-mod session_log;
+pub mod session_log;
 mod state;
-mod timing;
+pub mod timing;
 mod tts;
 
 use audio_input::create_shared_audio_input;
@@ -196,7 +202,31 @@ pub fn run() {
             let shared_tts = create_shared_tts();
             {
                 let models_dir = app.path().app_data_dir().unwrap().join("models");
-                shared_tts.lock().unwrap().set_models_dir(models_dir);
+                let mut engine = shared_tts.lock().unwrap();
+                engine.set_models_dir(models_dir);
+                // Restore the persisted voice + volume so the first
+                // `tts_speak` after launch reflects the user's saved
+                // choices. Without this the engine starts with the
+                // hardcoded "lessac" default and races the JS-side
+                // `useCoachDownload` mount — any early speech (a
+                // mini-report rephrase, a session-start greeting) would
+                // ship with the wrong voice if the JS load hadn't
+                // resolved yet. Mirrors the audioOutputDevice + MIDI
+                // restoration pattern used for the engine and listener
+                // above.
+                let store = app.store("settings.json")?;
+                if let Some(voice) = store
+                    .get("coachVoiceName")
+                    .and_then(|v| v.as_str().map(String::from))
+                {
+                    engine.set_voice(&voice);
+                }
+                if let Some(vol) = store
+                    .get("coachTtsVolume")
+                    .and_then(|v| v.as_f64())
+                {
+                    engine.set_volume(vol as f32);
+                }
             }
             app.manage(shared_tts);
             // Nested-dim counter shared by every `tts_speak` call so

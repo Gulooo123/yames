@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   accuracyPct,
   accuracyRatio,
+  commentForScore,
   computeLegacyScore,
   gradeForScore,
   scoredBeats,
@@ -203,5 +204,51 @@ describe("gradeForScore", () => {
     [0, "F"],
   ])("score %i → grade %s", (score, grade) => {
     expect(gradeForScore(score)).toBe(grade);
+  });
+});
+
+describe("commentForScore", () => {
+  // Strings mirror `session.rs::generate_comment` arm-for-arm; the
+  // multi-segment JS aggregator goes through this helper so the
+  // comment shape stays identical to a single-segment session that
+  // happened to land on the same score.
+
+  it("returns the 'not enough data' line below the scored-beats floor", () => {
+    expect(commentForScore(50, 7)).toMatch(/Not enough data/i);
+    expect(commentForScore(95, 0)).toMatch(/Not enough data/i);
+  });
+
+  it("returns the perfect line at score 100", () => {
+    expect(commentForScore(100, 50)).toMatch(/Flawless/i);
+  });
+
+  it("returns the near-perfect line for S-grade non-100", () => {
+    expect(commentForScore(96, 50)).toMatch(/near-perfect/i);
+  });
+
+  it.each([
+    [90, /Solid/i],         // A
+    [75, /Good work/i],     // B
+    [60, /foundation/i],    // C
+    [45, /Slow down/i],     // D
+    [20, /muscle memory/i], // F
+  ])("score %i returns grade-appropriate copy", (score, expected) => {
+    expect(commentForScore(score, 50)).toMatch(expected);
+  });
+
+  it("produces a distinct string for every grade band on a real-sized session", () => {
+    // Regression for the original bug: every multi-segment session
+    // produced the same `"N segments played"` regardless of score.
+    // The fix MUST emit visibly different comments across the bands.
+    const comments = new Set([
+      commentForScore(100, 50),
+      commentForScore(96, 50),
+      commentForScore(90, 50),
+      commentForScore(75, 50),
+      commentForScore(60, 50),
+      commentForScore(45, 50),
+      commentForScore(20, 50),
+    ]);
+    expect(comments.size).toBe(7);
   });
 });

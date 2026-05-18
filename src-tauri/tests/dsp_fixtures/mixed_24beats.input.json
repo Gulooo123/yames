@@ -1,0 +1,30 @@
+{
+  "name": "mixed quality 24 beats",
+  "description": "A realistic mid-session window: a mix of perfect/good/ok hits, a few misses, deviations spread across the classification bands. Exercises every branch of the scoring formula — drop in score on this fixture is the most likely place a scoring regression surfaces.",
+  "feedbacks": [
+    {"beatIndex": 0,  "deviationMs":  3.5, "intervalErrorMs":  1.2, "classification": "perfect", "amplitude": 0.62, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.85},
+    {"beatIndex": 1,  "deviationMs": -2.0, "intervalErrorMs":  3.5, "classification": "perfect", "amplitude": 0.58, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.85},
+    {"beatIndex": 2,  "deviationMs": 12.0, "intervalErrorMs":  4.0, "classification": "good",    "amplitude": 0.55, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.85},
+    {"beatIndex": 3,  "deviationMs":  4.8, "intervalErrorMs":  2.1, "classification": "perfect", "amplitude": 0.60, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.85},
+    {"beatIndex": 4,  "deviationMs": -8.0, "intervalErrorMs":  6.5, "classification": "perfect", "amplitude": 0.53, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.82},
+    {"beatIndex": 5,  "deviationMs": 22.0, "intervalErrorMs": 11.0, "classification": "good",    "amplitude": 0.49, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.80},
+    {"beatIndex": 6,  "deviationMs":  0.0, "intervalErrorMs":  0.0, "classification": "miss",    "amplitude": 0.0,  "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.0},
+    {"beatIndex": 7,  "deviationMs": -18.5,"intervalErrorMs":  9.0, "classification": "good",    "amplitude": 0.51, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.80},
+    {"beatIndex": 8,  "deviationMs":  6.2, "intervalErrorMs":  3.4, "classification": "perfect", "amplitude": 0.57, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.82},
+    {"beatIndex": 9,  "deviationMs":  1.0, "intervalErrorMs":  1.5, "classification": "perfect", "amplitude": 0.61, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.85},
+    {"beatIndex": 10, "deviationMs": 34.0, "intervalErrorMs": 14.0, "classification": "ok",      "amplitude": 0.42, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.70},
+    {"beatIndex": 11, "deviationMs":  0.0, "intervalErrorMs":  0.0, "classification": "miss",    "amplitude": 0.0,  "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.0},
+    {"beatIndex": 12, "deviationMs":-29.0, "intervalErrorMs": 12.0, "classification": "ok",      "amplitude": 0.44, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.72},
+    {"beatIndex": 13, "deviationMs":  5.0, "intervalErrorMs":  2.8, "classification": "perfect", "amplitude": 0.59, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.84},
+    {"beatIndex": 14, "deviationMs":-11.5, "intervalErrorMs":  5.5, "classification": "good",    "amplitude": 0.52, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.82},
+    {"beatIndex": 15, "deviationMs":  2.0, "intervalErrorMs":  1.0, "classification": "perfect", "amplitude": 0.60, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.85},
+    {"beatIndex": 16, "deviationMs":  9.0, "intervalErrorMs":  3.2, "classification": "perfect", "amplitude": 0.58, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.85},
+    {"beatIndex": 17, "deviationMs": 20.0, "intervalErrorMs":  8.0, "classification": "good",    "amplitude": 0.50, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.80},
+    {"beatIndex": 18, "deviationMs":  0.0, "intervalErrorMs":  0.0, "classification": "miss",    "amplitude": 0.0,  "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.0},
+    {"beatIndex": 19, "deviationMs":-15.0, "intervalErrorMs":  6.0, "classification": "good",    "amplitude": 0.53, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.82},
+    {"beatIndex": 20, "deviationMs":  4.0, "intervalErrorMs":  1.8, "classification": "perfect", "amplitude": 0.60, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.85},
+    {"beatIndex": 21, "deviationMs": 38.5, "intervalErrorMs": 18.0, "classification": "ok",      "amplitude": 0.40, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.68},
+    {"beatIndex": 22, "deviationMs":-3.0,  "intervalErrorMs":  1.4, "classification": "perfect", "amplitude": 0.61, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.85},
+    {"beatIndex": 23, "deviationMs": 14.0, "intervalErrorMs":  4.5, "classification": "good",    "amplitude": 0.55, "calibrationOffsetMs": 0.0, "calibrationConfidence": 0.9, "gridCorrelation": 0.83}
+  ]
+}

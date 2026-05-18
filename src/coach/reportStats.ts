@@ -134,6 +134,40 @@ export function gradeForScore(score: number): string {
 }
 
 /**
+ * Grade-band one-liner mirroring `session.rs::generate_comment` on the
+ * Rust side. The single-segment path emits this verbatim from Rust, but
+ * the JS multi-segment aggregator (`useSession::aggregateReports`) used
+ * to ship `"N segments played"` for every multi-segment session
+ * regardless of score — which left history cards reading like a beat
+ * count instead of a quality summary, and made the new narrative card
+ * the only piece of evaluative copy on screen. Keeping the comment
+ * generator on the JS side means both code paths produce the same
+ * one-liner shape and the narrative below it gets to do the
+ * shape-aware explanation work without having to compete with a
+ * generic "3 segments played" header.
+ *
+ * Strings are kept identical to the Rust matcher arms (down to
+ * punctuation) so a session that crosses the multi-segment boundary
+ * doesn't visibly change tone between runs.
+ */
+export function commentForScore(score: number, scoredBeatCount: number): string {
+  if (scoredBeatCount < 8) {
+    return "Not enough data yet — keep playing!";
+  }
+  const grade = gradeForScore(score);
+  if (grade === "S") {
+    return score === 100
+      ? "Flawless. You're a metronome yourself."
+      : "Outstanding timing — near-perfect precision.";
+  }
+  if (grade === "A") return "Solid performance. Your timing is tight and consistent.";
+  if (grade === "B") return "Good work! A few rough edges, but strong overall.";
+  if (grade === "C") return "Decent foundation. Focus on evenness and you'll climb fast.";
+  if (grade === "D") return "Getting there. Slow down and lock in with the click.";
+  return "Keep at it — consistent practice builds timing muscle memory.";
+}
+
+/**
  * Re-score a `SessionReport`-shaped object using `computeLegacyScore`
  * and the matching grade. Used at every UI/coach boundary so the
  * displayed score is always derived from the same formula regardless of

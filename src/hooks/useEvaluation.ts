@@ -8,10 +8,34 @@ import {
   onAudioInputDevicesChanged,
   onBeatFeedback,
   onInferredGridChanged,
+  setInputGain,
   storeLoad,
   storeSave,
 } from "../ipc";
 import type { AudioInputDevice, AudioSpectrum, BeatFeedback, InferredGridChanged } from "../types";
+
+/**
+ * Default input-gain (dB) applied when a device has no persisted value.
+ * +20 dB is a sane baseline for typical guitar/interface input chains —
+ * matches the `AudioInputTestModal` initial state. Keep this in sync.
+ */
+const DEFAULT_INPUT_GAIN_DB = 20;
+
+/** Resolve the per-device input-gain store key. */
+function gainStoreKey(device: string | undefined): string {
+  return `inputGain_${device ?? "__default"}`;
+}
+
+/**
+ * Load the persisted input gain for the given device and push it to the
+ * Rust DSP. Without this, the cpal callback runs at unity (0 dB) until the
+ * user opens the tester modal, which silently capped scoring for users with
+ * a quiet input (e.g. unboosted electric guitar).
+ */
+async function applyPersistedGain(device: string | undefined): Promise<void> {
+  const saved = await storeLoad<number>(gainStoreKey(device));
+  await setInputGain(saved ?? DEFAULT_INPUT_GAIN_DB);
+}
 
 /** Colors matching feedback classifications — reads theme CSS vars */
 export const FEEDBACK_COLORS = {
@@ -41,13 +65,20 @@ export function useEvaluation() {
   const [inferredGrid, setInferredGrid] = useState<InferredGridChanged | null>(null);
   const gridUnlistenRef = useRef<(() => void) | null>(null);
 
-  // Load saved preferences on mount
+  // Load saved preferences on mount + sync persisted input gain to Rust DSP.
+  // This last step is critical: the cpal callback defaults to unity gain
+  // on every app launch, so users with a quiet input were silently scored
+  // against raw, unboosted audio until they happened to open the tester.
   useEffect(() => {
     (async () => {
       const savedDevice = await storeLoad<string>("evaluationDevice");
       if (savedDevice) setSelectedDevice(savedDevice);
       const savedRealtime = await storeLoad<boolean>("evaluationShowRealtime");
       if (savedRealtime !== undefined) setShowRealtime(savedRealtime);
+      // Always push the persisted gain to Rust — even if no device is saved
+      // yet (the "__default" bucket), so unity-gain is never the de facto
+      // setting on first launch.
+      await applyPersistedGain(savedDevice ?? undefined);
     })();
   }, []);
 
@@ -171,6 +202,9 @@ export function useEvaluation() {
   const selectDevice = useCallback(async (deviceName: string) => {
     setSelectedDevice(deviceName);
     await storeSave("evaluationDevice", deviceName);
+    // Apply this device's persisted gain before (re)starting the stream so
+    // the DSP sees boosted samples from the very first callback.
+    await applyPersistedGain(deviceName);
     // If currently active, restart with new device
     if (enabled) {
       await stopEvaluation();
