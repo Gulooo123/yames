@@ -134,7 +134,6 @@ describe("shouldDropForStaleness", () => {
 
 describe("isAlwaysSpoken", () => {
   it("flags milestones, boundary events, and key interventions", () => {
-    expect(isAlwaysSpoken("personal_best_streak")).toBe(true);
     expect(isAlwaysSpoken("boundary_signal_a")).toBe(true);
     expect(isAlwaysSpoken("boundary_signal_b")).toBe(true);
     expect(isAlwaysSpoken("tempo_milestone")).toBe(true);
@@ -149,6 +148,14 @@ describe("isAlwaysSpoken", () => {
     expect(isAlwaysSpoken("dragging_trend")).toBe(false);
     expect(isAlwaysSpoken("low_confidence")).toBe(false);
     expect(isAlwaysSpoken("check_in")).toBe(false);
+  });
+
+  // 2026-05-17 — `personal_best_streak` was demoted from always-spoken
+  // after player feedback that "Picking's locked" fired ~7s into a
+  // session, before warmup completed. See the docstring on
+  // `ALWAYS_SPOKEN` in gatekeeper.ts for the full rationale.
+  it("does NOT flag personal_best_streak (demoted 2026-05-17)", () => {
+    expect(isAlwaysSpoken("personal_best_streak")).toBe(false);
   });
 });
 
@@ -280,20 +287,57 @@ describe("evaluate — personal_best_streak", () => {
     expect(event).toBeNull();
   });
 
-  it("bypasses cooldown because it's an always-speak event", () => {
+  // 2026-05-17 — `personal_best_streak` is no longer always-spoken,
+  // so it MUST observe the spoken cooldown. This test used to assert
+  // the opposite (bypass); flipped after demoting PB out of
+  // ALWAYS_SPOKEN.
+  it("respects the spoken cooldown after the demotion", () => {
     const state = {
       ...createGatekeeper(T0),
-      lastSpokenMs: T0 + 29_000, // 1s ago — would gate everyday events
+      lastSpokenMs: T0 + 29_000, // 1s ago — inside the 20s spoken floor
       bestStreak: 8,
     };
     const { event } = evaluate(state, {
       now: T0 + 30_000,
       bpm: 120,
-      // STREAK_PERSONAL_BEST_MIN + 5 ensures we exceed both the min
-      // (24) and the growth gate (bestStreak 8 + GROWTH 8 = 16).
+      window: manyHits(STREAK_PERSONAL_BEST_MIN + 5),
+    });
+    expect(event).toBeNull();
+  });
+
+  // 2026-05-17 — paired with the cooldown test above: PB still fires
+  // when the spoken cooldown is satisfied (this is the positive-path
+  // proof that demoting PB didn't break the happy case).
+  it("still fires once spoken cooldown has elapsed", () => {
+    const state = {
+      ...createGatekeeper(T0),
+      // Past warmup (30s) and well past spoken cooldown floor (20s).
+      lastSpokenMs: T0,
+      bestStreak: 8,
+    };
+    const { event } = evaluate(state, {
+      now: T0 + 60_000,
+      bpm: 120,
       window: manyHits(STREAK_PERSONAL_BEST_MIN + 5),
     });
     expect(event?.scenario).toBe("personal_best_streak");
+    expect(event?.tier).toBe("spoken");
+  });
+
+  // 2026-05-17 — the regression this whole change exists to prevent:
+  // a 24-beat streak inside the warmup window should NOT trigger a
+  // "Picking's locked" tip.
+  it("is suppressed during the warmup window", () => {
+    const state = { ...createGatekeeper(T0), bestStreak: 8 };
+    const { event } = evaluate(state, {
+      // 7s in — exactly when the player's first 24-beat clean streak
+      // would land at 16ths/80bpm. This is the firing time observed
+      // in session_1779079018 that prompted the demotion.
+      now: T0 + 7_000,
+      bpm: 80,
+      window: manyHits(STREAK_PERSONAL_BEST_MIN + 5),
+    });
+    expect(event).toBeNull();
   });
 });
 
@@ -400,12 +444,18 @@ describe("evaluate — streak suppression mid-segment", () => {
     expect(event?.tier).toBe("written");
   });
 
-  it("does NOT downgrade always-spoken scenarios", () => {
+  it("does NOT downgrade non-trend scenarios (suppression targets trends only)", () => {
+    // Streak suppression only applies to the rushing/dragging trend
+    // branch inside `evaluate`. Other scenarios — including
+    // personal_best_streak after its 2026-05-17 demotion — are
+    // unaffected by the `inStreak` signal.
     const state = { ...createGatekeeper(T0), bestStreak: 8 };
     const { event } = evaluate(state, {
-      now: T0 + 30_000,
+      // Just past warmup so the (now-demoted) personal_best_streak
+      // gate-check can succeed.
+      now: T0 + WARMUP_GRACE_MS + 1,
       bpm: 120,
-      // STREAK_PERSONAL_BEST_MIN + 5 = 29; must clear min (24) AND
+      // STREAK_PERSONAL_BEST_MIN + 5 = 29; clears min (24) AND
       // growth gate (bestStreak 8 + GROWTH 8 = 16).
       window: manyHits(STREAK_PERSONAL_BEST_MIN + 5),
       inStreak: true,
@@ -822,14 +872,20 @@ describe("evaluate — warmup grace", () => {
   });
 
   it("does NOT suppress ALWAYS_SPOKEN scenarios during warmup", () => {
-    // Personal-best streak fires inside warmup because it's always-spoken.
-    const state = { ...createGatekeeper(T0), bestStreak: 8 };
+    // Forced boundary_signal_a (a settings change the user just made)
+    // fires inside warmup because it's always-spoken — it's the
+    // acknowledgement of the player's own input, suppressing it would
+    // feel broken. Pre-2026-05-17 this test used personal_best_streak,
+    // but PB was demoted out of ALWAYS_SPOKEN; any remaining always-
+    // spoken scenario exercises the bypass equally well.
+    const state = createGatekeeper(T0);
     const { event } = evaluate(state, {
       now: T0 + 1_000, // deep inside warmup
       bpm: 120,
-      window: manyHits(STREAK_PERSONAL_BEST_MIN + 5),
+      window: manyHits(8),
+      force: { scenario: "boundary_signal_a", context: { change: "tempo up" } },
     });
-    expect(event?.scenario).toBe("personal_best_streak");
+    expect(event?.scenario).toBe("boundary_signal_a");
   });
 
   it("does NOT suppress forced boundary events during warmup", () => {
@@ -969,18 +1025,27 @@ describe("evaluate — burst limiter", () => {
   });
 
   it("does NOT block ALWAYS_SPOKEN scenarios even mid-burst", () => {
+    // 2026-05-17 — switched from personal_best_streak (which was demoted
+    // out of ALWAYS_SPOKEN, see gatekeeper.ts) to new_band_locked, which
+    // is now the only detector-driven always-spoken scenario. Sets up
+    // the band-lock state directly so the detector fires on the next
+    // eval call.
     const lastFire = T0 + 60_000;
     const recentFires = [lastFire - 20_000, lastFire - 10_000, lastFire - 1_000];
+    const lockedSince = lastFire - NEW_BAND_DURATION_MS - 1_000;
     const state = {
       ...seedFires(createGatekeeper(T0), recentFires),
-      bestStreak: 8, // so PB streak detector fires
+      // Pre-arm new_band_locked: same band as `bpm` below + sustained
+      // long enough that the detector fires next eval.
+      lockedBpmLow: 120,
+      bandLockedSinceMs: lockedSince,
     };
     const r = evaluate(state, {
       now: lastFire + 1_000,
       bpm: 120,
-      window: manyHits(STREAK_PERSONAL_BEST_MIN + 5),
+      window: manyHits(20), // ≥85% over STREAK_SUPPRESSION_MIN_LEN
     });
-    expect(r.event?.scenario).toBe("personal_best_streak");
+    expect(r.event?.scenario).toBe("new_band_locked");
   });
 
   it("blocks once BURST_LONG_MAX is hit in the long window", () => {
@@ -1110,27 +1175,29 @@ describe("evaluate — repetition suppression", () => {
   });
 
   it("does NOT block ALWAYS_SPOKEN scenarios from repeating", () => {
-    // Two personal_best_streak fires in a row (which would only happen
-    // if the streak kept growing, but: bypasses repetition regardless).
-    //
-    // The second fire is intentionally placed 61s after the first to
-    // also clear the per-scenario cooldown (60s for personal_best_streak)
-    // — this test is about the repetition gate, not the cooldown gate.
-    let state = { ...createGatekeeper(T0), bestStreak: 8 };
-    const r1 = evaluate(state, {
-      now: T0 + 30_000,
+    // 2026-05-17 — switched from personal_best_streak (which was demoted
+    // out of ALWAYS_SPOKEN) to new_band_locked. We pre-seed history
+    // with a prior new_band_locked entry, then prove a fresh
+    // new_band_locked fires through the repetition gate.
+    const lockedSince = T0 + 60_000 - NEW_BAND_DURATION_MS - 1_000;
+    const state = {
+      ...createGatekeeper(T0),
+      bestStreak: HIGH_PB,
+      // Prior fire in history: same scenario + tier as what we're
+      // about to fire — would block any non-always-spoken scenario.
+      recentScenarios: [
+        { scenario: "new_band_locked" as const, tier: "spoken" as const },
+      ],
+      // Pre-arm new_band_locked so the detector triggers next eval.
+      lockedBpmLow: 120,
+      bandLockedSinceMs: lockedSince,
+    };
+    const r = evaluate(state, {
+      now: T0 + 60_000,
       bpm: 120,
-      window: manyHits(STREAK_PERSONAL_BEST_MIN + 5),
+      window: manyHits(20),
     });
-    expect(r1.event?.scenario).toBe("personal_best_streak");
-    state = r1.state;
-    // Streak grew further → would re-fire (61s later, past PB cooldown).
-    const r2 = evaluate(state, {
-      now: T0 + 91_001,
-      bpm: 120,
-      window: manyHits(STREAK_PERSONAL_BEST_MIN + 20),
-    });
-    expect(r2.event?.scenario).toBe("personal_best_streak");
+    expect(r.event?.scenario).toBe("new_band_locked");
   });
 
   it("allows the trend-confirmation written→spoken escalation (tier differs)", () => {

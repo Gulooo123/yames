@@ -71,32 +71,61 @@ pub struct SessionReport {
 /// (`commands::stop_evaluation` → `session_log::save_log`) has
 /// everything it needs without piping the timing analyzer into the
 /// log builder directly.
+///
+/// **Two parallel buffers**: the mini-report `window` (cleared by JS
+/// mid-session — see `useSession.ts::clearSession`) and the full-session
+/// `all_*` totals (cleared only at `start_evaluation`). The window powers
+/// per-segment `get_session_report` IPC calls — the coach card needs to
+/// see the current segment in isolation. The full-session totals back the
+/// persisted D1 JSON so the on-disk `report` field reflects the whole
+/// session, not just the last segment. Before this split, every
+/// mid-session `clearSession()` (one per segment that produced a
+/// mini-report) wiped the totals too — leaving the persisted JSON's
+/// `totalBeats=1, hits=0, score=20` even when the user played for an
+/// hour. Anything downstream that reads `report.*` directly (analytics,
+/// exports) got garbage. Forensics from session_1779073853 spotted it.
 pub struct SessionAccumulator {
+    /// Mini-report window — cleared by JS `clearSession()` between
+    /// per-segment mini-reports so each `get_session_report` IPC call
+    /// reflects only the segment the player just finished.
     feedbacks: Vec<BeatFeedback>,
+    /// Full-session totals. Mirrors every `push` into `feedbacks` but is
+    /// only cleared at session start (`clear()`). Drives the persisted
+    /// D1 JSON `report` field via `persist_session_log`.
+    all_feedbacks: Vec<BeatFeedback>,
     /// UNIX seconds when the session started. `None` until
     /// `mark_session_start` is called (`start_evaluation` sets this).
+    /// Survives `clear_segment_window()` so the session epoch isn't lost
+    /// to a mid-session mini-report.
     session_start_secs: Option<u64>,
     /// Wall-clock ms (Unix epoch) of the session start. Used to derive
     /// duration on save and to compute segment offsets in the diagnostic
     /// log. `None` until `mark_session_start` is called.
     session_start_ms: Option<u64>,
-    /// Practice segments produced by the D4 Signal-B trigger. Pushed
-    /// from the segment callback in `commands::start_evaluation`.
+    /// Practice segments — same window/all split as feedbacks. The
+    /// window backs `acc.report()`'s duration-weighted score; the full
+    /// list lands in the persisted JSON.
     segments: Vec<PracticeSegment>,
+    /// Full-session segments. Mirror of `segments` that survives
+    /// `clear_segment_window()`.
+    all_segments: Vec<PracticeSegment>,
 }
 
 impl SessionAccumulator {
     pub fn new() -> Self {
         Self {
             feedbacks: Vec::with_capacity(256),
+            all_feedbacks: Vec::with_capacity(1024),
             session_start_secs: None,
             session_start_ms: None,
             segments: Vec::new(),
+            all_segments: Vec::new(),
         }
     }
 
     pub fn push(&mut self, fb: BeatFeedback) {
-        self.feedbacks.push(fb);
+        self.feedbacks.push(fb.clone());
+        self.all_feedbacks.push(fb);
     }
 
     /// Stamp the session-start wall clock. Idempotent — only the first
@@ -109,23 +138,49 @@ impl SessionAccumulator {
     }
 
     pub fn push_segment(&mut self, seg: PracticeSegment) {
-        self.segments.push(seg);
+        self.segments.push(seg.clone());
+        self.all_segments.push(seg);
     }
 
+    /// Full reset — wipes BOTH the mini-report window and the full-
+    /// session totals (feedbacks, segments, session_start). Use at
+    /// session boundaries (`start_evaluation`) — not mid-session.
     pub fn clear(&mut self) {
         self.feedbacks.clear();
+        self.all_feedbacks.clear();
         self.segments.clear();
+        self.all_segments.clear();
         self.session_start_secs = None;
         self.session_start_ms = None;
+    }
+
+    /// Mid-session clear — wipes ONLY the mini-report window so the next
+    /// `get_session_report` IPC reflects the next segment in isolation.
+    /// The full-session `all_*` totals and `session_start_*` are
+    /// preserved so the eventual persisted JSON still sees the whole
+    /// session. Called by the `clear_session` Tauri command which the
+    /// JS side fires between per-segment mini-reports.
+    pub fn clear_segment_window(&mut self) {
+        self.feedbacks.clear();
+        self.segments.clear();
     }
 
     pub fn is_empty(&self) -> bool {
         self.feedbacks.is_empty()
     }
 
-    /// Read-only access to accumulated feedbacks for the D1 log builder.
+    /// Read-only access to the mini-report window's feedbacks
+    /// (per-segment scope — what `acc.report()` consumes).
     pub fn feedbacks(&self) -> &[BeatFeedback] {
         &self.feedbacks
+    }
+
+    /// Read-only access to the FULL-session feedbacks, surviving every
+    /// mid-session `clear_segment_window()`. Used by
+    /// `persist_session_log` so the on-disk report reflects every beat
+    /// played across every segment.
+    pub fn all_feedbacks(&self) -> &[BeatFeedback] {
+        &self.all_feedbacks
     }
 
     /// UNIX seconds when the session started, or `None` if never stamped.
@@ -138,9 +193,16 @@ impl SessionAccumulator {
         self.session_start_ms
     }
 
-    /// Read-only access to accumulated segments for the D1 log builder.
+    /// Read-only access to the mini-report window's segments.
     pub fn segments(&self) -> &[PracticeSegment] {
         &self.segments
+    }
+
+    /// Read-only access to the FULL-session segments, surviving every
+    /// mid-session `clear_segment_window()`. Used by
+    /// `persist_session_log`.
+    pub fn all_segments(&self) -> &[PracticeSegment] {
+        &self.all_segments
     }
 
     /// Generate a session report from accumulated feedback.
@@ -778,6 +840,133 @@ mod tests {
             "Zero-duration segment should not poison D4 weighting; got {}",
             r.score
         );
+    }
+
+    // ---- Mini-report window vs. full-session totals (clear_segment_window) ----
+    //
+    // Regression guards for the "persisted JSON report shows
+    // `totalBeats=1, hits=0, score=20` after a multi-segment session"
+    // bug — root cause was the mid-session `clearSession()` IPC wiping
+    // the same buffers the persistence layer reads at stop time.
+
+    #[test]
+    fn clear_segment_window_preserves_full_session_totals() {
+        let mut acc = SessionAccumulator::new();
+        acc.mark_session_start(1_700_000_000, 1_700_000_000_000);
+
+        // Segment 1 — 8 perfects, then push the segment + mid-session clear.
+        for _ in 0..8 {
+            acc.push(fb("perfect", 1.0, 1.0, 0.5));
+        }
+        acc.push_segment(crate::session_log::PracticeSegment {
+            start_ms: 0,
+            end_ms: 30_000,
+            start_bpm: 100,
+            end_bpm: 100,
+            score: 95.0,
+            component_scores: crate::session_log::ComponentScores::default(),
+            end_reason: crate::session_log::SegmentEndReason::ActivityGap,
+            inferred_divisor: 0,
+            inferred_divisor_confidence: 0.0,
+        });
+        acc.clear_segment_window();
+
+        // Window is empty (mini-report scope reset).
+        assert!(acc.is_empty(), "window feedbacks should be empty after clear_segment_window");
+        assert!(acc.segments().is_empty(), "window segments should be empty");
+
+        // Full-session totals survive.
+        assert_eq!(acc.all_feedbacks().len(), 8, "all_feedbacks should keep segment 1");
+        assert_eq!(acc.all_segments().len(), 1, "all_segments should keep segment 1");
+        assert_eq!(
+            acc.session_start_secs(),
+            Some(1_700_000_000),
+            "session_start_secs should survive mid-session clear"
+        );
+        assert_eq!(
+            acc.session_start_ms(),
+            Some(1_700_000_000_000),
+            "session_start_ms should survive mid-session clear"
+        );
+
+        // Segment 2 — 4 more perfects.
+        for _ in 0..4 {
+            acc.push(fb("perfect", 1.0, 1.0, 0.5));
+        }
+
+        // Full session sees both segments' beats; window only sees the
+        // post-clear ones.
+        assert_eq!(acc.feedbacks().len(), 4, "window only has post-clear beats");
+        assert_eq!(acc.all_feedbacks().len(), 12, "all_feedbacks accumulates across clears");
+    }
+
+    #[test]
+    fn full_session_report_reflects_all_segments_after_mid_clears() {
+        // The bug: after a multi-segment session, the persisted JSON
+        // report contained only the LAST segment's worth of beats. The
+        // fix routes persistence through `all_feedbacks` so callers see
+        // the entire session.
+        let mut acc = SessionAccumulator::new();
+        acc.mark_session_start(1_700_000_000, 1_700_000_000_000);
+
+        // Three segments × 8 perfects each, with mid-session clears between.
+        for _ in 0..3 {
+            for _ in 0..8 {
+                acc.push(fb("perfect", 1.0, 1.0, 0.5));
+            }
+            acc.clear_segment_window();
+        }
+
+        // Mid-report window scope: empty after the final clear.
+        assert!(acc.is_empty(), "window should be empty after final clear");
+
+        // Full-session feedbacks: 24 perfects across three segments.
+        let all = acc.all_feedbacks();
+        assert_eq!(all.len(), 24, "all_feedbacks should keep every push across clears");
+
+        // Score the FULL session via the public helper used by
+        // `build_log_from_session` — this is the path that produces the
+        // persisted JSON `report` field.
+        let full_report = crate::session_log::score_feedbacks(all);
+        assert_eq!(full_report.hits_count, 24, "report should count every beat");
+        assert_eq!(full_report.perfect_count, 24);
+        assert_eq!(full_report.miss_count, 0);
+        assert!(
+            full_report.score >= 95,
+            "all-perfect full session should still grade S, got score {}",
+            full_report.score
+        );
+    }
+
+    #[test]
+    fn clear_resets_everything_window_and_full() {
+        // The session-start `clear()` MUST wipe both buffers + the
+        // session_start stamp so a fresh `start_evaluation` starts clean.
+        let mut acc = SessionAccumulator::new();
+        acc.mark_session_start(1_700_000_000, 1_700_000_000_000);
+        for _ in 0..8 {
+            acc.push(fb("perfect", 1.0, 1.0, 0.5));
+        }
+        acc.push_segment(crate::session_log::PracticeSegment {
+            start_ms: 0,
+            end_ms: 30_000,
+            start_bpm: 100,
+            end_bpm: 100,
+            score: 95.0,
+            component_scores: crate::session_log::ComponentScores::default(),
+            end_reason: crate::session_log::SegmentEndReason::ActivityGap,
+            inferred_divisor: 0,
+            inferred_divisor_confidence: 0.0,
+        });
+
+        acc.clear();
+
+        assert!(acc.feedbacks().is_empty(), "window feedbacks");
+        assert!(acc.all_feedbacks().is_empty(), "full feedbacks");
+        assert!(acc.segments().is_empty(), "window segments");
+        assert!(acc.all_segments().is_empty(), "full segments");
+        assert_eq!(acc.session_start_secs(), None);
+        assert_eq!(acc.session_start_ms(), None);
     }
 }
 

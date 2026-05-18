@@ -428,12 +428,26 @@ impl TimingAnalyzer {
         // Track previous onset time for interval analysis
         let mut prev_onset_ns: Option<u64> = None;
 
-        // Track which tick we last processed. Path B widened this from
-        // a plain `beat_index` to `(beat_index, subdivision_index)`
-        // because the engine now emits every subdivision (not just
-        // downbeats) — the per-beat dedup must therefore key on the
-        // tick within the beat too. See `BeatTick.subdivision_index`.
-        let mut last_processed_tick: Option<(u32, u8)> = None;
+        // Track which tick we last processed, keyed on the monotonic
+        // `ts_ns` from `BeatTick`. The earlier composite-index key
+        // `(beat_index, subdivision_index)` was unsafe across a
+        // metronome pause/resume *inside* a single evaluation session:
+        // the engine resets `beat_count = 0` whenever `is_playing`
+        // toggles (see `engine.rs::run_callback`, the
+        // `if !is_playing { ... beat_count = 0; ... }` block and the
+        // matching reset on the `!was_playing` rising edge). The next
+        // run of play therefore re-emits ticks starting at
+        // `beat_index == 0`, and the old dedup check
+        // `tick_key <= last_key` silently dropped *every* exercise-2
+        // beat — no `BeatFeedback` ever fired, no feedbacks landed in
+        // the accumulator, and `getSessionReport()` returned `None`
+        // on the next pause so the second mini-report never emitted.
+        // Captured + fixed 2026-05-17 — see "2 exercises, only 1
+        // mini-report (sequel)" report. `ts_ns` is the shared monotonic
+        // clock and survives every pause/resume cycle, so a strictly
+        // greater `ts_ns` is the unambiguous signal that the tick is
+        // genuinely new.
+        let mut last_processed_ts_ns: Option<u64> = None;
 
         // Path B — per-session rhythm inference. Tracks what divisor
         // (quarter / 8th / triplet / 16th / sextuplet) the player is
@@ -681,17 +695,19 @@ impl TimingAnalyzer {
 
             // Match each beat to the closest onset within the window
             for beat in &beats {
-                // Skip if already processed (Path B — composite key
-                // (beat_index, subdivision_index) because the same
-                // beat_index now appears multiple times per beat at
-                // higher subdivisions).
-                let tick_key = (beat.beat_index, beat.subdivision_index);
-                if let Some(last_key) = last_processed_tick {
-                    if tick_key <= last_key {
+                // Skip if already processed. Keyed on the monotonic
+                // `ts_ns` (NOT `beat_index`) so a metronome pause/resume
+                // inside one evaluation — which resets the engine's
+                // `beat_count` to 0 — doesn't accidentally drop every
+                // tick of the second exercise. See the declaration of
+                // `last_processed_ts_ns` above for the long-form
+                // rationale.
+                if let Some(last_ts_ns) = last_processed_ts_ns {
+                    if beat.ts_ns <= last_ts_ns {
                         continue;
                     }
                 }
-                last_processed_tick = Some(tick_key);
+                last_processed_ts_ns = Some(beat.ts_ns);
 
                 // Path B — non-active ticks are NOT scored. The
                 // rhythm-inference has decided the player is not on
@@ -3018,6 +3034,138 @@ mod tests {
         assert!(
             (sum - 1.0).abs() < 1e-5,
             "D3c weights must sum to 1.0, got {sum}"
+        );
+    }
+
+    // ── Regression: metronome pause/resume inside one evaluation ────
+    //
+    // The engine resets `beat_count = 0` on every audio-callback pass
+    // where `is_playing == false`, AND on the `!was_playing` rising
+    // edge (see `engine.rs::run_callback`). When the user pauses the
+    // metronome in the middle of a session and then resumes it, the
+    // BeatTicks the engine pushes after the resume restart at
+    // `beat_index = 0`.
+    //
+    // Pre-fix, the analyzer's dedup key was `(beat_index,
+    // subdivision_index)` and the guard was `tick_key <= last_key`.
+    // After exercise 1, `last_key` was pinned to the high indices of
+    // exercise 1's beats, so every single tick of exercise 2 with
+    // `beat_index ∈ [0, N)` got silently dropped — no `BeatFeedback`
+    // ever fired, no feedbacks landed in the SessionAccumulator, and
+    // the JS-side mid-session mini-report never emitted. The user
+    // reported this as "second exercise within the same session is
+    // not picked up at all".
+    //
+    // The fix swaps the dedup key to the monotonic `ts_ns`, which
+    // strictly increases across pause/resume regardless of any
+    // `beat_index` restart. This test pumps two batches of beats
+    // through the live analyzer with the second batch's
+    // `beat_index` deliberately re-using indices the first batch
+    // covered, and asserts that both batches produce `BeatFeedback`
+    // events.
+    #[test]
+    fn restart_within_session_does_not_drop_post_resume_beats() {
+        use crate::instrument::Instrument;
+
+        let beat_log = create_beat_log();
+        let mut analyzer = TimingAnalyzer::new(beat_log.clone());
+
+        let feedbacks: Arc<Mutex<Vec<BeatFeedback>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let feedbacks_writer = feedbacks.clone();
+
+        analyzer.start(
+            Instrument::Other.profile(),
+            "other".to_string(),
+            None,
+            None,
+            move |fb| {
+                feedbacks_writer.lock().unwrap().push(fb);
+            },
+            |_seg| {},
+            |_| {},
+            |_| {},
+        );
+
+        // We anchor each batch's `ts_ns` at small fixed values
+        // measured in nanoseconds from process epoch. The analyzer's
+        // `now_ns()` will already be far past these by the time the
+        // loop runs (the LazyLock EPOCH is initialized on the first
+        // call across the process, so subsequent reads return
+        // monotonic time elapsed since then). Anchoring relative to
+        // `now()` is brittle here because `saturating_sub` underflows
+        // to 0 when EPOCH is too recent — a flaky test waiting to
+        // happen.
+        const INTERVAL_MS: f64 = 500.0;
+        const TICKS_PER_EXERCISE: u32 = 10;
+
+        // Bump the epoch forward enough that the analyzer's `now_ns`
+        // is comfortably past every tick's deadline (= ts_ns + 110ms
+        // at this BPM). 200 ms after start is plenty.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Helper: ts_ns values for `count` ticks starting at
+        // `base_ts_ns` and spaced 1 ms apart. Spacing doesn't matter
+        // for the dedup test — only ordering does — so we keep them
+        // tight to stay safely inside the analyzer's already-elapsed
+        // deadline window.
+        let make_ticks = |count: u32,
+                          base_ts_ns: u64,
+                          first_beat_index: u32|
+         -> Vec<BeatTick> {
+            (0..count)
+                .map(|i| BeatTick {
+                    ts_ns: base_ts_ns + i as u64,
+                    beat_index: first_beat_index + i,
+                    is_downbeat: i % 4 == 0,
+                    expected_interval_ms: INTERVAL_MS,
+                    subdivision_index: 0,
+                    subdivision_total: 1,
+                })
+                .collect()
+        };
+
+        // ── Exercise 1: 10 ticks at deliberately HIGH beat_index. ──
+        // Mirrors the situation where the user has been playing for
+        // a while and `beat_count` has climbed.
+        {
+            let mut log = beat_log.lock().unwrap();
+            for tick in make_ticks(TICKS_PER_EXERCISE, 1_000, 100) {
+                log.push_back(tick);
+            }
+        }
+
+        // Give the 5 ms analyzer loop plenty of headroom to drain.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        let after_ex1 = feedbacks.lock().unwrap().len();
+        assert!(
+            after_ex1 >= TICKS_PER_EXERCISE as usize,
+            "exercise 1 should produce ≥{} feedbacks (one per tick), got {after_ex1}",
+            TICKS_PER_EXERCISE
+        );
+
+        // ── Exercise 2: 10 ticks with RESET beat_index ──
+        // Engine's `beat_count = 0` on pause/resume means these
+        // ticks come in at indices 0..10 — *lower* than exercise 1's
+        // last index, but with strictly-later `ts_ns`.
+        {
+            let mut log = beat_log.lock().unwrap();
+            for tick in make_ticks(TICKS_PER_EXERCISE, 100_000, 0) {
+                log.push_back(tick);
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        analyzer.stop();
+
+        let total = feedbacks.lock().unwrap().len();
+        assert!(
+            total >= 2 * TICKS_PER_EXERCISE as usize,
+            "post-resume beats were dropped by the dedup gate: \
+             expected ≥{} feedbacks ({} per exercise), got {total}",
+            2 * TICKS_PER_EXERCISE,
+            TICKS_PER_EXERCISE
         );
     }
 }

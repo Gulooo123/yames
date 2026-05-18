@@ -975,21 +975,25 @@ fn persist_session_log(
     // Snapshot accumulator state under its own lock window, then drop
     // the guard before any IO so we don't hold it across `fs::write`.
     //
-    // We tolerate an empty accumulator: per-segment mini-reports invoke
-    // `clearSession()` mid-session (so a new segment doesn't accumulate
-    // INTO the prior segment's data, see `useSession.ts:361`), which
-    // wipes feedbacks/segments/session_start. If the user presses End
-    // Session right after a segment auto-ends via ActivityGap, the
-    // accumulator is empty BUT the analyzer's telemetry buffer still
-    // carries the full session's raw onset/beat/match stream. Persist
-    // whatever we have; skip only when both sources are empty.
+    // Read from the FULL-session buffers (`all_feedbacks`/`all_segments`)
+    // — not the mini-report window — so the persisted JSON's `report`
+    // and `segments` cover the whole session. The window is wiped each
+    // time JS fires `clearSession()` between per-segment mini-reports,
+    // which used to leave the persisted log with only the last segment's
+    // beats (typical artifact: `totalBeats=1, hits=0, score=20`).
+    //
+    // We still tolerate an empty accumulator: if the user presses End
+    // Session right after a segment auto-ends with no further play, the
+    // window is empty but the full-session totals + telemetry still
+    // describe the session. The `is_empty` fast-path below filters out
+    // truly idle stops.
     let (feedbacks, segments, mut start_secs, mut start_ms) = {
         let acc = session_acc
             .lock()
             .map_err(|e| format!("session_acc lock failed: {e}"))?;
         (
-            acc.feedbacks().to_vec(),
-            acc.segments().to_vec(),
+            acc.all_feedbacks().to_vec(),
+            acc.all_segments().to_vec(),
             acc.session_start_secs().unwrap_or(0),
             acc.session_start_ms().unwrap_or(0),
         )
@@ -1002,10 +1006,14 @@ fn persist_session_log(
         return Ok(());
     }
 
-    // When the accumulator was cleared mid-session, its session_start_*
-    // is None → unwrap_or(0) above. Recover the session epoch from the
-    // earliest telemetry timestamp so the JSON's `timestamp` /
-    // `durationMs` reflect the real session window instead of 1970.
+    // Defensive fallback for missing `session_start_*` — after the
+    // window/all split, `mark_session_start` is preserved across
+    // mid-session clears so this should never fire on the normal path.
+    // Kept as a safety net for edge cases (legacy callers, tests, or
+    // future code paths that bypass `start_evaluation`): recover the
+    // session epoch from the earliest telemetry timestamp so the JSON's
+    // `timestamp` / `durationMs` reflect the real session window instead
+    // of 1970.
     if start_ms == 0 {
         let earliest = telemetry
             .expected_beats
@@ -1107,7 +1115,17 @@ pub async fn get_session_report(session_acc: State<'_, SharedSessionAccumulator>
 
 #[tauri::command]
 pub async fn clear_session(session_acc: State<'_, SharedSessionAccumulator>) -> Result<(), String> {
-    session_acc.lock().map_err(|e| format!("Lock failed: {e}"))?.clear();
+    // Mid-session clear: wipe only the per-segment mini-report window so
+    // the next `get_session_report` reflects the next segment in
+    // isolation. The full-session totals (`all_feedbacks`/`all_segments`)
+    // and `session_start_*` are preserved so `persist_session_log` still
+    // sees the whole session at stop time. Wiping them mid-session used
+    // to leave the persisted D1 JSON with `totalBeats=1, hits=0,
+    // score=20` even on long sessions — see `SessionAccumulator` doc.
+    session_acc
+        .lock()
+        .map_err(|e| format!("Lock failed: {e}"))?
+        .clear_segment_window();
     Ok(())
 }
 

@@ -157,8 +157,10 @@ export const LOW_CONFIDENCE_SUSTAIN_MS = 30_000;
  *     → require BURST_LONG_PENALTY_MS of silence.
  *
  * `ALWAYS_SPOKEN` scenarios (boundary events, milestones, recovery,
- * fatigue, personal_best_streak, new_band_locked) bypass the limiter
- * — those represent genuinely necessary chime-ins.
+ * fatigue, new_band_locked) bypass the limiter — those represent
+ * genuinely necessary chime-ins. (Note: `personal_best_streak` used
+ * to be in this set but was demoted on 2026-05-17 — see the comment
+ * on `ALWAYS_SPOKEN` below.)
  */
 export const BURST_SHORT_WINDOW_MS = 30_000;
 export const BURST_SHORT_MAX = 3;
@@ -420,8 +422,33 @@ export function resetCooldowns(
 // Always-speak override matrix
 // ---------------------------------------------------------------------------
 
+/**
+ * 2026-05-17 — `personal_best_streak` removed from this set.
+ *
+ * Player feedback: "[personal_best_streak] fired ~7s into a session, before
+ * I'd even warmed up. positive comments should only show up when there's
+ * been a silence for some time, just to give feedback to the user that they
+ * are doing good, not something you say 3s in."
+ *
+ * Promoting PB to always-spoken meant it bypassed the 30s warmup, the burst
+ * limiter, the repetition gate, AND the channel cooldowns. With
+ * `STREAK_PERSONAL_BEST_MIN = 24` achievable in ~4.5s at 16ths/80bpm, that
+ * combo guaranteed a "Picking's locked" tip before the player had time to
+ * settle in. Demoting it to a regular scenario means:
+ *   - 30s warmup gate now applies → no premature congratulation
+ *   - Burst limiter applies → won't pile up with trends + accuracy_drop
+ *   - Spoken cooldown applies → guarantees the "silent runway" the user
+ *     described — at least 20–60s of coach silence before PB lands
+ *   - Per-scenario 60s cooldown + growth gate still cap re-fires
+ *
+ * The other entries here remain ALWAYS_SPOKEN because they're either user-
+ * initiated (boundary signals), milestone events the player explicitly
+ * wants to hear, or interventions that exist precisely to break silence
+ * when the player needs help (recovery, fatigue) or has earned a milestone
+ * (tempo_milestone, new_band_locked — and `new_band_locked` already has a
+ * 60s sustained-accuracy gate built in, so it can't fire prematurely).
+ */
 const ALWAYS_SPOKEN: ReadonlySet<ScenarioTag> = new Set([
-  "personal_best_streak",
   "boundary_signal_a",
   "boundary_signal_b",
   "tempo_milestone",
