@@ -16,6 +16,7 @@ import {
   getWaveform,
   onPlaybackFinished,
 } from "../../ipc";
+import { ChannelDropdown } from "../../components/ChannelDropdown";
 
 interface Props {
   open: boolean;
@@ -25,11 +26,16 @@ interface Props {
   initialDevices?: AudioInputDevice[];
   /** If true, evaluation stream is already running — skip start/stop */
   evaluationActive?: boolean;
+  /** 0-indexed channel index to capture (matches the channel picker in settings). */
+  inputChannel?: number;
+  /** Called when the user changes channel inside the modal, so the parent
+   *  can persist the selection and keep settings in sync. */
+  onChannelChange?: (ch: number) => void;
 }
 
 type RecState = "idle" | "recording" | "recorded" | "playing";
 
-export default function AudioInputTestModal({ open, onClose, selectedDevice, onDeviceChange, initialDevices, evaluationActive }: Props) {
+export default function AudioInputTestModal({ open, onClose, selectedDevice, onDeviceChange, initialDevices, evaluationActive, inputChannel = 0, onChannelChange }: Props) {
   const [devices, setDevices] = useState<AudioInputDevice[]>(initialDevices ?? []);
   const [listening, setListening] = useState(false);
   const [spectrum, setSpectrum] = useState<AudioSpectrum | null>(null);
@@ -51,6 +57,9 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
   const [inputGainDb, setInputGainDb] = useState(20); // 0 to +40 dB, default +20
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const playbackUnlistenRef = useRef<(() => void) | null>(null);
+  // Live waveform sampled every 100ms during recording
+  const liveWaveformRef = useRef<number[]>([]);
+  const [liveWaveform, setLiveWaveform] = useState<number[]>([]);
 
   // Load devices when modal opens
   useEffect(() => {
@@ -75,6 +84,8 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
       setRecElapsed(0);
       setWaveform([]);
       setPlayProgress(0);
+      liveWaveformRef.current = [];
+      setLiveWaveform([]);
       if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
       if (playbackUnlistenRef.current) { playbackUnlistenRef.current(); playbackUnlistenRef.current = null; }
       clearInterval(timerRef.current);
@@ -91,7 +102,7 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
       return;
     }
     const start = async () => {
-      await startEvaluation(selectedDevice);
+      await startEvaluation(selectedDevice, inputChannel);
       setListening(true);
     };
     start();
@@ -101,7 +112,29 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
       }
       setListening(false);
     };
+  // NOTE: inputChannel is intentionally NOT in the dep array. Channel changes
+  // are handled exclusively by handleChannelChange, which restarts the stream
+  // directly. Including inputChannel here would cause a second restart every
+  // time the channel is changed (once from handleChannelChange, once from this
+  // effect reacting to the parent's selectedChannel updating) → double stream
+  // open on the same CoreAudio device → crash.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, selectedDevice, evaluationActive]);
+
+  // Intercept Escape so it closes only the modal, not the whole settings panel.
+  // Use capture phase (third arg = true) so this fires before any bubble-phase
+  // handler that the settings overlay might have registered.
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => document.removeEventListener("keydown", handleKeyDown, true);
+  }, [open, onClose]);
 
   // Subscribe to spectrum events
   useEffect(() => {
@@ -124,9 +157,15 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
   const handleDeviceChange = useCallback(async (deviceName: string) => {
     onDeviceChange(deviceName);
     await storeSave("evaluationDevice", deviceName);
-    if (listening) {
+    // Only restart when the modal owns the stream lifecycle (evaluationActive=false).
+    // When evaluationActive=true, onDeviceChange → evaluation.selectDevice already
+    // handles the stop/start + channel reset — don't race it.
+    if (listening && !evaluationActive) {
       await stopEvaluation();
-      await startEvaluation(deviceName || undefined);
+      // When device changes, reset to channel 0 — channel indices are
+      // device-specific and may not be valid on the new device.
+      await startEvaluation(deviceName || undefined, 0);
+      onChannelChange?.(0);
     }
     // Restore saved gain for new device. Default to the same +20 dB baseline
     // we use on first mount — anything else creates an inconsistency where
@@ -139,7 +178,19 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
     // Reset recording state on device change
     setRecState("idle");
     setWaveform([]);
-  }, [listening, onDeviceChange]);
+  }, [evaluationActive, listening, onDeviceChange, onChannelChange]);
+
+  const handleChannelChange = useCallback(async (ch: number) => {
+    onChannelChange?.(ch);
+    // Only restart evaluation when the modal owns the stream lifecycle.
+    // When evaluationActive=true the parent (useEvaluation.selectChannel) already
+    // restarts the stream via onChannelChange — doing it again here causes a
+    // double stop/start race on the SharedAudioInput mutex → spinner of death.
+    if (listening && !evaluationActive) {
+      await stopEvaluation();
+      await startEvaluation(selectedDevice, ch);
+    }
+  }, [evaluationActive, listening, selectedDevice, onChannelChange]);
 
   const handleGainChange = useCallback((db: number) => {
     setInputGainDb(db);
@@ -150,13 +201,30 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
   // ─── Recording ──────────────────────────────────────────────
 
   const handleRecord = useCallback(async () => {
-    await startRecording();
+    liveWaveformRef.current = [];
+    setLiveWaveform([]);
+    try {
+      await startRecording();
+    } catch (err) {
+      // Stream may not be ready yet (e.g. rapid channel change still settling).
+      // Reset quietly rather than leaving the UI stuck in a half-recording state.
+      console.error("[AudioInputTestModal] start_recording failed:", err);
+      liveWaveformRef.current = [];
+      setLiveWaveform([]);
+      return;
+    }
     setRecState("recording");
     setRecElapsed(0);
     const start = Date.now();
     timerRef.current = setInterval(() => {
       const elapsed = (Date.now() - start) / 1000;
       setRecElapsed(elapsed);
+      // Sample dB-scaled RMS for the live waveform display
+      const rms = smoothRmsRef.current;
+      const db = rms > 0.00001 ? 20 * Math.log10(rms) : -60;
+      const barH = Math.max(0, Math.min(1, (Math.max(-60, db) + 60) / 60));
+      liveWaveformRef.current = [...liveWaveformRef.current, barH];
+      setLiveWaveform([...liveWaveformRef.current]);
       if (elapsed >= 10) {
         // Auto-stop at 10 seconds
         handleStopRecording();
@@ -166,6 +234,8 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
 
   const handleStopRecording = useCallback(async () => {
     clearInterval(timerRef.current);
+    liveWaveformRef.current = [];
+    setLiveWaveform([]);
     const duration = await stopRecording();
     setRecDuration(duration);
     const wf = await getWaveform();
@@ -203,10 +273,17 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
     await discardRecording();
     setRecState("idle");
     setWaveform([]);
+    liveWaveformRef.current = [];
+    setLiveWaveform([]);
     setRecDuration(0);
   }, []);
 
   if (!open) return null;
+
+  // Derive channel info from the current device list entry.
+  const selectedDeviceObj = devices.find((d) => d.name === selectedDevice);
+  const modalChannelCount = selectedDeviceObj?.channels ?? 0;
+  const modalIsInterface = selectedDeviceObj?.isInterface ?? false;
 
   const rawRms = spectrum?.rms ?? 0;
 
@@ -249,13 +326,30 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
         </div>
 
         <div className="input-test-modal-body">
-          <div className="input-test-device-row">
-            <label className="input-test-label">Device</label>
-            <InputDeviceDropdown
-              devices={devices}
-              value={selectedDevice ?? ""}
-              onChange={handleDeviceChange}
-            />
+          {/* Device + channel + hint grouped so the body's 20px gap only
+              applies once for this whole block, not for each sub-item. */}
+          <div className="input-test-device-area">
+            <div className="input-test-device-row">
+              <label className="input-test-label">Device</label>
+              <InputDeviceDropdown
+                devices={devices}
+                value={selectedDevice ?? ""}
+                onChange={handleDeviceChange}
+              />
+            </div>
+            {modalChannelCount > 1 && (
+              <ChannelDropdown
+                channelCount={modalChannelCount}
+                value={inputChannel}
+                isInterface={modalIsInterface}
+                onChange={handleChannelChange}
+              />
+            )}
+            {inputChannel >= 2 && modalIsInterface && (
+              <span className="channel-picker-hint" title="Captures audio processed by other apps (AmpliTube, DAW, etc.)">
+                Loopback — captures processed audio from your DAW or amp sim
+              </span>
+            )}
           </div>
 
           <div className="input-test-gain-section">
@@ -344,12 +438,27 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
                   )}
                 </div>
               ) : recState === "recording" ? (
-                <div className="input-test-rec-progress">
-                  <div
-                    className="input-test-rec-progress-fill"
-                    style={{ width: `${(recElapsed / 10) * 100}%` }}
-                  />
-                </div>
+                liveWaveform.length > 0 ? (
+                  <div className="input-test-waveform rec-live">
+                    <div className="input-test-waveform-bars">
+                      {liveWaveform.map((h, i) => (
+                        <div key={i} className="input-test-waveform-col">
+                          <div
+                            className="input-test-waveform-bar"
+                            style={{ height: `${Math.max(h * 100, 2)}%` }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="input-test-rec-progress">
+                    <div
+                      className="input-test-rec-progress-fill"
+                      style={{ width: `${(recElapsed / 10) * 100}%` }}
+                    />
+                  </div>
+                )
               ) : (
                 <div className="input-test-rec-empty" />
               )}

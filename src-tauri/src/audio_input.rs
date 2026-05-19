@@ -40,6 +40,9 @@ pub struct AudioDevice {
     pub is_default: bool,
     #[serde(rename = "isInterface")]
     pub is_interface: bool,
+    /// Number of input channels reported by the device's default config.
+    /// 0 means the query failed (treat as 1 channel for UI purposes).
+    pub channels: u16,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +100,10 @@ pub struct AudioInput {
     // Recording
     is_recording: Arc<AtomicBool>,
     recording_buf: Arc<Mutex<Vec<f32>>>,
+    /// Sample rate snapshotted at start_recording() time. Isolated from
+    /// self.sample_rate so a concurrent start() call (device/channel change)
+    /// cannot corrupt the SR used for duration calculation and resampling.
+    recording_sr: Arc<Mutex<u32>>,
     // Playback
     playback_alive: Arc<AtomicBool>,
     playback_thread: Option<thread::JoinHandle<()>>,
@@ -131,6 +138,7 @@ impl AudioInput {
             sample_rate: Arc::new(Mutex::new(48000)),
             is_recording: Arc::new(AtomicBool::new(false)),
             recording_buf: Arc::new(Mutex::new(Vec::new())),
+            recording_sr: Arc::new(Mutex::new(48000)),
             playback_alive: Arc::new(AtomicBool::new(false)),
             playback_thread: None,
             recorded_audio: Arc::new(Mutex::new(None)),
@@ -155,9 +163,21 @@ impl AudioInput {
                 if let Ok(name) = device.name() {
                     let lower = name.to_lowercase();
                     let is_interface = INTERFACE_PATTERNS.iter().any(|p| lower.contains(p));
+                    // Use max channels across all supported configs, not just the
+                    // default — on macOS, Focusrite Scarlett loopback channels (3/4)
+                    // appear in supported configs but not in default_input_config().
+                    let channels = device
+                        .supported_input_configs()
+                        .ok()
+                        .and_then(|cfgs| cfgs.map(|c| c.channels()).max())
+                        .unwrap_or_else(|| {
+                            device.default_input_config().map(|c| c.channels()).unwrap_or(0)
+                        });
+                    audio_dbg!("[audio_input] list_devices: {:?} — {} channels (max across supported configs), is_interface={}", name, channels, is_interface);
                     devices.push(AudioDevice {
                         is_default: name == default_name,
                         is_interface,
+                        channels,
                         name,
                     });
                 }
@@ -168,7 +188,8 @@ impl AudioInput {
 
     /// Start capturing audio from the given device.
     /// Spawns a dedicated thread that owns the cpal stream.
-    pub fn start(&mut self, device_name: Option<&str>, app_handle: AppHandle) -> Result<(), String> {
+    /// `input_channel` is 0-indexed; it is clamped to the device's valid range.
+    pub fn start(&mut self, device_name: Option<&str>, input_channel: usize, app_handle: AppHandle) -> Result<(), String> {
         self.stop();
 
         // Resolve device and config on the current thread (for error reporting)
@@ -185,7 +206,34 @@ impl AudioInput {
 
         let default_config = device.default_input_config().map_err(|e| e.to_string())?;
         let sample_format = default_config.sample_format();
-        let in_channels = default_config.channels();
+        let default_channels = default_config.channels();
+        let default_sr = default_config.sample_rate();
+        // If the requested channel index exceeds what the default config exposes,
+        // search for a supported config that provides enough channels at the same
+        // sample rate. This unlocks Scarlett loopback channels (indices 2/3) that
+        // are absent from default_input_config() on macOS but appear in
+        // supported_input_configs(). Falls back to default channel count on failure.
+        let needed = (input_channel as u16).saturating_add(1);
+        let in_channels = if needed > default_channels {
+            device
+                .supported_input_configs()
+                .ok()
+                .and_then(|cfgs| {
+                    cfgs.filter(|c| {
+                        c.channels() >= needed
+                            && c.min_sample_rate() <= default_sr
+                            && c.max_sample_rate() >= default_sr
+                    })
+                    .map(|c| c.channels())
+                    .min() // fewest channels that satisfies the request
+                })
+                .unwrap_or(default_channels)
+        } else {
+            default_channels
+        };
+        // Clamp the requested channel index to the device's valid range.
+        // Done once here so both the F32 and I16 closures capture the same value.
+        let ch = input_channel.min(in_channels.saturating_sub(1) as usize);
         let config = StreamConfig {
             channels: in_channels,
             sample_rate: default_config.sample_rate(),
@@ -193,7 +241,7 @@ impl AudioInput {
         };
         let sr = config.sample_rate.0;
 
-        audio_dbg!("[audio_input] device config: {}Hz, {}ch, {:?}", sr, in_channels, sample_format);
+        audio_dbg!("[audio_input] device config: {}Hz, {}ch, {:?} (input_channel={}→ch={})", sr, in_channels, sample_format, input_channel, ch);
 
         // Update sample rate and resize ring buffer
         {
@@ -253,6 +301,8 @@ impl AudioInput {
         let sample_rate = sr;
         let session_start_instant = std::time::Instant::now();
         let device_name_owned = device.name().unwrap_or_default();
+        // Move the resolved channel index into the thread closure.
+        let selected_ch = ch;
 
         self.capture_thread = Some(thread::spawn(move || {
             // Re-open the device on this thread (cpal streams must be created on the thread that runs them)
@@ -327,12 +377,13 @@ impl AudioInput {
                     let levels_out = audio_levels_cb.clone();
                     let start = session_start_instant;
                     let sr_frames = sample_rate;
+                    let ch = selected_ch;
                     let mut level_acc = LevelAcc::new();
                     device.build_input_stream(
                     &config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         let g = f32::from_bits(gain.load(Ordering::Relaxed));
-                        let mono: Vec<f32> = data.chunks(channels).map(|f| f[0] * g).collect();
+                        let mono: Vec<f32> = data.chunks(channels).map(|f| f[ch] * g).collect();
                         if let Ok(mut r) = ring_for_callback.try_lock() {
                             r.write(&mono);
                         }
@@ -378,13 +429,14 @@ impl AudioInput {
                     let levels_out = audio_levels_cb.clone();
                     let start = session_start_instant;
                     let sr_frames = sample_rate;
+                    let ch = selected_ch;
                     let mut level_acc = LevelAcc::new();
                     device.build_input_stream(
                     &config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
                         let g = f32::from_bits(gain.load(Ordering::Relaxed));
                         let mono: Vec<f32> = data.chunks(channels)
-                            .map(|f| (f[0] as f32 / i16::MAX as f32) * g)
+                            .map(|f| (f[ch] as f32 / i16::MAX as f32) * g)
                             .collect();
                         if let Ok(mut r) = ring_for_callback.try_lock() {
                             r.write(&mono);
@@ -518,8 +570,12 @@ impl AudioInput {
             let mut buf = self.recording_buf.lock().unwrap();
             buf.clear();
             let sr = *self.sample_rate.lock().unwrap();
+            // Snapshot the current SR so stop_recording() uses the rate that
+            // was active when capture began, not whatever start() may have set
+            // afterwards (e.g. device/channel change while recording).
+            *self.recording_sr.lock().unwrap() = sr;
             buf.reserve(sr as usize * 10);
-            audio_dbg!("[recording] started, sample_rate={}Hz", sr);
+            eprintln!("[recording] started, sample_rate={}Hz", sr);
         }
         self.is_recording.store(true, Ordering::SeqCst);
     }
@@ -527,13 +583,15 @@ impl AudioInput {
     /// Stop recording and stash the buffer for playback. Returns duration in seconds.
     pub fn stop_recording(&mut self) -> f32 {
         self.is_recording.store(false, Ordering::SeqCst);
-        let sr = *self.sample_rate.lock().unwrap();
+        // Use the SR that was current at start_recording() time, not the live
+        // self.sample_rate which may have been updated by a concurrent start().
+        let sr = *self.recording_sr.lock().unwrap();
         let samples: Vec<f32> = {
             let mut buf = self.recording_buf.lock().unwrap();
             std::mem::take(&mut *buf)
         };
         let duration = samples.len() as f32 / sr as f32;
-        audio_dbg!("[recording] stopped, {} samples, {:.2}s @ {}Hz", samples.len(), duration, sr);
+        eprintln!("[recording] stopped, {} samples, {:.2}s @ {}Hz", samples.len(), duration, sr);
         *self.recorded_audio.lock().unwrap() = Some((samples, sr));
         duration
     }
@@ -612,12 +670,14 @@ impl AudioInput {
 
             let out_sr = default_config.sample_rate().0;
             let out_format = default_config.sample_format();
-            // Force stereo for playback — some interfaces (e.g. Scarlett) report
-            // multichannel in default_output_config but the actual stream delivers
-            // stereo buffers, causing slow-mo when we divide by too many channels.
-            let out_channels: usize = 2;
+            // Cap at stereo: some interfaces (e.g. Scarlett) report multichannel
+            // in default_output_config but the actual stream delivers stereo buffers;
+            // dividing data.len() by 4 would make the cursor advance at 0.5× → slow-mo.
+            // Floor at 1: mono output devices (Bluetooth SCO, virtual devices) report
+            // channels=1; dividing by 2 would make the cursor advance at 0.5× → slow-mo.
+            let out_channels: usize = (default_config.channels() as usize).min(2).max(1);
 
-            audio_dbg!("[playback] recording: {} samples @ {}Hz, output: {}Hz {}ch {:?} (device reports {}ch)",
+            eprintln!("[playback] recording: {} samples @ {}Hz, output: {}Hz {}ch {:?} (device reports {}ch)",
                 samples.len(), rec_sr, out_sr, out_channels, out_format, default_config.channels());
 
             let config = StreamConfig {
@@ -628,6 +688,7 @@ impl AudioInput {
 
             // Resample if needed (linear interpolation)
             let playback_samples = if rec_sr != out_sr {
+                eprintln!("[playback] SR mismatch: recorded={}Hz output={}Hz → resampling", rec_sr, out_sr);
                 let ratio = rec_sr as f64 / out_sr as f64;
                 let out_len = (samples.len() as f64 / ratio).ceil() as usize;
                 let mut resampled = Vec::with_capacity(out_len);
@@ -661,7 +722,7 @@ impl AudioInput {
                         return;
                     }
                     if !logged_cb.swap(true, Ordering::Relaxed) {
-                        audio_dbg!("[playback] first callback: data.len()={}, out_channels={}, frames={}",
+                        eprintln!("[playback] first callback: data.len()={}, out_channels={}, frames={}",
                             data.len(), out_channels, data.len() / out_channels);
                     }
                     let pos = cursor_for_cb.load(Ordering::Relaxed);

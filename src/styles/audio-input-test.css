@@ -72,7 +72,14 @@
   gap: 20px;
 }
 
-/* Device selector */
+/* Device selector group — wraps the device dropdown, channel picker, and
+   loopback hint so the body's 20px gap only fires once for the whole block. */
+.input-test-device-area {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .input-test-device-row {
   display: flex;
   flex-direction: column;
@@ -355,14 +362,23 @@
 .input-test-waveform-bar {
   width: 100%;
   border-radius: 1px;
-  background: var(--text-tertiary);
-  opacity: 0.4;
-  transition: opacity 0.15s ease;
+  /* Use the accent colour at low opacity so the ghost waveform is clearly
+     visible in "recorded" state, while the played portion (below) stands out. */
+  background: var(--accent);
+  opacity: 0.28;
+  transition: opacity 0.08s linear;
 }
 
 .input-test-waveform-bar.played {
   background: var(--accent);
-  opacity: 0.85;
+  opacity: 0.9;
+}
+
+/* Live recording waveform — red bars that grow in real time */
+.rec-live .input-test-waveform-bar {
+  background: #ef4444;
+  opacity: 0.75;
+  transition: none; /* suppress width-resize flicker as bars accumulate */
 }
 
 .input-test-waveform-cursor {

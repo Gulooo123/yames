@@ -712,6 +712,7 @@ pub async fn list_audio_input_devices() -> Vec<AudioDevice> {
 #[tauri::command]
 pub async fn start_evaluation(
     device_name: Option<String>,
+    input_channel: Option<usize>,
     audio_input: State<'_, SharedAudioInput>,
     onset_detector: State<'_, SharedOnsetDetector>,
     timing_analyzer: State<'_, SharedTimingAnalyzer>,
@@ -732,7 +733,7 @@ pub async fn start_evaluation(
     timing_analyzer.lock().unwrap().stop();
 
     let mut ai = audio_input.lock().unwrap();
-    ai.start(device_name.as_deref(), app_handle.clone())?;
+    ai.start(device_name.as_deref(), input_channel.unwrap_or(0), app_handle.clone())?;
 
     // Clear previous session data + stamp the session start so the D1
     // diagnostic log (saved at stop) has a stable epoch.
@@ -1104,7 +1105,7 @@ fn persist_session_log(
 
 #[tauri::command]
 pub fn get_evaluation_state(audio_input: State<SharedAudioInput>) -> bool {
-    let ai = audio_input.lock().unwrap();
+    let ai = audio_input.lock().unwrap_or_else(|e| e.into_inner());
     ai.is_active()
 }
 
@@ -1267,7 +1268,7 @@ pub fn clear_session_logs(app_handle: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn start_recording(audio_input: State<SharedAudioInput>) -> Result<(), String> {
-    let ai = audio_input.lock().unwrap();
+    let ai = audio_input.lock().unwrap_or_else(|e| e.into_inner());
     if !ai.is_active() {
         return Err("Audio input is not active".to_string());
     }
@@ -1277,7 +1278,7 @@ pub fn start_recording(audio_input: State<SharedAudioInput>) -> Result<(), Strin
 
 #[tauri::command]
 pub fn stop_recording(audio_input: State<SharedAudioInput>) -> f32 {
-    let mut ai = audio_input.lock().unwrap();
+    let mut ai = audio_input.lock().unwrap_or_else(|e| e.into_inner());
     ai.stop_recording()
 }
 
@@ -1292,32 +1293,32 @@ pub fn start_playback(
         let engine = engine_state.0.lock().unwrap();
         engine.device_name().map(|s| s.to_string())
     };
-    let mut ai = audio_input.lock().unwrap();
+    let mut ai = audio_input.lock().unwrap_or_else(|e| e.into_inner());
     ai.start_playback(app_handle, output_device_name.as_deref())
 }
 
 #[tauri::command]
 pub fn stop_playback(audio_input: State<SharedAudioInput>) {
-    let mut ai = audio_input.lock().unwrap();
+    let mut ai = audio_input.lock().unwrap_or_else(|e| e.into_inner());
     ai.stop_playback();
 }
 
 #[tauri::command]
 pub fn discard_recording(audio_input: State<SharedAudioInput>) {
-    let mut ai = audio_input.lock().unwrap();
+    let mut ai = audio_input.lock().unwrap_or_else(|e| e.into_inner());
     ai.discard_recording();
 }
 
 #[tauri::command]
 pub fn get_waveform(audio_input: State<SharedAudioInput>) -> Vec<f32> {
-    let ai = audio_input.lock().unwrap();
+    let ai = audio_input.lock().unwrap_or_else(|e| e.into_inner());
     ai.get_waveform(100)
 }
 
 #[tauri::command]
 pub fn set_input_gain(gain_db: f32, audio_input: State<SharedAudioInput>) {
     let gain_linear = 10.0_f32.powf(gain_db / 20.0);
-    let ai = audio_input.lock().unwrap();
+    let ai = audio_input.lock().unwrap_or_else(|e| e.into_inner());
     ai.set_input_gain(gain_linear);
 }
 

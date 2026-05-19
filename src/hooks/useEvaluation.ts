@@ -50,6 +50,8 @@ export function useEvaluation() {
   const [enabled, setEnabled] = useState(false);
   const [devices, setDevices] = useState<AudioInputDevice[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string | undefined>(undefined);
+  /** 0-indexed channel index (0 = default, matches Rust-side). */
+  const [selectedChannel, setSelectedChannel] = useState<number>(0);
   const [spectrum, setSpectrum] = useState<AudioSpectrum | null>(null);
   const [showRealtime, setShowRealtime] = useState(true);
   const unlistenRef = useRef<(() => void) | null>(null);
@@ -65,6 +67,12 @@ export function useEvaluation() {
   const [inferredGrid, setInferredGrid] = useState<InferredGridChanged | null>(null);
   const gridUnlistenRef = useRef<(() => void) | null>(null);
 
+  // Serialization flag: prevents concurrent stop+start races on the Rust Mutex
+  // when the user changes device or channel rapidly. A second change fired while
+  // a restart is in-flight is silently dropped — state updates still apply, but
+  // the stream stays on the previous device/channel until the restart completes.
+  const restartingRef = useRef(false);
+
   // Load saved preferences on mount + sync persisted input gain to Rust DSP.
   // This last step is critical: the cpal callback defaults to unity gain
   // on every app launch, so users with a quiet input were silently scored
@@ -75,6 +83,8 @@ export function useEvaluation() {
       if (savedDevice) setSelectedDevice(savedDevice);
       const savedRealtime = await storeLoad<boolean>("evaluationShowRealtime");
       if (savedRealtime !== undefined) setShowRealtime(savedRealtime);
+      const savedChannel = await storeLoad<number>("evaluationChannel");
+      if (savedChannel !== undefined && savedChannel !== null) setSelectedChannel(savedChannel);
       // Always push the persisted gain to Rust — even if no device is saved
       // yet (the "__default" bucket), so unity-gain is never the de facto
       // setting on first launch.
@@ -194,23 +204,48 @@ export function useEvaluation() {
       setEnabled(false);
     } else {
       await refreshDevices();
-      await startEvaluation(selectedDevice);
+      await startEvaluation(selectedDevice, selectedChannel);
       setEnabled(true);
     }
-  }, [enabled, selectedDevice, refreshDevices]);
+  }, [enabled, selectedDevice, selectedChannel, refreshDevices]);
 
   const selectDevice = useCallback(async (deviceName: string) => {
     setSelectedDevice(deviceName);
+    // Reset channel to 0 when device changes (per task spec).
+    setSelectedChannel(0);
     await storeSave("evaluationDevice", deviceName);
+    await storeSave("evaluationChannel", 0);
     // Apply this device's persisted gain before (re)starting the stream so
     // the DSP sees boosted samples from the very first callback.
     await applyPersistedGain(deviceName);
-    // If currently active, restart with new device
+    // If currently active, restart with new device (channel 0).
     if (enabled) {
-      await stopEvaluation();
-      await startEvaluation(deviceName);
+      if (restartingRef.current) return;
+      restartingRef.current = true;
+      try {
+        await stopEvaluation();
+        await startEvaluation(deviceName, 0);
+      } finally {
+        restartingRef.current = false;
+      }
     }
   }, [enabled]);
+
+  const selectChannel = useCallback(async (channel: number) => {
+    setSelectedChannel(channel);
+    await storeSave("evaluationChannel", channel);
+    // If currently active, restart with the new channel immediately.
+    if (enabled) {
+      if (restartingRef.current) return;
+      restartingRef.current = true;
+      try {
+        await stopEvaluation();
+        await startEvaluation(selectedDevice, channel);
+      } finally {
+        restartingRef.current = false;
+      }
+    }
+  }, [enabled, selectedDevice]);
 
   const toggleRealtime = useCallback(async () => {
     const next = !showRealtime;
@@ -233,6 +268,8 @@ export function useEvaluation() {
     refreshDevices,
     selectedDevice,
     selectDevice,
+    selectedChannel,
+    selectChannel,
     spectrum,
     hasSignal,
     showRealtime,

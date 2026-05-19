@@ -389,8 +389,11 @@ export function onAudioInputDevicesChanged(callback: (devices: AudioInputDevice[
   return listen<AudioInputDevice[]>("audio-input-devices-changed", (e) => callback(e.payload));
 }
 
-export async function startEvaluation(deviceName?: string): Promise<void> {
-  return invoke("start_evaluation", { deviceName: deviceName ?? null });
+export async function startEvaluation(deviceName?: string, inputChannel?: number): Promise<void> {
+  return invoke("start_evaluation", {
+    deviceName: deviceName ?? null,
+    inputChannel: inputChannel ?? null,
+  });
 }
 
 export async function stopEvaluation(): Promise<void> {

@@ -11,6 +11,7 @@ import type { CalibrationCacheEntry } from "../../ipc";
 import { AudioOutputDropdown } from "../../components/AudioOutputDropdown";
 import { AudioInputDropdown } from "../../components/AudioInputDropdown";
 import { MidiDeviceDropdown } from "../../components/MidiDeviceDropdown";
+import { ChannelDropdown } from "../../components/ChannelDropdown";
 import type { useEvaluation } from "../../hooks/useEvaluation";
 import type { UseMidiReturn } from "../../hooks/useMidi";
 
@@ -58,6 +59,11 @@ export function DevicesSettingsSection({
   onOpenInputTest: () => void;
   instrument: string;
 }) {
+  // Find the selected input device object to read its channel count.
+  const selectedInputDevice = evaluation.devices.find(
+    (d) => d.name === evaluation.selectedDevice,
+  );
+  const deviceChannelCount = selectedInputDevice?.channels ?? 0;
   // Per-instrument calibration cache lookup. We re-fetch whenever the
   // active `(instrument, audio input)` pair changes so the displayed
   // value tracks what start_evaluation would actually use next session.
@@ -135,10 +141,9 @@ export function DevicesSettingsSection({
             Test
           </button>
         </div>
-        {/* Per-instrument calibration cache hint. Only renders when the
-            current (instrument, input device) pair has a cached offset
-            — otherwise we'd surface UI noise on first launch. The
-            Recalibrate button clears just this pair; other cached
+        {/* Per-instrument calibration cache hint. Sits right under the
+            device dropdown so the user sees it before touching anything
+            else. Recalibrate button clears just this pair; other cached
             combos survive. */}
         {calEntry && (
           <div className="calibration-cache-hint">
@@ -154,6 +159,24 @@ export function DevicesSettingsSection({
               Recalibrate
             </button>
           </div>
+        )}
+        {/* Channel picker — shown for any multi-channel device (≥ 2 ch).
+            Sits below the calibration hint using the same midi-dropdown
+            style. For interfaces (Scarlett etc.) channels 3/4 are loopback. */}
+        {deviceChannelCount > 1 && (
+          <div className="midi-device-row" style={{ marginTop: 8 }}>
+            <ChannelDropdown
+              channelCount={deviceChannelCount}
+              value={evaluation.selectedChannel}
+              isInterface={selectedInputDevice?.isInterface ?? false}
+              onChange={(ch) => evaluation.selectChannel(ch)}
+            />
+          </div>
+        )}
+        {evaluation.selectedChannel >= 2 && (selectedInputDevice?.isInterface ?? false) && (
+          <span className="channel-picker-hint" title="Captures audio processed by other apps (AmpliTube, DAW, etc.)">
+            Loopback — captures processed audio from your DAW or amp sim
+          </span>
         )}
       </div>
 
