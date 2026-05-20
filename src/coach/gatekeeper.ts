@@ -202,6 +202,14 @@ export const BURST_LONG_MAX = 5;
 export const BURST_LONG_PENALTY_MS = 90_000;
 
 /**
+ * Alive-tick interval during a drill ramp. Even while `DRILL_RAMP_ACTIVE`
+ * suppresses regular tips, a short "still tracking" may still slip through
+ * once this interval has elapsed since the last spoken event — so long
+ * silence during a long ramp doesn't feel broken.
+ */
+export const DRILL_RAMP_ALIVE_TICK_MS = 90_000;
+
+/**
  * Warmup grace — give the player a quiet runway at the start of a
  * session and after any tempo/exercise change. Player feedback
  * (2026-05-17): "what if a user is just 'warming up' not necessarily
@@ -248,7 +256,8 @@ export type ScenarioTag =
   | "low_confidence"
   | "check_in"
   | "boundary_signal_a"
-  | "boundary_signal_b";
+  | "boundary_signal_b"
+  | "ramp_complete";
 
 export type Tier = "spoken" | "written";
 
@@ -355,6 +364,12 @@ export type GatekeeperContext = {
    * the cooldown and streak suppression.
    */
   force?: { scenario: ScenarioTag; context: Record<string, number | string | boolean> };
+  /**
+   * True while a drill ramp is actively stepping BPM toward the target
+   * (not at steady target). When true the `DRILL_RAMP_ACTIVE` preempt
+   * suppresses non-critical tips. Defaults to false when omitted.
+   */
+  inDrillRamp?: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -735,6 +750,43 @@ function passesCorrectiveChannel(
 }
 
 /**
+ * Drill-ramp preempt check.
+ *
+ * When `ctx.inDrillRamp` is true, suppress all non-critical tips so
+ * the coach stays quiet during a BPM ramp and can fire a
+ * `ramp_complete` summary when the ramp ends.
+ *
+ * Allowed through even during a ramp:
+ *   - ALWAYS_SPOKEN scenarios (boundary signals, milestones, recovery,
+ *     fatigue, new_band_locked) — these are user-initiated or safety
+ *     interventions that must not be silenced.
+ *   - The 90-second alive tick: when the last spoken event was ≥
+ *     `DRILL_RAMP_ALIVE_TICK_MS` ago, one tip may pass through so the
+ *     player knows the coach is still tracking during a long ramp.
+ *   - `ramp_complete` itself.
+ *
+ * Returns `{ allowed: true }` when the tip may proceed, or
+ * `{ allowed: false, reason: "DRILL_RAMP_ACTIVE" }` when suppressed.
+ *
+ * Exported for direct unit-testing (no React dependency).
+ */
+export function checkDrillRampPreempt(
+  state: GatekeeperState,
+  scenario: ScenarioTag,
+  now: number,
+  inDrillRamp: boolean,
+): { allowed: boolean; reason?: "DRILL_RAMP_ACTIVE" } {
+  if (!inDrillRamp) return { allowed: true };
+  // Always-spoken scenarios bypass the preempt.
+  if (isAlwaysSpoken(scenario)) return { allowed: true };
+  // ramp_complete itself bypasses.
+  if (scenario === "ramp_complete") return { allowed: true };
+  // Alive-tick bypass: if we've been quiet long enough, let one through.
+  if (now - state.lastSpokenMs >= DRILL_RAMP_ALIVE_TICK_MS) return { allowed: true };
+  return { allowed: false, reason: "DRILL_RAMP_ACTIVE" };
+}
+
+/**
  * Combined gate: a detected scenario only passes when ALL gates pass.
  * Order is cheapest-first for short-circuit efficiency, but every
  * gate is consulted on a real fire so behavior is independent of
@@ -747,7 +799,12 @@ function passesAllGates(
   scenario: ScenarioTag,
   tier: Tier,
   now: number,
+  inDrillRamp?: boolean,
 ): boolean {
+  // Drill-ramp preempt: check before any other gate so the fast-path
+  // short-circuit still works. Allowed scenarios (ALWAYS_SPOKEN,
+  // ramp_complete, alive tick) pass through; everything else is blocked.
+  if (!checkDrillRampPreempt(state, scenario, now, inDrillRamp ?? false).allowed) return false;
   if (!passesPerScenarioCooldown(state, scenario, now)) return false;
   // Corrective-channel cooldown runs alongside the per-scenario gate.
   // It only affects {rushing_trend, dragging_trend, accuracy_drop,
@@ -1156,6 +1213,7 @@ export function evaluate(
           dropProbe.detection.scenario,
           dropProbe.detection.tier,
           ctx.now,
+          ctx.inDrillRamp,
         )
       ) {
         return commit(
@@ -1177,7 +1235,7 @@ export function evaluate(
   const pb = detectPersonalBestStreak(working, ctx.window);
   if (pb) {
     if (pb.partialState) working = { ...working, ...pb.partialState };
-    if (passesAllGates(working, pb.scenario, pb.tier, ctx.now)) {
+    if (passesAllGates(working, pb.scenario, pb.tier, ctx.now, ctx.inDrillRamp)) {
       return commit(
         working,
         ctx.now,
@@ -1192,7 +1250,7 @@ export function evaluate(
   if (band.partialState) working = { ...working, ...band.partialState };
   if (
     band.detection &&
-    passesAllGates(working, band.detection.scenario, band.detection.tier, ctx.now)
+    passesAllGates(working, band.detection.scenario, band.detection.tier, ctx.now, ctx.inDrillRamp)
   ) {
     return commit(
       working,
@@ -1217,7 +1275,7 @@ export function evaluate(
     const suppressSpoken =
       inStreak && !isAlwaysSpoken(trend.scenario) && trend.tier === "spoken";
     const tier: Tier = suppressSpoken ? "written" : trend.tier;
-    if (passesAllGates(working, trend.scenario, tier, ctx.now)) {
+    if (passesAllGates(working, trend.scenario, tier, ctx.now, ctx.inDrillRamp)) {
       return commit(
         working,
         ctx.now,
@@ -1236,6 +1294,7 @@ export function evaluate(
       lowConf.detection.scenario,
       lowConf.detection.tier,
       ctx.now,
+      ctx.inDrillRamp,
     )
   ) {
     return commit(
@@ -1248,7 +1307,7 @@ export function evaluate(
   // 7. Adaptive cooldown floor — emits at most once per quiet window
   // because committing updates `lastSpokenMs`.
   const checkIn = detectCheckIn(working, ctx.now);
-  if (checkIn && passesAllGates(working, checkIn.scenario, checkIn.tier, ctx.now)) {
+  if (checkIn && passesAllGates(working, checkIn.scenario, checkIn.tier, ctx.now, ctx.inDrillRamp)) {
     return commit(
       working,
       ctx.now,

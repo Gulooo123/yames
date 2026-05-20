@@ -10,7 +10,9 @@ import {
   pickTemplate,
   recordUtterance,
   type TemplateCatalog,
+  type Vocabulary,
 } from "./templates";
+import { TEMPLATE_CATALOG } from "./templateCatalog";
 
 // ---------------------------------------------------------------------------
 // Deterministic RNG helpers
@@ -524,4 +526,81 @@ describe("constants", () => {
   it("SIMILARITY_MAX_RETRIES is non-negative", () => {
     expect(SIMILARITY_MAX_RETRIES).toBeGreaterThanOrEqual(0);
   });
+});
+
+// ---------------------------------------------------------------------------
+// session_start greeting slot — 96-combination snapshot
+// (6 vocabs × 8 variants × 2 paths = cold + returning)
+// ---------------------------------------------------------------------------
+
+describe("session_start greeting slots — 96 combinations", () => {
+  const VOCABS: Vocabulary[] = [
+    "generic",
+    "drums",
+    "electric-guitar",
+    "acoustic-guitar",
+    "bass",
+    "piano",
+  ];
+
+  // Fixed context values for the returning path.
+  const RETURNING_CONTEXT = { lastScore: 88, lastBpm: 135 };
+
+  for (const vocab of VOCABS) {
+    const catalog = TEMPLATE_CATALOG[vocab];
+
+    // -------------------------------------------------------------------------
+    // Cold path — session_start_cold
+    // -------------------------------------------------------------------------
+    describe(`${vocab} / session_start_cold`, () => {
+      it(`has exactly 8 variants`, () => {
+        const variants = catalog?.["session_start_cold"]?.["neutral"];
+        expect(variants, `${vocab}.session_start_cold.neutral missing`).toBeDefined();
+        expect(variants!.length).toBe(8);
+      });
+
+      const coldVariants = catalog?.["session_start_cold"]?.["neutral"] ?? [];
+      for (let i = 0; i < coldVariants.length; i++) {
+        it(`variant [${i}] does not contain raw {lastScore} or {lastBpm}`, () => {
+          // Cold variants must NOT contain these placeholders at all.
+          const tpl = coldVariants[i];
+          expect(tpl).not.toMatch(/\{lastScore\}/);
+          expect(tpl).not.toMatch(/\{lastBpm\}/);
+          // After filling with an empty context, no raw placeholder tokens remain.
+          const filled = fillTemplate(tpl, {});
+          expect(filled).not.toMatch(/\{[a-zA-Z0-9_]+\}/);
+        });
+      }
+    });
+
+    // -------------------------------------------------------------------------
+    // Returning path — session_start_returning
+    // -------------------------------------------------------------------------
+    describe(`${vocab} / session_start_returning`, () => {
+      it(`has exactly 8 variants`, () => {
+        const variants = catalog?.["session_start_returning"]?.["neutral"];
+        expect(variants, `${vocab}.session_start_returning.neutral missing`).toBeDefined();
+        expect(variants!.length).toBe(8);
+      });
+
+      const returningVariants = catalog?.["session_start_returning"]?.["neutral"] ?? [];
+      for (let i = 0; i < returningVariants.length; i++) {
+        it(`variant [${i}] contains {lastScore} and {lastBpm} placeholders in template`, () => {
+          const tpl = returningVariants[i];
+          expect(tpl, `${vocab}.session_start_returning.neutral[${i}] missing {lastScore}`).toMatch(/\{lastScore\}/);
+          expect(tpl, `${vocab}.session_start_returning.neutral[${i}] missing {lastBpm}`).toMatch(/\{lastBpm\}/);
+        });
+
+        it(`variant [${i}] resolves to actual values when filled`, () => {
+          const tpl = returningVariants[i];
+          const filled = fillTemplate(tpl, RETURNING_CONTEXT);
+          // Resolved values appear in the output.
+          expect(filled).toContain("88");
+          expect(filled).toContain("135");
+          // No raw placeholder tokens remain after fill.
+          expect(filled).not.toMatch(/\{[a-zA-Z0-9_]+\}/);
+        });
+      }
+    });
+  }
 });

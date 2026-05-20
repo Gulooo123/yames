@@ -142,6 +142,13 @@ export type StaminaPattern = {
   scoreDrop: number;
   /** Sessions that contributed (≥1 segment in early + ≥1 in late). */
   sessionsCounted: number;
+  /**
+   * Approximate session duration (minutes) at which stamina degradation
+   * tends to appear. Derived from the average estimated practice length
+   * of sessions in the qualifying BPM band. Used to fill the
+   * `{staminaMinutes}` template placeholder.
+   */
+  staminaMinutes: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -281,6 +288,13 @@ export function detectStaminaPattern(
     const lateMean = mean(late.map((s) => s.report.score));
     const drop = earlyMean - lateMean;
     if (drop < STAMINA_SCORE_DROP_THRESHOLD) continue;
+    // Estimate the session duration at which fatigue typically surfaces —
+    // average practice length across all sessions in this band, rounded to
+    // the nearest whole minute (minimum 1). This fills {staminaMinutes}.
+    const avgMinutes = Math.max(
+      1,
+      Math.round(estimateCumulativeMinutes(bandSessions) / bandSessions.length),
+    );
     const candidate: StaminaPattern = {
       bpmLow: low,
       bpmHigh: low + BPM_BAND_WIDTH,
@@ -288,6 +302,7 @@ export function detectStaminaPattern(
       lateMeanScore: lateMean,
       scoreDrop: drop,
       sessionsCounted: early.length + late.length,
+      staminaMinutes: avgMinutes,
     };
     if (!best || candidate.scoreDrop > best.scoreDrop) best = candidate;
   }

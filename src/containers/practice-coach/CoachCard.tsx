@@ -63,19 +63,6 @@ interface CoachCardProps {
   ttsActive?: boolean;
 }
 
-/** Path B — map a locked divisor to a human-readable label.
- *  Returns `null` for divisors we don't have a single-word label for,
- *  which causes the caption to be hidden. */
-function divisorLabel(divisor: number): string | null {
-  switch (divisor) {
-    case 1: return "quarters";
-    case 2: return "8ths";
-    case 3: return "triplets";
-    case 4: return "16ths";
-    case 6: return "sextuplets";
-    default: return null;
-  }
-}
 
 type CardTab = "feed" | "history";
 type HistoryView = "list" | "detail";
@@ -241,11 +228,6 @@ export default function CoachCard({ open, active, messages, onToggle, onStartSes
                     const level = i * step < bands.length ? bands[i * step] : 0;
                     return <span key={i} className="coach-title-spectrum-bar" style={{ height: `${Math.max(2, level * 100)}%` }} />;
                   })}
-                </span>
-              )}
-              {active && inferredGrid?.locked && divisorLabel(inferredGrid.divisor) && (
-                <span className="coach-tracking-caption">
-                  Tracking {divisorLabel(inferredGrid.divisor)}
                 </span>
               )}
             </span>

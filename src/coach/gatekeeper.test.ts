@@ -22,6 +22,7 @@ import {
   BURST_SHORT_WINDOW_MS,
   CHECK_IN_AFTER_QUIET_MS,
   CORRECTIVE_CHANNEL_COOLDOWN_MS,
+  DRILL_RAMP_ALIVE_TICK_MS,
   DRILL_STALENESS_BPM,
   FIRST_BEATS_TTS_FLOOR,
   LOW_CONFIDENCE_SUSTAIN_MS,
@@ -36,6 +37,7 @@ import {
   WRITTEN_COOLDOWN_CEILING_MS,
   WRITTEN_COOLDOWN_FLOOR_MS,
   bumpWarmup,
+  checkDrillRampPreempt,
   createGatekeeper,
   evaluate,
   isAlwaysSpoken,
@@ -1742,5 +1744,104 @@ describe("evaluate — repetition suppression", () => {
       state = r.state;
     }
     expect(state.recentScenarios.length).toBe(REPETITION_HISTORY_MAX);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DRILL_RAMP_ACTIVE preempt
+// ---------------------------------------------------------------------------
+
+describe("checkDrillRampPreempt", () => {
+  it("allows everything when inDrillRamp is false", () => {
+    const state = createGatekeeper(T0);
+    expect(
+      checkDrillRampPreempt(state, "accuracy_drop", T0 + 30_000, false),
+    ).toEqual({ allowed: true });
+  });
+
+  it("blocks a standard tip when inDrillRamp is true", () => {
+    const state = createGatekeeper(T0);
+    // lastSpokenMs starts at sessionStart (T0); 30s later, still < 90s alive tick.
+    expect(
+      checkDrillRampPreempt(state, "accuracy_drop", T0 + 30_000, true),
+    ).toEqual({ allowed: false, reason: "DRILL_RAMP_ACTIVE" });
+  });
+
+  it("blocks rushing_trend when inDrillRamp is true", () => {
+    const state = createGatekeeper(T0);
+    expect(
+      checkDrillRampPreempt(state, "rushing_trend", T0 + 30_000, true),
+    ).toEqual({ allowed: false, reason: "DRILL_RAMP_ACTIVE" });
+  });
+
+  it("allows ALWAYS_SPOKEN scenarios through even during a ramp", () => {
+    const state = createGatekeeper(T0);
+    for (const scenario of [
+      "boundary_signal_a",
+      "boundary_signal_b",
+      "tempo_milestone",
+      "recovery",
+      "fatigue",
+      "new_band_locked",
+    ] as const) {
+      expect(
+        checkDrillRampPreempt(state, scenario, T0 + 30_000, true),
+      ).toEqual({ allowed: true });
+    }
+  });
+
+  it("allows ramp_complete through even during a ramp", () => {
+    const state = createGatekeeper(T0);
+    expect(
+      checkDrillRampPreempt(state, "ramp_complete", T0 + 30_000, true),
+    ).toEqual({ allowed: true });
+  });
+
+  it("allows through after DRILL_RAMP_ALIVE_TICK_MS of silence (alive tick bypass)", () => {
+    // Seed lastSpokenMs to T0 (session start); now = T0 + alive-tick interval.
+    const state = createGatekeeper(T0);
+    const now = T0 + DRILL_RAMP_ALIVE_TICK_MS;
+    expect(
+      checkDrillRampPreempt(state, "accuracy_drop", now, true),
+    ).toEqual({ allowed: true });
+  });
+
+  it("still blocks just before the alive-tick interval expires", () => {
+    const state = createGatekeeper(T0);
+    const now = T0 + DRILL_RAMP_ALIVE_TICK_MS - 1;
+    expect(
+      checkDrillRampPreempt(state, "accuracy_drop", now, true),
+    ).toEqual({ allowed: false, reason: "DRILL_RAMP_ACTIVE" });
+  });
+
+  it("propagates into evaluate() — event is null for a standard tip during ramp", () => {
+    // Set up a session that's past warmup and cooldowns, but inDrillRamp.
+    // lastSpokenMs must be recent enough that the alive-tick bypass (90s) does
+    // NOT kick in — otherwise a suppressed tip would be allowed through as the
+    // "alive tick" and the preempt test would pass trivially but misleadingly.
+    const now = T0 + WARMUP_GRACE_MS + SPOKEN_COOLDOWN_CEILING_MS + 1;
+    const state = {
+      ...createGatekeeper(T0),
+      bestStreak: HIGH_PB,
+      warmupUntilMs: T0, // warmup elapsed
+      // lastSpokenMs set to 30s before `now` — enough to clear the spoken
+      // cooldown floor (20s) but well under the 90s alive-tick threshold.
+      lastSpokenMs: now - SPOKEN_COOLDOWN_FLOOR_MS - 1,
+      lastWrittenMs: now - WRITTEN_COOLDOWN_CEILING_MS - 1,
+    };
+    // Construct an accuracy-drop window (prior clean, recent sloppy).
+    const window = [
+      ...manyHits(ACCURACY_DROP_WINDOW), // prior: 100%
+      ...manyMisses(10),                  // recent: ~37% → 63% delta
+      ...manyHits(ACCURACY_DROP_WINDOW - 10),
+    ];
+    const r1 = evaluate({ ...state, accuracyDropConfirmations: 1 }, {
+      now,
+      bpm: 120,
+      window,
+      inDrillRamp: true,
+    });
+    // Should be suppressed by DRILL_RAMP_ACTIVE preempt.
+    expect(r1.event).toBeNull();
   });
 });

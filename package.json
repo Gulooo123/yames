@@ -32,7 +32,13 @@
     "tauri": "tauri",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:rust": "cd src-tauri && cargo test --lib --no-default-features"
+    "test:rust": "cd src-tauri && cargo test --lib --no-default-features",
+    "test:dsp": "cargo test --manifest-path src-tauri/Cargo.toml --test dsp_fixtures",
+    "test:dsp:bake": "UPDATE_FIXTURES=1 cargo test --manifest-path src-tauri/Cargo.toml --test dsp_fixtures",
+    "test:highbpm": "cargo test --manifest-path src-tauri/Cargo.toml --test highbpm_fixtures",
+    "test:highbpm:bake": "UPDATE_FIXTURES=1 cargo test --manifest-path src-tauri/Cargo.toml --test highbpm_fixtures",
+    "yames:debug-bpm": "bash scripts/debug-bpm.sh",
+    "dev:debug-bpm": "bash scripts/dev-debug-bpm.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "~2.10.0",

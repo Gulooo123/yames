@@ -641,8 +641,12 @@
   50%       { opacity: 0.3; }
 }
 
-/* Per-variant accent colours */
-.system-status-chip.listening  { color: var(--text-muted); }
+/* Per-variant accent colours.
+ * --accent      → coach actively working (thinking / speaking / playing)
+ * --text-secondary → session on, passive monitoring (listening / noodling)
+ * --text-muted is intentionally NOT used here — it's near-invisible on dark
+ * themes like Mono (#555 on #242) and reserved for truly decorative text. */
+.system-status-chip.listening  { color: var(--text-secondary); }
 .system-status-chip.playing    { color: var(--accent); }
 .system-status-chip.noodling   { color: var(--text-secondary); }
 .system-status-chip.thinking   { color: var(--accent); }
@@ -1037,32 +1041,6 @@
   transition: height 0.1s ease;
 }
 
-/* ─── Path B — Rhythm-Inference Caption (Tracking 16ths) ─── */
-/* Subtle pill next to the title that surfaces only when the matcher
- * has locked onto a divisor. No diagnostic numbers — just a single
- * word label. Fades in/out so a brief lock-flip doesn't strobe. */
-.coach-tracking-caption {
-  display: inline-block;
-  margin-left: 8px;
-  padding: 1px 7px;
-  font-size: 10px;
-  font-weight: 500;
-  line-height: 14px;
-  letter-spacing: 0.02em;
-  color: var(--muted, #6b7280);
-  background: color-mix(in oklab, var(--accent) 7%, transparent);
-  border: 1px solid color-mix(in oklab, var(--accent) 14%, transparent);
-  border-radius: 8px;
-  vertical-align: middle;
-  opacity: 0.75;
-  animation: coach-tracking-caption-fade 0.25s ease;
-  white-space: nowrap;
-}
-
-@keyframes coach-tracking-caption-fade {
-  from { opacity: 0; transform: translateY(-1px); }
-  to   { opacity: 0.75; transform: translateY(0); }
-}
 
 /* ─── TTS Thinking Spinner (pending feed message) ─── */
 /* Three pulsing dots rendered in place of the message text while the

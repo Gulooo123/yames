@@ -6,9 +6,11 @@
  *   1. coachLoading  → "Thinking…"
  *   2. ttsActive     → "Speaking…"
  *   3. isPlaying + noodling  → "Noodling"
- *   4. isPlaying + structured / unknown  → "Detecting 16ths" (or relevant subdivision), fallback "Playing"
- *   5. listening (session active, not playing) → "Listening…"
- *   6. nothing  → renders null
+ *   4. isPlaying + locked divisor  → "Tracking 16ths" (grid confirmed, following it)
+ *   5. isPlaying + not yet locked  → "Playing" (still inferring)
+ *   6. listening + locked divisor  → "Tracking 16ths" (paused between bars)
+ *   7. listening (not locked) → "Listening…"
+ *   8. nothing  → renders null
  */
 export interface SystemStatusChipProps {
   /** Whether a coach session is currently active. */
@@ -24,8 +26,8 @@ export interface SystemStatusChipProps {
   /** True while TTS audio is being played back. */
   ttsActive?: boolean;
   /** Locked rhythm-inference divisor (1/2/3/4/6) from Path B. When set,
-   *  the "playing" state shows "Detecting quarters/8ths/triplets/16ths/sextuplets"
-   *  instead of the generic "Playing" fallback. Only pass when locked === true. */
+   *  both the playing and listening states show "Tracking X" — detection is
+   *  done, the grid is confirmed. Only pass when locked === true. */
   inferredDivisor?: number;
 }
 
@@ -50,17 +52,17 @@ const CHIP_LABEL: Record<ChipVariant, string> = {
   speaking: "Speaking…",
 };
 
-/** Map a locked rhythm-inference divisor to a "Detecting X" label.
- *  Returns null for unrecognised divisors so the caller can fall back
- *  to the generic "Playing" label. */
-function playingLabel(divisor?: number): string {
+/** Map a confirmed (locked) divisor to a "Tracking X" label.
+ *  Used for both the playing+locked and listening+locked states —
+ *  once locked, inference is done regardless of whether the click is running. */
+function trackingLabel(divisor?: number, fallback?: string): string {
   switch (divisor) {
-    case 1: return "Detecting quarters";
-    case 2: return "Detecting 8ths";
-    case 3: return "Detecting triplets";
-    case 4: return "Detecting 16ths";
-    case 6: return "Detecting sextuplets";
-    default: return CHIP_LABEL.playing;
+    case 1: return "Tracking quarters";
+    case 2: return "Tracking 8ths";
+    case 3: return "Tracking triplets";
+    case 4: return "Tracking 16ths";
+    case 6: return "Tracking sextuplets";
+    default: return fallback ?? CHIP_LABEL.playing;
   }
 }
 
@@ -79,8 +81,8 @@ export function SystemStatusChip(props: SystemStatusChipProps) {
   if (!variant) return null;
 
   const label =
-    variant === "playing"
-      ? playingLabel(props.inferredDivisor)
+    (variant === "playing" || variant === "listening") && props.inferredDivisor
+      ? trackingLabel(props.inferredDivisor, CHIP_LABEL[variant])
       : CHIP_LABEL[variant];
 
   return (

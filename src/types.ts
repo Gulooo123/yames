@@ -132,6 +132,8 @@ export type AudioInputDevice = {
   name: string;
   isDefault: boolean;
   isInterface: boolean;
+  /** Number of input channels from the device's default config. 0 = unknown. */
+  channels: number;
 };
 
 export type AudioSpectrum = {

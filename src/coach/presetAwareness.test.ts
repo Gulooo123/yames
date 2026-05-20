@@ -22,6 +22,8 @@ import {
   formatPresetSummaryForLLM,
   summarizePreset,
 } from "./presetAwareness";
+import { TEMPLATE_CATALOG } from "./templateCatalog";
+import { createShuffleState, pickTemplate } from "./templates";
 
 const T0 = 1_715_000_000_000;
 const DAY = 24 * 60 * 60 * 1000;
@@ -388,5 +390,88 @@ describe("constants", () => {
 
   it("CEILING_MIN_BAND_SESSIONS is 3 per plan", () => {
     expect(CEILING_MIN_BAND_SESSIONS).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stamina → template path (acceptance test)
+// ---------------------------------------------------------------------------
+
+describe("stamina detection → template path", () => {
+  // 6 sessions all at 120 BPM, scores dropping linearly 80 → 55.
+  // Each session is ~5 minutes (600 beats at 120 BPM).
+  // sorted by timestamp oldest→newest: [80, 77, 72, 67, 60, 55]
+  // third = 2; early = [80, 77] mean ≈ 78.5; late = [60, 55] mean ≈ 57.5
+  // drop ≈ 21 > STAMINA_SCORE_DROP_THRESHOLD (10) → pattern fires.
+  // staminaMinutes = round(6 * 5 / 6) = 5.
+  const BEATS_5MIN_AT_120 = 600; // 120 BPM × 5 min
+
+  function makeStaminaSession(daysAgo: number, score: number): SavedSession {
+    return makeSession(daysAgo, score, 120, "stamina-preset", {
+      totalBeats: BEATS_5MIN_AT_120,
+    });
+  }
+
+  const staminaSessions = [
+    makeStaminaSession(30, 80),
+    makeStaminaSession(25, 77),
+    makeStaminaSession(20, 72),
+    makeStaminaSession(15, 67),
+    makeStaminaSession(10, 60),
+    makeStaminaSession(5, 55),
+  ];
+
+  it("detectStaminaPattern returns a non-null result with staminaMinutes", () => {
+    const pattern = detectStaminaPattern(staminaSessions, "stamina-preset");
+    expect(pattern).not.toBeNull();
+    expect(pattern!.scoreDrop).toBeGreaterThanOrEqual(STAMINA_SCORE_DROP_THRESHOLD);
+    expect(pattern!.staminaMinutes).toBeGreaterThanOrEqual(1);
+  });
+
+  it("pickTemplate fills {staminaMinutes} — no raw placeholder in output", () => {
+    const pattern = detectStaminaPattern(staminaSessions, "stamina-preset");
+    expect(pattern).not.toBeNull();
+
+    const state = createShuffleState();
+    const result = pickTemplate(TEMPLATE_CATALOG, state, {
+      vocab: "generic",
+      scenario: "stamina",
+      severity: "neutral",
+      context: { staminaMinutes: pattern!.staminaMinutes },
+      rng: () => 0,
+    });
+
+    expect(result).not.toBeNull();
+    // The filled template must not contain the raw placeholder token.
+    expect(result).not.toContain("{staminaMinutes}");
+    // And must contain the actual minute number.
+    expect(result).toContain(String(pattern!.staminaMinutes));
+  });
+
+  it("stamina tip is absent when pattern is null (no drop)", () => {
+    const flatSessions = Array.from({ length: 6 }, (_, i) =>
+      makeStaminaSession(30 - i * 5, 80),
+    );
+    const pattern = detectStaminaPattern(flatSessions, "stamina-preset");
+    expect(pattern).toBeNull();
+  });
+
+  it("stamina tip fires for every instrument vocabulary without leaving raw placeholder", () => {
+    const pattern = detectStaminaPattern(staminaSessions, "stamina-preset");
+    expect(pattern).not.toBeNull();
+
+    const vocabs = ["generic", "drums", "electric-guitar", "acoustic-guitar", "bass", "piano"] as const;
+    for (const vocab of vocabs) {
+      const state = createShuffleState();
+      const result = pickTemplate(TEMPLATE_CATALOG, state, {
+        vocab,
+        scenario: "stamina",
+        severity: "neutral",
+        context: { staminaMinutes: pattern!.staminaMinutes },
+        rng: () => 0,
+      });
+      expect(result).not.toBeNull();
+      expect(result).not.toContain("{staminaMinutes}");
+    }
   });
 });

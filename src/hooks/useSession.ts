@@ -19,6 +19,7 @@ import {
   detectStaminaPattern,
   formatPresetSummaryForLLM,
   summarizePreset,
+  type StaminaPattern,
 } from "../coach/presetAwareness";
 import {
   createGatekeeper,
@@ -129,9 +130,36 @@ interface UseSessionOptions {
    *  is a no-op. The hook does NOT clamp or validate; the caller is
    *  expected to delegate to the canonical `setBpm(...)` IPC. */
   setBpm?: (bpm: number) => void;
+  /**
+   * True while a drill speed-ramp is actively stepping toward the
+   * target BPM (not yet at target and not completed). Suppresses
+   * regular realtime tips via the `DRILL_RAMP_ACTIVE` gatekeeper
+   * preempt; triggers a `ramp_complete` summary when it transitions
+   * from true → false.
+   */
+  inDrillRamp?: boolean;
+  /**
+   * BPM where the current ramp started. Used to populate the
+   * `{startBpm}` placeholder in the `ramp_complete` template.
+   * Only meaningful when `inDrillRamp` is or was true.
+   */
+  drillStartBpm?: number;
+  /**
+   * BPM target of the current ramp. Used to populate the
+   * `{endBpm}` placeholder in the `ramp_complete` template.
+   * Only meaningful when `inDrillRamp` is or was true.
+   */
+  drillTargetBpm?: number;
+  /**
+   * True when the backend has flagged the ramp as successfully
+   * completed (reached target BPM and held for the required bars).
+   * Used to gate `ramp_complete` so a user stop mid-ramp does NOT
+   * emit a false "made it to {endBpm}" summary.
+   */
+  drillCompleted?: boolean;
 }
 
-export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId, presetName, voiceMode = "silent", coachVerbosity = "default", instrument = "electric-guitar", setBpm }: UseSessionOptions) {
+export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId, presetName, voiceMode = "silent", coachVerbosity = "default", instrument = "electric-guitar", setBpm, inDrillRamp = false, drillStartBpm, drillTargetBpm, drillCompleted = false }: UseSessionOptions) {
   const instrumentLabel = instrument === "drums" ? "drums/percussion"
     : instrument === "electric-guitar" ? "electric guitar"
     : instrument === "acoustic-guitar" ? "acoustic guitar"
@@ -245,6 +273,13 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
   // segment (let the player settle in)."
   const beatsInSegmentRef = useRef<number>(0);
 
+  // ── Stamina tip state ─────────────────────────────────────────
+  // `staminaPatternRef` holds the detectStaminaPattern() result loaded
+  // during startSession. `staminaTipFiredRef` gates the once-per-session
+  // rule — the tip is suppressed after the first fire.
+  const staminaPatternRef = useRef<StaminaPattern | null>(null);
+  const staminaTipFiredRef = useRef<boolean>(false);
+
   // Speak a comment when voice mode is on. The notification-level
   // selector was removed — the coach is either fully audible or fully
   // silent. The `urgency` parameter is accepted for call-site clarity
@@ -341,6 +376,21 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
   const maybeSpeakRef = useRef(maybeSpeak);
   useEffect(() => { maybeSpeakRef.current = maybeSpeak; }, [maybeSpeak]);
 
+  // ── inDrillRamp: stable ref for use in long-lived beat callbacks ──
+  const inDrillRampRef = useRef(inDrillRamp);
+  useEffect(() => { inDrillRampRef.current = inDrillRamp; }, [inDrillRamp]);
+  const drillStartBpmRef = useRef(drillStartBpm);
+  useEffect(() => { drillStartBpmRef.current = drillStartBpm; }, [drillStartBpm]);
+  const drillTargetBpmRef = useRef(drillTargetBpm);
+  useEffect(() => { drillTargetBpmRef.current = drillTargetBpm; }, [drillTargetBpm]);
+  // Tracks the previous inDrillRamp value so the effect below can
+  // detect the true→false transition that fires ramp_complete.
+  const prevInDrillRampRef = useRef(inDrillRamp);
+  // Guards ramp_complete against false positives when the user stops
+  // mid-ramp (completed stays false; only a natural ramp finish sets it true).
+  const drillCompletedRef = useRef(drillCompleted);
+  useEffect(() => { drillCompletedRef.current = drillCompleted; }, [drillCompleted]);
+
   // Keep messagesRef in sync for use in callbacks
   useEffect(() => { messagesRef.current = messages; }, [messages]);
 
@@ -380,6 +430,57 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       beatsInSegmentRef.current = 0;
     }
   }, [isPlaying]);
+
+  // Drill ramp-complete detection: fires when inDrillRamp transitions
+  // true→false during an active session. Emits a `ramp_complete` tip
+  // as a forced gatekeeper event so cooldowns don't suppress it.
+  useEffect(() => {
+    const wasRamping = prevInDrillRampRef.current;
+    prevInDrillRampRef.current = inDrillRamp;
+    if (!wasRamping || inDrillRamp) return; // no true→false transition
+    if (!drillCompletedRef.current) return; // user stopped mid-ramp — not a natural completion
+    if (!active) return; // no active session
+    const gk = gatekeeperRef.current;
+    if (!gk) return;
+    const startBpm = drillStartBpmRef.current ?? 0;
+    const endBpm = drillTargetBpmRef.current ?? playBpmRef.current;
+    const now = Date.now();
+    const { state: nextState, event } = gatekeeperEvaluate(gk, {
+      now,
+      bpm: playBpmRef.current,
+      window: realtimeWindowRef.current,
+      beatsInSegment: beatsInSegmentRef.current,
+      force: {
+        scenario: "ramp_complete",
+        context: { startBpm, endBpm },
+      },
+    });
+    gatekeeperRef.current = nextState;
+    if (!event) return;
+    const severity = "neutral" as const;
+    const template = pickTemplate(TEMPLATE_CATALOG, shuffleStateRef.current, {
+      vocab: vocabRef.current,
+      scenario: "ramp_complete",
+      severity,
+      context: { startBpm, endBpm },
+    });
+    if (!template) return;
+    const msgId = crypto.randomUUID();
+    const msg: FeedMessage = {
+      id: msgId,
+      type: "coach-tip",
+      timestamp: now,
+      content: template,
+      urgency: "normal",
+      pending: voiceMode === "voice",
+    };
+    setMessages((prev) => [...prev, msg]);
+    if (narrativeRef.current) {
+      narrativeRef.current = appendCoachUtterance(narrativeRef.current, template);
+    }
+    speakAndReveal(msgId, template, "normal");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inDrillRamp, active]);
 
   // Auto mini-reports: when playback stops during an active session
   useEffect(() => {
@@ -634,10 +735,53 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         bpm: playBpmRef.current,
         window,
         beatsInSegment: beatsInSegmentRef.current,
+        inDrillRamp: inDrillRampRef.current,
       });
       gatekeeperRef.current = nextState;
       if (!event) {
         coachDebug("gatekeeper.no-event", "all-detectors-passed-or-cooldown");
+
+        // ── Stamina tip (lower priority than realtime tips) ──────
+        // Fire at most once per session, only when a stamina pattern
+        // was detected and coachVerbosity is not "less". We wait until
+        // the session has been running for at least half the pattern's
+        // staminaMinutes so the tip doesn't land in the first seconds.
+        const staminaPattern = staminaPatternRef.current;
+        if (
+          staminaPattern &&
+          !staminaTipFiredRef.current &&
+          coachVerbosity !== "less" &&
+          startedAt != null &&
+          (now - startedAt) >= (staminaPattern.staminaMinutes * 30_000)
+        ) {
+          const staminaTemplate = pickTemplate(TEMPLATE_CATALOG, shuffleStateRef.current, {
+            vocab: vocabRef.current,
+            scenario: "stamina",
+            severity: "neutral",
+            context: { staminaMinutes: staminaPattern.staminaMinutes },
+          });
+          if (staminaTemplate) {
+            staminaTipFiredRef.current = true;
+            coachDebug("stamina.fire", { staminaMinutes: staminaPattern.staminaMinutes });
+            const tipId = crypto.randomUUID();
+            const staminaMsg: FeedMessage = {
+              id: tipId,
+              type: "coach-tip",
+              timestamp: now,
+              content: staminaTemplate,
+              // Spinner-until-audio only when voice is on.
+              pending: voiceMode === "voice",
+            };
+            setMessages((prev) => [...prev, staminaMsg]);
+            if (narrativeRef.current) {
+              narrativeRef.current = appendCoachUtterance(narrativeRef.current, staminaTemplate);
+            }
+            // speakAndRevealRef handles voiceMode check internally —
+            // non-voice calls reveal the message immediately.
+            speakAndRevealRef.current(tipId, staminaTemplate, "normal");
+          }
+        }
+
         return;
       }
       coachDebug("gatekeeper.event", {
@@ -1180,6 +1324,15 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     // chip's `qualifies` predicate fails and the chip is dropped, so
     // `undefined` here is the safe default.
     prevSessionBestRef.current = pickPreviousSessionScore(history, presetId);
+
+    // ── Stamina pattern seed ──────────────────────────────────────
+    // Run detectStaminaPattern against the just-loaded history so the
+    // beat-feedback effect can fire a stamina tip when warranted.
+    // Reset the once-per-session gate so a new session always starts fresh.
+    staminaTipFiredRef.current = false;
+    staminaPatternRef.current = (presetId && history)
+      ? detectStaminaPattern(history, presetId)
+      : null;
 
     const greeting = renderGreeting({
       presetId,

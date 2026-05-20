@@ -1853,6 +1853,7 @@
   white-space: nowrap;
   flex-shrink: 0;
   text-align: center;
+  width: 64px;
 }
 
 .input-test-btn:hover {
@@ -3061,19 +3062,14 @@
   stroke: rgb(234, 179, 8);
 }
 
-/* Per-instrument calibration cache hint. Sits under the audio input
-   dropdown with a muted look so it doesn't compete with the BT-latency
-   warning. The Recalibrate button is the only interactive element. */
+/* Per-instrument calibration cache hint. Plain text row — no box, no
+   border. The Recalibrate action is a small accent-bordered pill button. */
 .calibration-cache-hint {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   margin-top: 6px;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
   font-size: 0.75rem;
   line-height: 1.4;
 }
@@ -3084,19 +3080,58 @@
 
 .calibration-recalibrate-btn {
   flex-shrink: 0;
-  padding: 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-size: 0.7rem;
+  padding: 2px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: none;
+  color: var(--accent);
+  font-size: 0.72rem;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .calibration-recalibrate-btn:hover {
-  background: var(--bg-hover);
+  background: var(--accent);
+  color: var(--bg-primary);
+}
+
+/* ─── Channel Picker ─────────────────────────────────────────────────────── */
+
+.channel-picker-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.channel-picker-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.channel-picker-select {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  cursor: pointer;
+  appearance: auto;
+}
+
+.channel-picker-select:focus {
+  outline: none;
   border-color: var(--accent);
+}
+
+.channel-picker-hint {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin-top: 4px;
 }
 
 .audio-output-bt-badge {

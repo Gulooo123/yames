@@ -4,7 +4,7 @@ mod clock;
 mod coach;
 mod commands;
 mod engine;
-mod instrument;
+pub mod instrument;
 mod midi;
 mod models;
 mod onset;

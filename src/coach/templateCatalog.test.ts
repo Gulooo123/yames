@@ -68,6 +68,11 @@ const ALL_PLACEHOLDERS = {
   bpm: 130,
   score: 92,
   change: "BPM up to 130",
+  lastScore: 88,
+  lastBpm: 135,
+  staminaMinutes: 5,
+  startBpm: 120,
+  endBpm: 160,
 } as const;
 
 // ---------------------------------------------------------------------------

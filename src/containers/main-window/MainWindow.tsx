@@ -152,6 +152,13 @@ export function MainWindow() {
     // chip taps reach the metronome cleanly without going through the
     // adapter dance.
     setBpm,
+    // Drill ramp silence: active && !completed means the ramp is still
+    // climbing. completed is set by the backend when the ramp finishes
+    // (stays true even as active stays true until the user stops).
+    inDrillRamp: !!(state.speedRamp?.active && !state.speedRamp?.completed),
+    drillStartBpm: state.speedRamp?.startBpm,
+    drillTargetBpm: state.speedRamp?.targetBpm,
+    drillCompleted: state.speedRamp?.completed ?? false,
   });
 
   const handleActivePresetChange = useCallback((preset: Preset | null, dirty: boolean) => {
@@ -789,6 +796,8 @@ export function MainWindow() {
       onDeviceChange={(d) => evaluation.selectDevice(d)}
       initialDevices={evaluation.devices}
       evaluationActive={evaluation.enabled}
+      inputChannel={evaluation.selectedChannel}
+      onChannelChange={(ch) => evaluation.selectChannel(ch)}
     />
     {showInstrumentPicker && (
       <InstrumentPickerModal

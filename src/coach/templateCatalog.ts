@@ -37,6 +37,30 @@ import type { ScenarioCatalog, TemplateCatalog } from "./templates";
 // ---------------------------------------------------------------------------
 
 const GENERIC: ScenarioCatalog = {
+  session_start_cold: {
+    neutral: [
+      "Hey — play when you're ready and I'll start tracking your timing.",
+      "Good to have you. Start when you feel warm.",
+      "Ready when you are. I'll start listening as soon as you play.",
+      "Take your time getting set up — I'll pick up your timing from the first note.",
+      "No rush. Start when you're settled and we'll go from there.",
+      "Hit play whenever you're ready. I'll catch you from the first beat.",
+      "Set up, settle in, then start playing whenever.",
+      "Whenever you're ready — I'm listening.",
+    ],
+  },
+  session_start_returning: {
+    neutral: [
+      "Welcome back. Last time: {lastScore} at {lastBpm} BPM. Let's build on that.",
+      "Good to see you again. You hit {lastScore} at {lastBpm} BPM last session.",
+      "Back at it. You were at {lastScore} / {lastBpm} BPM last time — let's keep climbing.",
+      "Welcome back — {lastScore} at {lastBpm} BPM last session. Ready when you are.",
+      "Last session: {lastScore} at {lastBpm} BPM. Let's pick up where you left off.",
+      "Back again. You finished at {lastScore} at {lastBpm} BPM — good baseline.",
+      "Welcome back. {lastScore} at {lastBpm} BPM last time. Let's see what today brings.",
+      "Good to have you back. Last time you hit {lastScore} at {lastBpm} BPM.",
+    ],
+  },
   accuracy_drop: {
     encouragement: [
       "A few misses crept in — ease up, breathe, then come back to it.",
@@ -393,6 +417,22 @@ const GENERIC: ScenarioCatalog = {
       "{change}. Don't push the new segment yet — get clean first.",
     ],
   },
+  stamina: {
+    neutral: [
+      "Score's dropping past the {staminaMinutes}-minute mark again — take 30 seconds, then come back at the same BPM.",
+      "Past the {staminaMinutes}-minute mark your accuracy tends to slide. Brief rest, then back in.",
+      "You tend to fade around minute {staminaMinutes}. Take a break and return fresh.",
+      "Stamina wall around minute {staminaMinutes} — a short rest now saves quality later.",
+    ],
+  },
+  ramp_complete: {
+    neutral: [
+      "Ramp done — {startBpm} to {endBpm}. You made it.",
+      "Target reached: {endBpm} BPM. You climbed from {startBpm}.",
+      "Ramp finished. {startBpm} → {endBpm} BPM complete.",
+      "You held it to {endBpm} BPM. Ramp from {startBpm} done.",
+    ],
+  },
   boundary_signal_b: {
     encouragement: [
       "Nice segment — {score}% at {bpm} BPM. Take a beat.",
@@ -432,6 +472,30 @@ const GENERIC: ScenarioCatalog = {
 // ---------------------------------------------------------------------------
 
 const DRUMS: ScenarioCatalog = {
+  session_start_cold: {
+    neutral: [
+      "Ready when you are. I'll start tracking the kick from your first hit.",
+      "Settle in and start whenever — I'll catch the timing from the first stroke.",
+      "Take your time warming up the hands. I'll start listening when you play.",
+      "Good to have you. Start when the sticks feel ready.",
+      "Whenever you're set — hit the kit and I'll start picking up your timing.",
+      "No rush. Get loose, then play when you're ready.",
+      "Ready when you are. I'll track from the first beat.",
+      "Set up whenever — I'm listening from your first stroke.",
+    ],
+  },
+  session_start_returning: {
+    neutral: [
+      "Welcome back. Last session: {lastScore} at {lastBpm} BPM. Let's see if the groove comes back quick.",
+      "Good to see you. You hit {lastScore} at {lastBpm} BPM last time — kick's got a baseline now.",
+      "Back at the kit. {lastScore} at {lastBpm} BPM last session. Let's build on it.",
+      "Welcome back — {lastScore} / {lastBpm} BPM last time. Ready when you are.",
+      "Last session on the kit: {lastScore} at {lastBpm} BPM. Let's keep that going.",
+      "Back at it. You were at {lastScore} / {lastBpm} BPM last time — solid starting point.",
+      "Welcome back. {lastScore} at {lastBpm} BPM was the line last time. Let's hit it.",
+      "Good to have you back. {lastScore} at {lastBpm} BPM last session — let's go.",
+    ],
+  },
   accuracy_drop: {
     correction: [
       "Kick is drifting. Lock the right foot to the click before the snare.",
@@ -550,9 +614,49 @@ const DRUMS: ScenarioCatalog = {
       "Five-plus minutes. Tell me where you want the next note of feedback.",
     ],
   },
+  ramp_complete: {
+    neutral: [
+      "Ramp done — {startBpm} to {endBpm} on the kit. Solid climb.",
+      "Made it to {endBpm} BPM. Kick held the ramp from {startBpm}.",
+      "Ramp finished. {startBpm} → {endBpm} BPM — limbs stayed locked.",
+      "Target reached: {endBpm} BPM. You drove it from {startBpm} on the kit.",
+    ],
+  },
+  stamina: {
+    neutral: [
+      "Around minute {staminaMinutes} your hands tighten up. Drop the BPM 5 ticks and rebuild.",
+      "Past the {staminaMinutes}-minute mark the limbs start to drift. Short break, then back at it.",
+      "Fatigue shows around minute {staminaMinutes} on the kit. Rest the wrists, then return.",
+      "You tend to lose the kick lock around minute {staminaMinutes}. Take a breather.",
+    ],
+  },
 } as const;
 
 const ELECTRIC_GUITAR: ScenarioCatalog = {
+  session_start_cold: {
+    neutral: [
+      "Ready when you are. I'll start tracking from your first pick.",
+      "Get warmed up and hit play whenever — I'll start listening.",
+      "Tune up, settle in, then play when you're ready.",
+      "Good to have you. Start when the picking hand feels loose.",
+      "Whenever you're set — play and I'll start catching your timing.",
+      "No rush. Get the pick hand loose, then start when ready.",
+      "Ready when you are. I'll track from the first note.",
+      "Set up whenever — I'm listening from your first pick.",
+    ],
+  },
+  session_start_returning: {
+    neutral: [
+      "Welcome back. Last session: {lastScore} at {lastBpm} BPM. Let's build on that picking.",
+      "Good to see you. You hit {lastScore} at {lastBpm} BPM last time — good foundation.",
+      "Back at the guitar. {lastScore} at {lastBpm} BPM last session. Let's push it.",
+      "Welcome back — {lastScore} / {lastBpm} BPM last time. Ready when you are.",
+      "Last session: {lastScore} at {lastBpm} BPM. Pick up where you left off.",
+      "Back at it. {lastScore} at {lastBpm} BPM last time — solid baseline.",
+      "Welcome back. {lastScore} at {lastBpm} BPM was the line last session. Let's match it.",
+      "Good to have you back. {lastScore} at {lastBpm} BPM last time — let's go.",
+    ],
+  },
   accuracy_drop: {
     correction: [
       "Picking hand is losing the grid. Anchor your palm against the bridge.",
@@ -671,9 +775,49 @@ const ELECTRIC_GUITAR: ScenarioCatalog = {
       "You've been deep in it. Tell me what to listen for next.",
     ],
   },
+  ramp_complete: {
+    neutral: [
+      "Made it to {endBpm}. Solid ramp from {startBpm} — pick attack stayed even.",
+      "Ramp done — {startBpm} to {endBpm}. Picking hand held the climb.",
+      "Target reached: {endBpm} BPM. You picked through the whole ramp from {startBpm}.",
+      "{endBpm} BPM reached. Ramp from {startBpm} complete — picking clean.",
+    ],
+  },
+  stamina: {
+    neutral: [
+      "Past the {staminaMinutes}-minute mark your picking hand tenses. Shake it out, then resume.",
+      "Around minute {staminaMinutes} the pick attack starts to drift. Quick break, then back in.",
+      "Stamina wall at minute {staminaMinutes} — right hand tightens. Rest 30 seconds.",
+      "You tend to lose edge on the picking around minute {staminaMinutes}. Short rest, then return.",
+    ],
+  },
 } as const;
 
 const BASS: ScenarioCatalog = {
+  session_start_cold: {
+    neutral: [
+      "Ready when you are. I'll start tracking from your first pluck.",
+      "Get warmed up and start whenever — I'll start listening from the first note.",
+      "Loosen the plucking hand, then play when you're ready.",
+      "Good to have you. Start when the fingers feel loose.",
+      "Whenever you're set — play and I'll start picking up your timing.",
+      "No rush. Get the right hand loose, then start when ready.",
+      "Ready when you are. I'll track from the first pluck.",
+      "Set up whenever — I'm listening from your first note.",
+    ],
+  },
+  session_start_returning: {
+    neutral: [
+      "Welcome back. Last session: {lastScore} at {lastBpm} BPM. Let's build on that groove.",
+      "Good to see you. You hit {lastScore} at {lastBpm} BPM last time — solid bass line.",
+      "Back on the bass. {lastScore} at {lastBpm} BPM last session. Let's keep it going.",
+      "Welcome back — {lastScore} / {lastBpm} BPM last time. Ready when you are.",
+      "Last session: {lastScore} at {lastBpm} BPM. Pick up the groove.",
+      "Back at it. {lastScore} at {lastBpm} BPM last time — good starting point.",
+      "Welcome back. {lastScore} at {lastBpm} BPM was the mark last session. Let's hit it.",
+      "Good to have you back. {lastScore} at {lastBpm} BPM last time — let's go.",
+    ],
+  },
   accuracy_drop: {
     correction: [
       "Right hand is drifting from the kick. Reset on beat 1.",
@@ -792,9 +936,49 @@ const BASS: ScenarioCatalog = {
       "You've been holding it down. Tell me what to listen for next.",
     ],
   },
+  ramp_complete: {
+    neutral: [
+      "Ramp done — {startBpm} to {endBpm}. Bass-kick lock held the climb.",
+      "Made it to {endBpm} BPM. You plucked through the ramp from {startBpm}.",
+      "Target reached: {endBpm} BPM. Ramp from {startBpm} complete — groove stayed.",
+      "{endBpm} BPM reached. Solid ramp from {startBpm} on the bass.",
+    ],
+  },
+  stamina: {
+    neutral: [
+      "Stamina wall at minute {staminaMinutes} — your groove loosens. Short break, then back in.",
+      "Around minute {staminaMinutes} the plucking hand starts to fatigue. Rest and return.",
+      "Past the {staminaMinutes}-minute mark the bass lock starts to slip. Brief rest, then resume.",
+      "You tend to fade around minute {staminaMinutes}. Take 30 seconds, come back clean.",
+    ],
+  },
 } as const;
 
 const ACOUSTIC_GUITAR: ScenarioCatalog = {
+  session_start_cold: {
+    neutral: [
+      "Ready when you are. I'll start tracking from your first strum.",
+      "Get tuned up and start whenever — I'll listen from the first note.",
+      "Strum a few open chords, then play when you're ready.",
+      "Good to have you. Start when the strum hand feels loose.",
+      "Whenever you're set — play and I'll start catching your timing.",
+      "No rush. Get the strumming arm loose, then start.",
+      "Ready when you are. I'll track from the first strum.",
+      "Set up and start whenever — I'm listening.",
+    ],
+  },
+  session_start_returning: {
+    neutral: [
+      "Welcome back. Last session: {lastScore} at {lastBpm} BPM. Let's build on that.",
+      "Good to see you. You hit {lastScore} at {lastBpm} BPM last time — good foundation.",
+      "Back with the acoustic. {lastScore} at {lastBpm} BPM last session. Let's keep it going.",
+      "Welcome back — {lastScore} / {lastBpm} BPM last time. Ready when you are.",
+      "Last session: {lastScore} at {lastBpm} BPM. Pick up where you left off.",
+      "Back at it. {lastScore} at {lastBpm} BPM last time — solid starting point.",
+      "Welcome back. {lastScore} at {lastBpm} BPM was the line last session. Let's match it.",
+      "Good to have you back. {lastScore} at {lastBpm} BPM last time — let's go.",
+    ],
+  },
   accuracy_drop: {
     correction: [
       "Strumming hand is losing the grid. Plant the thumb against the strings.",
@@ -913,9 +1097,49 @@ const ACOUSTIC_GUITAR: ScenarioCatalog = {
       "You've been deep in it. Tell me what to listen for next.",
     ],
   },
+  ramp_complete: {
+    neutral: [
+      "Ramp done — {startBpm} to {endBpm}. Strumming held through the climb.",
+      "Made it to {endBpm} BPM. You strummed through the ramp from {startBpm}.",
+      "Target reached: {endBpm} BPM. Ramp from {startBpm} complete — pattern stayed.",
+      "{endBpm} BPM reached. Good ramp from {startBpm} on the acoustic.",
+    ],
+  },
+  stamina: {
+    neutral: [
+      "Your fretting pressure rises around minute {staminaMinutes}. Rest 30 seconds and re-approach.",
+      "Around minute {staminaMinutes} the strumming arm tightens. Brief break, then back in.",
+      "Past the {staminaMinutes}-minute mark your accuracy tends to slip. Short rest, then resume.",
+      "Fatigue shows at minute {staminaMinutes} on the acoustic. Take a breather.",
+    ],
+  },
 } as const;
 
 const PIANO: ScenarioCatalog = {
+  session_start_cold: {
+    neutral: [
+      "Ready when you are. I'll start tracking from your first note.",
+      "Warm up the hands, then play whenever — I'll start listening.",
+      "Get settled at the keys, then start when you're ready.",
+      "Good to have you. Start when the hands feel loose.",
+      "Whenever you're set — play and I'll start catching your timing.",
+      "No rush. Let the hands warm up, then start when ready.",
+      "Ready when you are. I'll track from the first key.",
+      "Settle in and start whenever — I'm listening.",
+    ],
+  },
+  session_start_returning: {
+    neutral: [
+      "Welcome back. Last session: {lastScore} at {lastBpm} BPM. Let's build on that.",
+      "Good to see you. You hit {lastScore} at {lastBpm} BPM last time — good to be back.",
+      "Back at the keys. {lastScore} at {lastBpm} BPM last session. Let's push it.",
+      "Welcome back — {lastScore} / {lastBpm} BPM last time. Ready when you are.",
+      "Last session: {lastScore} at {lastBpm} BPM. Pick up where you left off.",
+      "Back at it. {lastScore} at {lastBpm} BPM last time — solid baseline.",
+      "Welcome back. {lastScore} at {lastBpm} BPM was the mark last session. Let's match it.",
+      "Good to have you back. {lastScore} at {lastBpm} BPM last time — let's go.",
+    ],
+  },
   accuracy_drop: {
     correction: [
       "Hands are drifting apart. Lock the left hand to the click first.",
@@ -1032,6 +1256,22 @@ const PIANO: ScenarioCatalog = {
       "Pocket's been steady. Pick a target if you want closer feedback.",
       "Long stretch at the keys. Anything you want me to flag?",
       "You've been deep in it. Tell me what to listen for next.",
+    ],
+  },
+  ramp_complete: {
+    neutral: [
+      "Ramp done — {startBpm} to {endBpm} at the keys. Both hands held the climb.",
+      "Made it to {endBpm} BPM. You played through the ramp from {startBpm}.",
+      "Target reached: {endBpm} BPM. Ramp from {startBpm} complete — hands stayed locked.",
+      "{endBpm} BPM reached. Good ramp from {startBpm} on the keys.",
+    ],
+  },
+  stamina: {
+    neutral: [
+      "Tension in your touch around minute {staminaMinutes}. Release, breathe, come back clean.",
+      "Around minute {staminaMinutes} the wrist tension creeps in. Brief rest, then resume.",
+      "Past the {staminaMinutes}-minute mark the touch gets heavier. Short break, then back at the keys.",
+      "Fatigue in the hands shows around minute {staminaMinutes}. Rest, then return.",
     ],
   },
 } as const;
