@@ -2,7 +2,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -10,6 +10,25 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::session_audio::{self, SessionAudioRecorder};
 use crate::session_log::AudioLevelSnapshot;
+
+/// Monotonically increasing stream instance counter. Each call to
+/// `AudioInput::start()` increments this before spawning the capture thread,
+/// baking the resulting ID into the F32/I16 closures. Two cap-hit log lines
+/// with the SAME id = cpal drop-tail from a single stream. Two cap-hits with
+/// DIFFERENT ids = two live streams (leaked stream / React double-start).
+static STREAM_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Wall-clock timestamp for log lines — `HH:MM:SS.mmm` in local time.
+/// Cheap enough for one-shot eprintln! calls (not per-callback hot path).
+fn now_ts() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let s = (ms / 1000) % 86400;
+    format!("{:02}:{:02}:{:02}.{:03}", s / 3600, (s % 3600) / 60, s % 60, ms % 1000)
+}
 
 /// Module-local dev-only logger. Expands to `println!` in debug builds
 /// (cargo run, vitest harness, tauri dev) and to nothing in release
@@ -104,6 +123,17 @@ pub struct AudioInput {
     /// self.sample_rate so a concurrent start() call (device/channel change)
     /// cannot corrupt the SR used for duration calculation and resampling.
     recording_sr: Arc<Mutex<u32>>,
+    /// Buffer cap set atomically at start_recording() time (`recording_sr * 10`).
+    /// Shared into capture-thread closures so stale CoreAudio callbacks from a
+    /// prior device's stream (cpal stream-drop tail) respect the NEW session's
+    /// SR rather than the thread-spawn-time SR, preventing slow-mo artefacts.
+    recording_max: Arc<AtomicUsize>,
+    /// Incremented by every `start()` call. Each F32/I16 closure captures the
+    /// value at build-time (`my_gen`). Recording writes are only allowed when
+    /// `stream_generation.load() == my_gen`, so stale CoreAudio callbacks from
+    /// a prior stream (cpal drop-tail) cannot interleave samples into the new
+    /// session's buffer — the root cause of slow-mo playback.
+    stream_generation: Arc<AtomicU64>,
     // Playback
     playback_alive: Arc<AtomicBool>,
     playback_thread: Option<thread::JoinHandle<()>>,
@@ -139,6 +169,8 @@ impl AudioInput {
             is_recording: Arc::new(AtomicBool::new(false)),
             recording_buf: Arc::new(Mutex::new(Vec::new())),
             recording_sr: Arc::new(Mutex::new(48000)),
+            recording_max: Arc::new(AtomicUsize::new(usize::MAX)),
+            stream_generation: Arc::new(AtomicU64::new(0)),
             playback_alive: Arc::new(AtomicBool::new(false)),
             playback_thread: None,
             recorded_audio: Arc::new(Mutex::new(None)),
@@ -298,6 +330,14 @@ impl AudioInput {
         let input_gain = self.input_gain.clone();
         let self_session_recorder = self.session_recorder.clone();
         let audio_levels_cb = self.audio_levels.clone();
+        let recording_max_cb = self.recording_max.clone();
+        // Bump the generation counter and capture the new value. Each closure
+        // bakes in `my_gen` and only writes to `recording_buf` when the global
+        // counter still matches — stale CoreAudio callbacks (cpal drop-tail)
+        // from prior streams see a lower value and skip the write.
+        self.stream_generation.fetch_add(1, Ordering::SeqCst);
+        let my_gen = self.stream_generation.load(Ordering::SeqCst);
+        let stream_gen_cb = self.stream_generation.clone();
         let sample_rate = sr;
         let session_start_instant = std::time::Instant::now();
         let device_name_owned = device.name().unwrap_or_default();
@@ -324,7 +364,6 @@ impl AudioInput {
             let channels = config.channels as usize;
             let is_recording_cb = is_recording.clone();
             let recording_buf_cb = recording_buf.clone();
-            let max_recording_samples = sample_rate as usize * 10; // 10 second max
 
             let session_rec_cb = self_session_recorder.clone();
 
@@ -367,18 +406,31 @@ impl AudioInput {
                 }
             }
 
+            // Monotonically increasing per-stream ID. Two cap-hits with the
+            // same ID = cpal drop-tail from one stream. Different IDs = two
+            // live streams (leaked / React double-start).
+            let my_stream_id = STREAM_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "[{}] [stream-built] id={} device={:?} sr={}Hz ch={}",
+                now_ts(), my_stream_id, device_name_owned, sample_rate, selected_ch
+            );
+
             let stream_result = match sample_format {
                 SampleFormat::F32 => {
                     let is_rec = is_recording_cb.clone();
                     let rec_buf = recording_buf_cb.clone();
-                    let max_rec = max_recording_samples;
+                    let recording_max_f32 = recording_max_cb.clone();
                     let gain = input_gain.clone();
                     let session_rec = session_rec_cb.clone();
                     let levels_out = audio_levels_cb.clone();
                     let start = session_start_instant;
                     let sr_frames = sample_rate;
                     let ch = selected_ch;
+                    let stream_id = my_stream_id;
+                    let stream_gen_f32 = stream_gen_cb.clone();
+                    let my_gen_f32 = my_gen;
                     let mut level_acc = LevelAcc::new();
+                    let mut cap_logged_f32 = false;
                     device.build_input_stream(
                     &config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -387,10 +439,23 @@ impl AudioInput {
                         if let Ok(mut r) = ring_for_callback.try_lock() {
                             r.write(&mono);
                         }
-                        if is_rec.load(Ordering::Relaxed) {
+                        // Gate recording writes on the stream generation counter.
+                        // Stale CoreAudio callbacks from a prior stream (cpal
+                        // drop-tail) see a generation mismatch and skip the write,
+                        // preventing double-writes that cause slow-mo playback.
+                        if is_rec.load(Ordering::Relaxed)
+                            && stream_gen_f32.load(Ordering::Relaxed) == my_gen_f32
+                        {
                             if let Ok(mut buf) = rec_buf.try_lock() {
+                                let max_rec = recording_max_f32.load(Ordering::Relaxed);
                                 if buf.len() < max_rec {
                                     buf.extend_from_slice(&mono);
+                                } else if !cap_logged_f32 {
+                                    cap_logged_f32 = true;
+                                    eprintln!(
+                                        "[{}] [recording] cap hit (f32): stream_id={} thread_sr={}Hz rec_cap_sr={}Hz",
+                                        now_ts(), stream_id, sr_frames, max_rec / 10
+                                    );
                                 }
                             }
                         }
@@ -423,14 +488,18 @@ impl AudioInput {
                 SampleFormat::I16 => {
                     let is_rec = is_recording_cb.clone();
                     let rec_buf = recording_buf_cb.clone();
-                    let max_rec = max_recording_samples;
+                    let recording_max_i16 = recording_max_cb.clone();
                     let gain = input_gain.clone();
                     let session_rec = session_rec_cb.clone();
                     let levels_out = audio_levels_cb.clone();
                     let start = session_start_instant;
                     let sr_frames = sample_rate;
                     let ch = selected_ch;
+                    let stream_id = my_stream_id;
+                    let stream_gen_i16 = stream_gen_cb.clone();
+                    let my_gen_i16 = my_gen;
                     let mut level_acc = LevelAcc::new();
+                    let mut cap_logged_i16 = false;
                     device.build_input_stream(
                     &config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
@@ -441,10 +510,19 @@ impl AudioInput {
                         if let Ok(mut r) = ring_for_callback.try_lock() {
                             r.write(&mono);
                         }
-                        if is_rec.load(Ordering::Relaxed) {
+                        if is_rec.load(Ordering::Relaxed)
+                            && stream_gen_i16.load(Ordering::Relaxed) == my_gen_i16
+                        {
                             if let Ok(mut buf) = rec_buf.try_lock() {
+                                let max_rec = recording_max_i16.load(Ordering::Relaxed);
                                 if buf.len() < max_rec {
                                     buf.extend_from_slice(&mono);
+                                } else if !cap_logged_i16 {
+                                    cap_logged_i16 = true;
+                                    eprintln!(
+                                        "[{}] [recording] cap hit (i16): stream_id={} thread_sr={}Hz rec_cap_sr={}Hz",
+                                        now_ts(), stream_id, sr_frames, max_rec / 10
+                                    );
                                 }
                             }
                         }
@@ -574,8 +652,12 @@ impl AudioInput {
             // was active when capture began, not whatever start() may have set
             // afterwards (e.g. device/channel change while recording).
             *self.recording_sr.lock().unwrap() = sr;
+            // Set the atomic cap so any stale cpal callback from a prior
+            // device's stream (CoreAudio stream-drop tail) respects this
+            // session's SR rather than the thread-spawn-time SR.
+            self.recording_max.store(sr as usize * 10, Ordering::SeqCst);
             buf.reserve(sr as usize * 10);
-            eprintln!("[recording] started, sample_rate={}Hz", sr);
+            eprintln!("[{}] [recording] started, sample_rate={}Hz", now_ts(), sr);
         }
         self.is_recording.store(true, Ordering::SeqCst);
     }
@@ -591,7 +673,29 @@ impl AudioInput {
             std::mem::take(&mut *buf)
         };
         let duration = samples.len() as f32 / sr as f32;
-        eprintln!("[recording] stopped, {} samples, {:.2}s @ {}Hz", samples.len(), duration, sr);
+        let rms = if !samples.is_empty() {
+            (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+        } else {
+            0.0
+        };
+        let peak = samples.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
+        // Zero-crossing rate: fraction of consecutive sample pairs that cross zero.
+        // Acts as a crude frequency estimator — e.g. a 440Hz tone at 44100Hz crosses
+        // zero ~880 times/s → ZCR ≈ 0.020. If loopback channels are zero-interleaved
+        // by CoreAudio (content at half density), ZCR ≈ 0.010 for the same pitch.
+        // Compare ch1 vs ch3 ZCR for the same guitar note to diagnose slow-mo cause.
+        let zcr = if samples.len() > 1 {
+            let crossings = samples.windows(2)
+                .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
+                .count();
+            crossings as f32 / samples.len() as f32
+        } else {
+            0.0
+        };
+        eprintln!(
+            "[{}] [recording] stopped, {} samples, {:.2}s @ {}Hz | rms={:.4} peak={:.4} zcr={:.4}",
+            now_ts(), samples.len(), duration, sr, rms, peak, zcr
+        );
         *self.recorded_audio.lock().unwrap() = Some((samples, sr));
         duration
     }
@@ -677,8 +781,8 @@ impl AudioInput {
             // channels=1; dividing by 2 would make the cursor advance at 0.5× → slow-mo.
             let out_channels: usize = (default_config.channels() as usize).min(2).max(1);
 
-            eprintln!("[playback] recording: {} samples @ {}Hz, output: {}Hz {}ch {:?} (device reports {}ch)",
-                samples.len(), rec_sr, out_sr, out_channels, out_format, default_config.channels());
+            eprintln!("[{}] [playback] recording: {} samples @ {}Hz, output: {}Hz {}ch {:?} (device reports {}ch)",
+                now_ts(), samples.len(), rec_sr, out_sr, out_channels, out_format, default_config.channels());
 
             let config = StreamConfig {
                 channels: out_channels as u16,
@@ -688,7 +792,7 @@ impl AudioInput {
 
             // Resample if needed (linear interpolation)
             let playback_samples = if rec_sr != out_sr {
-                eprintln!("[playback] SR mismatch: recorded={}Hz output={}Hz → resampling", rec_sr, out_sr);
+                eprintln!("[{}] [playback] SR mismatch: recorded={}Hz output={}Hz → resampling", now_ts(), rec_sr, out_sr);
                 let ratio = rec_sr as f64 / out_sr as f64;
                 let out_len = (samples.len() as f64 / ratio).ceil() as usize;
                 let mut resampled = Vec::with_capacity(out_len);
@@ -722,8 +826,8 @@ impl AudioInput {
                         return;
                     }
                     if !logged_cb.swap(true, Ordering::Relaxed) {
-                        eprintln!("[playback] first callback: data.len()={}, out_channels={}, frames={}",
-                            data.len(), out_channels, data.len() / out_channels);
+                        eprintln!("[{}] [playback] first callback: data.len()={}, out_channels={}, frames={}",
+                            now_ts(), data.len(), out_channels, data.len() / out_channels);
                     }
                     let pos = cursor_for_cb.load(Ordering::Relaxed);
                     let frames = data.len() / out_channels;

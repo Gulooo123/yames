@@ -442,6 +442,17 @@
   animation: input-test-pulse 1.5s ease-in-out infinite;
 }
 
+/* Settling variant — grey dot with slower pulse while stream spins up */
+.input-test-rec-dot.settling {
+  background: color-mix(in srgb, var(--text-primary) 40%, transparent);
+  animation: input-test-settle 1.2s ease-in-out infinite;
+}
+
+@keyframes input-test-settle {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.85; }
+}
+
 @keyframes input-test-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }

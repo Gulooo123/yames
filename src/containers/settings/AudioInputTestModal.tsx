@@ -61,6 +61,13 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
   const liveWaveformRef = useRef<number[]>([]);
   const [liveWaveform, setLiveWaveform] = useState<number[]>([]);
 
+  // Stream-settling: true while a new device/channel stream is spinning up.
+  // Cleared by the first spectrum event (cpal only emits once the stream is
+  // actually running) or after a 3s safety timeout.
+  const [streamSettling, setStreamSettling] = useState(true);
+  const streamSettlingRef = useRef(true);
+  const settlingTimerRef = useRef<ReturnType<typeof setTimeout>>();
+
   // Load devices when modal opens
   useEffect(() => {
     if (open) {
@@ -90,6 +97,11 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
       if (playbackUnlistenRef.current) { playbackUnlistenRef.current(); playbackUnlistenRef.current = null; }
       clearInterval(timerRef.current);
       clearTimeout(signalTimerRef.current);
+      // Reset settling so the next open starts with the button disabled until
+      // the stream fires its first spectrum event.
+      clearTimeout(settlingTimerRef.current);
+      streamSettlingRef.current = true;
+      setStreamSettling(true);
     }
   }, [open]);
 
@@ -97,8 +109,10 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
   useEffect(() => {
     if (!open) return;
     if (evaluationActive) {
-      // Stream already running — just subscribe to events
+      // Stream already running — just subscribe to events, no settling needed
       setListening(true);
+      streamSettlingRef.current = false;
+      setStreamSettling(false);
       return;
     }
     const start = async () => {
@@ -118,8 +132,15 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
   // time the channel is changed (once from handleChannelChange, once from this
   // effect reacting to the parent's selectedChannel updating) → double stream
   // open on the same CoreAudio device → crash.
+  //
+  // NOTE: selectedDevice is also intentionally NOT in the dep array for the
+  // same reason. Device changes are handled exclusively by handleDeviceChange,
+  // which does its own stop+start. Including selectedDevice here causes a
+  // second startEvaluation() every time the device is changed (once from
+  // handleDeviceChange, once from this effect) → two live CoreAudio streams
+  // both writing to recording_buf → double samples → slow-mo playback.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, selectedDevice, evaluationActive]);
+  }, [open, evaluationActive]);
 
   // Intercept Escape so it closes only the modal, not the whole settings panel.
   // Use capture phase (third arg = true) so this fires before any bubble-phase
@@ -143,6 +164,15 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
     onAudioSpectrum((s) => {
       if (!cancelled) {
         setSpectrum(s);
+        // First spectrum event = stream is fully up and ready to record.
+        // cpal only emits once the CoreAudio stream is actually running,
+        // making this the correct "device ready" signal.
+        if (streamSettlingRef.current) {
+          streamSettlingRef.current = false;
+          setStreamSettling(false);
+          clearTimeout(settlingTimerRef.current);
+          settlingTimerRef.current = undefined;
+        }
       }
     }).then((unlisten) => {
       if (cancelled) unlisten();
@@ -161,6 +191,16 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
     // When evaluationActive=true, onDeviceChange → evaluation.selectDevice already
     // handles the stop/start + channel reset — don't race it.
     if (listening && !evaluationActive) {
+      // Mark as settling while the new device's stream spins up.
+      // Cleared on first spectrum event (or 3s safety timeout).
+      clearTimeout(settlingTimerRef.current);
+      streamSettlingRef.current = true;
+      setStreamSettling(true);
+      settlingTimerRef.current = setTimeout(() => {
+        streamSettlingRef.current = false;
+        setStreamSettling(false);
+        settlingTimerRef.current = undefined;
+      }, 3000);
       await stopEvaluation();
       // When device changes, reset to channel 0 — channel indices are
       // device-specific and may not be valid on the new device.
@@ -187,6 +227,15 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
     // restarts the stream via onChannelChange — doing it again here causes a
     // double stop/start race on the SharedAudioInput mutex → spinner of death.
     if (listening && !evaluationActive) {
+      // Mark as settling while the new channel's stream spins up.
+      clearTimeout(settlingTimerRef.current);
+      streamSettlingRef.current = true;
+      setStreamSettling(true);
+      settlingTimerRef.current = setTimeout(() => {
+        streamSettlingRef.current = false;
+        setStreamSettling(false);
+        settlingTimerRef.current = undefined;
+      }, 3000);
       await stopEvaluation();
       await startEvaluation(selectedDevice, ch);
     }
@@ -346,8 +395,8 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
               />
             )}
             {inputChannel >= 2 && modalIsInterface && (
-              <span className="channel-picker-hint" title="Captures audio processed by other apps (AmpliTube, DAW, etc.)">
-                Loopback — captures processed audio from your DAW or amp sim
+              <span className="channel-picker-hint" title="Captures the Direct Monitor mix (your hardware inputs as heard in headphones). To capture DAW or app output, route it through your interface output in Focusrite Control.">
+                Loopback — captures your Direct Monitor mix (hardware inputs, not system audio)
               </span>
             )}
           </div>
@@ -469,7 +518,7 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
               <button
                 className="input-test-rec-btn record"
                 onClick={recState === "recording" ? handleStopRecording : handleRecord}
-                disabled={recState === "playing"}
+                disabled={recState === "playing" || (streamSettling && recState === "idle")}
               >
                 {recState === "recording" ? (
                   <>
@@ -477,6 +526,11 @@ export default function AudioInputTestModal({ open, onClose, selectedDevice, onD
                       <rect x="2" y="2" width="12" height="12" rx="1.5" />
                     </svg>
                     Stop
+                  </>
+                ) : streamSettling ? (
+                  <>
+                    <span className="input-test-rec-dot settling" />
+                    Ready…
                   </>
                 ) : (
                   <>

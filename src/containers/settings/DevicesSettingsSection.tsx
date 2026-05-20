@@ -174,8 +174,8 @@ export function DevicesSettingsSection({
           </div>
         )}
         {evaluation.selectedChannel >= 2 && (selectedInputDevice?.isInterface ?? false) && (
-          <span className="channel-picker-hint" title="Captures audio processed by other apps (AmpliTube, DAW, etc.)">
-            Loopback — captures processed audio from your DAW or amp sim
+          <span className="channel-picker-hint" title="Captures the Direct Monitor mix (your hardware inputs as heard in headphones). To capture DAW or app output, route it through your interface output in Focusrite Control.">
+            Loopback — captures your Direct Monitor mix (hardware inputs, not system audio)
           </span>
         )}
       </div>
