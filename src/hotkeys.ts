@@ -20,6 +20,10 @@ export type HotkeyAction =
   | "bpm-up-1"
   | "sub-next"
   | "sub-prev"
+  | "sub-1"
+  | "sub-2"
+  | "sub-3"
+  | "sub-4"
   | "sig-next"
   | "sig-prev"
   | "fullscreen"
@@ -147,6 +151,34 @@ export const HOTKEYS: HotkeyEntry[] = [
     action: "Subdivision −",
     key: "[",
     desc: "Cycle to previous subdivision",
+    group: "metronome",
+  },
+  {
+    id: "sub-1",
+    action: "Quarter notes",
+    key: "1",
+    desc: "Set subdivision to quarter notes (÷1)",
+    group: "metronome",
+  },
+  {
+    id: "sub-2",
+    action: "Eighth notes",
+    key: "2",
+    desc: "Set subdivision to eighth notes (÷2)",
+    group: "metronome",
+  },
+  {
+    id: "sub-3",
+    action: "Triplets",
+    key: "3",
+    desc: "Set subdivision to triplets (÷3)",
+    group: "metronome",
+  },
+  {
+    id: "sub-4",
+    action: "Sixteenth notes",
+    key: "4",
+    desc: "Set subdivision to sixteenth notes (÷4)",
     group: "metronome",
   },
   {

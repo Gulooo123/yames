@@ -238,13 +238,10 @@ pub struct InstrumentProfile {
     /// playing 8 onsets in one beat-window gets 3 counted near the beat
     /// + 5 spurious, instead of 1.0 onset_efficiency for free.
     ///
-    /// **Not yet wired into the live matcher** — the live matcher in
-    /// `timing.rs` currently bounds spurious onsets by amplitude weighting
-    /// rather than a per-beat cap. The field is preserved in the profile
-    /// schema (Phase 0 plan contract) so the matcher can adopt the cap
-    /// once the D3d 18-scenario validation matrix lands. `allow(dead_code)`
-    /// suppresses the lib-target unused-field warning until then.
-    #[allow(dead_code)]
+    /// Enforced by the live matcher in `timing.rs`: once
+    /// `max_onsets_per_beat` onsets have matched in a quarter-note window,
+    /// additional onsets are reclassified as spurious rather than counted
+    /// toward `onset_count`.
     pub max_onsets_per_beat: u8,
 
     /// Expected typical onset density per beat. Used to scale
@@ -272,9 +269,7 @@ pub struct InstrumentProfile {
     ///   - `"specflux"` — spectral flux; works well for sustained / harmonic onsets
     ///                    (piano, other)
     ///
-    /// Consumed by `onset.rs` (Step 4) when constructing `aubio::Onset`.
-    /// `allow(dead_code)` until that wiring is in place.
-    #[allow(dead_code)]
+    /// Consumed by `onset.rs` when constructing `aubio::Onset`.
     pub aubio_onset_method: &'static str,
 
     /// Beats of silence before transitioning to Resting state. Drums +

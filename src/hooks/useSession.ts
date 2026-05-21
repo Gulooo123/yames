@@ -15,13 +15,10 @@ import {
   type Narrative,
 } from "../coach/narrative";
 import {
-  BPM_BAND_WIDTH,
-  bpmBandLowFor,
   detectRecurringIssues,
   detectStaminaPattern,
   formatPresetSummaryForLLM,
   summarizePreset,
-  type StaminaPattern,
 } from "../coach/presetAwareness";
 import {
   createGatekeeper,
@@ -42,14 +39,9 @@ import {
 } from "../coach/templates";
 import { TEMPLATE_CATALOG } from "../coach/templateCatalog";
 import {
-  answerChip,
-  loadRecentChipIds,
-  renderAffordanceLabel,
-  saveRecentChipIds,
-  selectChips,
-  type ChipContext,
-  type RecencyStorage,
-} from "../coach/chips";
+  isSegmentReportable,
+  shortPocketNote,
+} from "../coach/miniReport";
 import {
   createInterventionState,
   pickIntervention,
@@ -58,27 +50,11 @@ import {
   type InterventionRateState,
   type SelectedIntervention,
 } from "../coach/interventions";
-import { accuracyPct, accuracyRatio, commentForScore, computeLegacyScore, gradeForScore, rescoreReport, scoredBeats } from "../coach/reportStats";
+import { accuracyPct, commentForScore, computeLegacyScore, gradeForScore, rescoreReport, scoredBeats } from "../coach/reportStats";
 import { createSessionToken } from "../coach/sessionGuard";
 import { coachDebug } from "../coach/debug";
-
-// ─── Mini-report eligibility thresholds ──────────────────────────────
-// A segment must have at least this many beats elapsed before the coach
-// generates feedback. Below this we're still inside the "settle-in"
-// window and any commentary would be premature.
-const MIN_SEGMENT_BEATS_FOR_REPORT = 8;
-// A segment must also have at least this many real hits. A single
-// stray onset isn't enough evidence that the user was actually playing
-// — it could be a tap on the desk, a chair scrape, or a mic burst.
-const MIN_SEGMENT_HITS_FOR_REPORT = 3;
-// And the hit RATE must meet a floor. A segment of "1 hit in 200
-// missed beats" passes both thresholds above but is effectively noise
-// — the user wasn't really tracking the metronome. Letting it through
-// produces the worst coach moment possible: "0% accuracy this round.
-// Slow it down a few BPM and focus on clean hits before pushing
-// tempo." — which fires at session start when the metronome is ticking
-// but the user is just settling in. Below this rate, suppress entirely.
-const MIN_SEGMENT_HIT_RATE_FOR_REPORT = 0.2;
+import { useRealtimeTips } from "../containers/practice-coach/hooks/useRealtimeTips";
+import { useSegmentCoach } from "../containers/practice-coach/hooks/useSegmentCoach";
 
 // ── Realtime-tip evaluation window ──────────────────────────────────
 // The gatekeeper consumes the last N BeatFeedback entries when deciding
@@ -92,19 +68,6 @@ const REALTIME_WINDOW_BEATS = 32;
 // this floor we'd evaluate too aggressively and burn the cooldown
 // budget. In 4/4 this is one evaluation per ~2 bars at 120 BPM.
 const MIN_BEATS_PER_EVAL_CHECK = 8;
-
-/** Returns true if a segment has enough activity to warrant a coach
- *  comment / inclusion in session aggregation / save-to-history.
- *  Three thresholds layered:
- *    - enough beats elapsed (settle-in window passed)
- *    - enough real hits (not a single stray onset)
- *    - acceptable hit rate (user was really tracking, not just noise) */
-function isSegmentReportable(report: SessionReport): boolean {
-  if (scoredBeats(report) < MIN_SEGMENT_BEATS_FOR_REPORT) return false;
-  if (report.hitsCount < MIN_SEGMENT_HITS_FOR_REPORT) return false;
-  if (accuracyRatio(report) < MIN_SEGMENT_HIT_RATE_FOR_REPORT) return false;
-  return true;
-}
 
 type Evaluation = ReturnType<typeof useEvaluation>;
 
@@ -186,7 +149,6 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
   // 'structured' = ≥0.65 ratio of matched onsets; 'noodling' = <0.65.
   // undefined until the first scoreable segment lands.
   const [playMode, setPlayMode] = useState<"structured" | "noodling" | undefined>(undefined);
-  const wasPlayingRef = useRef(false);
   const playBpmRef = useRef(bpm);
   const segmentReportsRef = useRef<SessionSegment[]>([]);
   const segmentStartRef = useRef<number>(Date.now());
@@ -274,31 +236,6 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
   // per the plan's hard rule "No TTS during the first 4 beats of any
   // segment (let the player settle in)."
   const beatsInSegmentRef = useRef<number>(0);
-
-  // ── Stamina tip state ─────────────────────────────────────────
-  // `staminaPatternRef` holds the detectStaminaPattern() result loaded
-  // during startSession. `staminaTipFiredRef` gates the once-per-session
-  // rule — the tip is suppressed after the first fire.
-  const staminaPatternRef = useRef<StaminaPattern | null>(null);
-  const staminaTipFiredRef = useRef<boolean>(false);
-
-  // ── Pace coaching tip state ────────────────────────────────────
-  // `paceCoachingRef` holds the BPM ceiling info loaded during
-  // startSession (null when no ceiling with ≥ 4 sessions exists).
-  // `paceCoachingFiredRef` enforces the once-per-session rule.
-  const paceCoachingRef = useRef<{
-    ceilingBpmLow: number;
-    suggestedBpm: number;
-    attemptCount: number;
-  } | null>(null);
-  const paceCoachingFiredRef = useRef<boolean>(false);
-
-  // ── Grid-lost tip state ────────────────────────────────────────
-  // `gridLostFiredRef` gates the once-per-collapse rule. Resets when
-  // the grid recovers (majority of the recent window climbs back above
-  // the recovery threshold) so a second collapse in the same session
-  // still surfaces a tip.
-  const gridLostFiredRef = useRef<boolean>(false);
 
   // Speak a comment when voice mode is on. The notification-level
   // selector was removed — the coach is either fully audible or fully
@@ -440,16 +377,15 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     });
   }, []);
 
-  // Track when play starts to capture segment start time. `playBpmRef`
-  // is sync'd separately on every bpm change (see the dedicated effect
-  // above) — this handler only owns segment-scoped state.
-  useEffect(() => {
-    if (isPlaying && !wasPlayingRef.current) {
-      segmentStartRef.current = Date.now();
-      // New playback start = new segment for the first-4-beats rule.
-      beatsInSegmentRef.current = 0;
-    }
-  }, [isPlaying]);
+  // ── Segment coaching: rising-edge start tracking + falling-edge
+  // mini-report generation. wasPlayingRef lives inside the hook.
+  const { reset: resetSegmentCoach } = useSegmentCoach({
+    isPlaying, active, timeSignature, instrumentLabel,
+    coachVerbosity,
+    segmentReportsRef, segmentStartRef, prevSessionBestRef,
+    narrativeRef, coachLoadedRef, sessionIdRef, activeRef, playBpmRef,
+    beatsInSegmentRef, setMessages, setPlayMode,
+  });
 
   // Drill ramp-complete detection: fires when inDrillRamp transitions
   // true→false during an active session. Emits a `ramp_complete` tip
@@ -502,191 +438,6 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inDrillRamp, active]);
 
-  // Auto mini-reports: when playback stops during an active session
-  useEffect(() => {
-    if (wasPlayingRef.current && !isPlaying && active) {
-      const segmentBpm = playBpmRef.current;
-      const token = createSessionToken(sessionIdRef, activeRef);
-      getSessionReport().then(async (raw) => {
-        // Re-score the backend report through the same legacy formula
-        // every displayed score uses (`computeLegacyScore`). The
-        // segment-aware Rust score depends on DSP plumbing
-        // (idle gaps, spurious onsets) that produces inconsistent
-        // mini-report scores while the DSP doubling bug is open — see
-        // `rescoreReport`'s docstring. Wrapping here ensures the
-        // narrative, coach generation, and the aggregate built from
-        // these mini-reports all see the same score.
-        const report = raw ? rescoreReport(raw) : raw;
-        // Discard if a new session started OR the session ended while
-        // `getSessionReport` was in-flight — would otherwise land a
-        // stale segment summary in the next session's feed.
-        if (token.isStaleOrInactive()) {
-          coachDebug("mini-report.discard-pre-llm", { capturedAt: token.capturedAt, current: sessionIdRef.current, active: activeRef.current });
-          return;
-        }
-        const reportable = report ? isSegmentReportable(report) : false;
-        if (report) {
-          const scored = scoredBeats(report);
-          const rate = accuracyRatio(report);
-          coachDebug("mini-report.check", {
-            scoredBeats: scored,
-            hits: report.hitsCount,
-            misses: report.missCount,
-            hitRate: +rate.toFixed(2),
-            score: report.score,
-            reportable,
-            gates: {
-              beats: `${scored}>=${MIN_SEGMENT_BEATS_FOR_REPORT}? ${scored >= MIN_SEGMENT_BEATS_FOR_REPORT}`,
-              hits: `${report.hitsCount}>=${MIN_SEGMENT_HITS_FOR_REPORT}? ${report.hitsCount >= MIN_SEGMENT_HITS_FOR_REPORT}`,
-              rate: `${scored > 0 ? rate.toFixed(2) : "n/a"}>=${MIN_SEGMENT_HIT_RATE_FOR_REPORT}? ${rate >= MIN_SEGMENT_HIT_RATE_FOR_REPORT}`,
-            },
-          });
-        } else {
-          coachDebug("mini-report.no-report-from-backend");
-        }
-        if (report && reportable) {
-          // Step 5 — prefer the server-computed playMode (Rust derives it
-          // from onset_efficiency at segment close). Fall back to JS
-          // derivation so old saved sessions and short warmup bursts still
-          // resolve rather than leaving the UI undefined.
-          const derivedPlayMode: "structured" | "noodling" =
-            report.onsetEfficiency !== undefined
-              ? report.onsetEfficiency >= 0.65
-                ? "structured"
-                : "noodling"
-              : "structured";
-          setPlayMode(report.playMode ?? derivedPlayMode);
-
-          const now = Date.now();
-          segmentReportsRef.current.push({ report, bpm: segmentBpm, timeSignature, startTime: segmentStartRef.current, endTime: now });
-
-          // Clear the Rust accumulator IMMEDIATELY — before the
-          // potentially multi-second LLM rephrase. If we wait until
-          // after `await coachGenerate(...)`, and the user starts a
-          // new exercise during the rephrase window, the next
-          // exercise's beats accumulate INTO the same accumulator and
-          // are wiped out when `clearSession()` finally fires. The
-          // second exercise's eventual `getSessionReport()` then
-          // either returns null (empty) or fails `isSegmentReportable`
-          // (too few scored beats), so no second mini-report ever
-          // emits. Captured + fixed 2026-05-16 — see "2 exercises,
-          // only 1 mini-report" report. Fire-and-forget is fine: the
-          // local `report` reference is the source of truth for the
-          // rest of this block.
-          clearSession();
-
-          // C1: log the segment-end into the narrative *before* coach
-          // generation so the LLM can see the segment summary in context.
-          if (narrativeRef.current) {
-            narrativeRef.current = appendSegmentEnd(
-              narrativeRef.current,
-              { score: report.score, bpm: segmentBpm, note: shortPocketNote(report) },
-              now,
-            );
-          }
-
-          // Generate coach comment (LLM or template-based).
-          // Accuracy uses SCORED beats (hits + misses) as the denominator
-          // — not totalBeats — so a session that started before the user
-          // picked up the instrument doesn't get a misleading "12%
-          // accuracy". See `src/coach/reportStats.ts`.
-          const accuracy = accuracyPct(report);
-          let comment = formatMiniReport(report);
-          if (coachLoadedRef.current) {
-            try {
-              const context = formatMiniReportContext(
-                segmentBpm,
-                timeSignature,
-                accuracy,
-                report,
-                instrumentLabel,
-                narrativeRef.current ? formatForLLM(narrativeRef.current) : undefined,
-                derivedPlayMode,
-              );
-              comment = await coachGenerate(context);
-            } catch (err) {
-              // Fall back to template — but log so we can diagnose
-              // "the LLM stopped paraphrasing" instead of guessing.
-              coachDebug("mini-report.llm-error", String(err));
-            }
-          }
-
-          // Post-LLM staleness recheck — the rephrase at `coachGenerate`
-          // can take 200–2000 ms, and during that window the user might
-          // start a new session (sid bump) OR end the current one
-          // (activeRef flip). Both must be dropped — see
-          // src/coach/sessionGuard.ts for the unified predicate.
-          if (token.isStaleOrInactive()) {
-            coachDebug("mini-report.discard-post-llm", { capturedAt: token.capturedAt, current: sessionIdRef.current, active: activeRef.current });
-            return;
-          }
-
-          // Phase 5 — pick suggestion chips for the user to tap.
-          // The selector is deterministic given the context, so two
-          // identical-looking sessions show different chips because
-          // of recency tracking (chips shown last session are
-          // down-weighted by 0.7×). See `src/coach/chips.ts`.
-          const chips = buildChipsForMiniReport({
-            report,
-            bpm: segmentBpm,
-            timeSignature,
-            segments: segmentReportsRef.current,
-            previousSessionScore: prevSessionBestRef.current,
-          });
-
-          // The mini-report carries ONLY the coach's commentary on the
-          // segment (score circle + text). The follow-up question chips
-          // ride on a separate `chip-prompt` message right after it so
-          // the input affordance is visually distinct from the coach's
-          // content — see the `chip-prompt` rationale on
-          // `FeedMessageType` in `src/types.ts`. `now` is already
-          // bound above (at the segmentReportsRef push) so we reuse
-          // it here for a stable shared timestamp.
-          const reportTs = Date.now();
-          const reportMsg: FeedMessage = {
-            id: crypto.randomUUID(),
-            type: "mini-report",
-            timestamp: reportTs,
-            content: comment,
-            report,
-            meta: { bpm: segmentBpm, timeSignature },
-          };
-          // Only emit a chip-prompt if the selector returned anything
-          // substantive. The Escape chip ("Ask something else…") was
-          // retired in v0.9 (the coach card pins a chat input to the
-          // bottom — the chip duplicated that affordance), so the
-          // selector now returns 0–3 substantive chips. An empty
-          // chip list means nothing to suggest — don't ship an empty
-          // bubble. See `selectChips` in `src/coach/chips.ts`.
-          const chipMsg: FeedMessage | null = chips.length > 0
-            ? {
-                id: crypto.randomUUID(),
-                type: "chip-prompt",
-                // +1 ms so the chip-prompt always sorts AFTER the
-                // mini-report when a consumer orders by timestamp.
-                timestamp: reportTs + 1,
-                content: "",
-                chips,
-              }
-            : null;
-          setMessages((prev) =>
-            chipMsg ? [...prev, reportMsg, chipMsg] : [...prev, reportMsg],
-          );
-          if (narrativeRef.current) {
-            narrativeRef.current = appendCoachUtterance(
-              narrativeRef.current,
-              comment,
-            );
-          }
-          // NOTE: `clearSession()` was called above, BEFORE the LLM
-          // rephrase, to keep the Rust accumulator from devouring the
-          // next exercise's data while this one's rephrase was in
-          // flight. See the rationale block at the call site.
-        }
-      });
-    }
-    wasPlayingRef.current = isPlaying;
-  }, [isPlaying, active, timeSignature, instrumentLabel]);
 
   // Real-time coaching: monitor beat feedback during active play.
   //
@@ -700,6 +451,21 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
   //      was tagged, drop the comment rather than landing stale info.
   const realtimeWindowRef = useRef<BeatFeedback[]>([]);
   const beatsSinceLastCheckRef = useRef<number>(0);
+
+  // ── Real-time per-beat tip evaluators ─────────────────────────────
+  // Stamina, pace-coaching, and grid-lost tips are evaluated inside
+  // the beat-feedback effect. All state for those tips lives in the
+  // hook; `seed` arms them from history at session start, and
+  // `checkNoEventTips` fires them when the gatekeeper emits no event.
+  const { seed: seedRealtimeTips, checkNoEventTips } = useRealtimeTips({
+    shuffleStateRef,
+    vocabRef,
+    narrativeRef,
+    speakAndRevealRef,
+    setMessages,
+    playBpmRef,
+    realtimeWindowRef,
+  });
 
   useEffect(() => {
     if (!active || !isPlaying) {
@@ -761,130 +527,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       gatekeeperRef.current = nextState;
       if (!event) {
         coachDebug("gatekeeper.no-event", "all-detectors-passed-or-cooldown");
-
-        // ── Stamina tip (lower priority than realtime tips) ──────
-        // Fire at most once per session, only when a stamina pattern
-        // was detected and coachVerbosity is not "less". We wait until
-        // the session has been running for at least half the pattern's
-        // staminaMinutes so the tip doesn't land in the first seconds.
-        const staminaPattern = staminaPatternRef.current;
-        if (
-          staminaPattern &&
-          !staminaTipFiredRef.current &&
-          coachVerbosity !== "less" &&
-          startedAt != null &&
-          (now - startedAt) >= (staminaPattern.staminaMinutes * 30_000)
-        ) {
-          const staminaTemplate = pickTemplate(TEMPLATE_CATALOG, shuffleStateRef.current, {
-            vocab: vocabRef.current,
-            scenario: "stamina",
-            severity: "neutral",
-            context: { staminaMinutes: staminaPattern.staminaMinutes },
-          });
-          if (staminaTemplate) {
-            staminaTipFiredRef.current = true;
-            coachDebug("stamina.fire", { staminaMinutes: staminaPattern.staminaMinutes });
-            const tipId = crypto.randomUUID();
-            const staminaMsg: FeedMessage = {
-              id: tipId,
-              type: "coach-tip",
-              timestamp: now,
-              content: staminaTemplate,
-              // Spinner-until-audio only when voice is on.
-              pending: voiceMode === "voice",
-            };
-            setMessages((prev) => [...prev, staminaMsg]);
-            if (narrativeRef.current) {
-              narrativeRef.current = appendCoachUtterance(narrativeRef.current, staminaTemplate);
-            }
-            // speakAndRevealRef handles voiceMode check internally —
-            // non-voice calls reveal the message immediately.
-            speakAndRevealRef.current(tipId, staminaTemplate, "normal");
-          }
-        }
-
-        // ── Pace coaching tip ────────────────────────────────────────
-        // Fire once per session when the user is playing at a BPM band
-        // they've already attempted ≥ 4 times without sticking (ceiling).
-        // Gated by coachVerbosity !== "less" (same as stamina).
-        const paceCoaching = paceCoachingRef.current;
-        if (
-          paceCoaching &&
-          !paceCoachingFiredRef.current &&
-          coachVerbosity !== "less" &&
-          bpmBandLowFor(playBpmRef.current) === paceCoaching.ceilingBpmLow
-        ) {
-          const paceTemplate = pickTemplate(TEMPLATE_CATALOG, shuffleStateRef.current, {
-            vocab: vocabRef.current,
-            scenario: "pace_coaching",
-            severity: "neutral",
-            context: {
-              bpm: playBpmRef.current,
-              suggestedBpm: paceCoaching.suggestedBpm,
-              attemptCount: paceCoaching.attemptCount,
-            },
-          });
-          if (paceTemplate) {
-            paceCoachingFiredRef.current = true;
-            coachDebug("pace_coaching.fire", { bpm: playBpmRef.current, ...paceCoaching });
-            const tipId = crypto.randomUUID();
-            const paceMsg: FeedMessage = {
-              id: tipId,
-              type: "coach-tip",
-              timestamp: now,
-              content: paceTemplate,
-              pending: voiceMode === "voice",
-            };
-            setMessages((prev) => [...prev, paceMsg]);
-            if (narrativeRef.current) {
-              narrativeRef.current = appendCoachUtterance(narrativeRef.current, paceTemplate);
-            }
-            speakAndRevealRef.current(tipId, paceTemplate, "normal");
-          }
-        }
-
-        // ── Grid-lost tip ─────────────────────────────────────────
-        // Check the last 6 beats for grid-correlation collapse
-        // (4 of 6 below 0.3). Fires once per collapse; re-arms when
-        // the grid recovers (3 of 6 rise above 0.5 again).
-        // Respects coachVerbosity — silent in "less" mode.
-        if (coachVerbosity !== "less") {
-          const recentWindow = realtimeWindowRef.current;
-          if (recentWindow.length >= 6) {
-            const recent6 = recentWindow.slice(-6);
-            const lowCount = recent6.filter((b) => b.gridCorrelation < 0.3).length;
-            const highCount = recent6.filter((b) => b.gridCorrelation > 0.5).length;
-            if (gridLostFiredRef.current && highCount >= 3) {
-              // Grid has recovered — re-arm so a second collapse still tips.
-              gridLostFiredRef.current = false;
-            } else if (!gridLostFiredRef.current && lowCount >= 4) {
-              const gridTemplate = pickTemplate(TEMPLATE_CATALOG, shuffleStateRef.current, {
-                vocab: vocabRef.current,
-                scenario: "grid_lost",
-                severity: "neutral",
-                context: {},
-              });
-              if (gridTemplate) {
-                gridLostFiredRef.current = true;
-                coachDebug("grid_lost.fire", { lowCount, recentCorr: recent6.map((b) => +b.gridCorrelation.toFixed(2)) });
-                const tipId = crypto.randomUUID();
-                const gridMsg: FeedMessage = {
-                  id: tipId,
-                  type: "coach-tip",
-                  timestamp: now,
-                  content: gridTemplate,
-                  pending: voiceMode === "voice",
-                };
-                setMessages((prev) => [...prev, gridMsg]);
-                if (narrativeRef.current) {
-                  narrativeRef.current = appendCoachUtterance(narrativeRef.current, gridTemplate);
-                }
-                speakAndRevealRef.current(tipId, gridTemplate, "normal");
-              }
-            }
-          }
-        }
-
+        checkNoEventTips({ now, startedAt, coachVerbosity, voiceMode });
         return;
       }
       coachDebug("gatekeeper.event", {
@@ -1370,7 +1013,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     // Bump session ID FIRST to invalidate any in-flight stale reports
     sessionIdRef.current++;
     segmentReportsRef.current = [];
-    wasPlayingRef.current = false; // prevent stale mini-report from previous session
+    resetSegmentCoach(); // prevent stale mini-report from previous session
     const now = Date.now();
     // D4 Signal A — seed previous-value refs so the first effect tick
     // after session-start doesn't fire a false-positive change event.
@@ -1428,34 +1071,10 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     // `undefined` here is the safe default.
     prevSessionBestRef.current = pickPreviousSessionScore(history, presetId);
 
-    // ── Stamina pattern seed ──────────────────────────────────────
-    // Run detectStaminaPattern against the just-loaded history so the
-    // beat-feedback effect can fire a stamina tip when warranted.
-    // Reset the once-per-session gate so a new session always starts fresh.
-    staminaTipFiredRef.current = false;
-    staminaPatternRef.current = (presetId && history)
-      ? detectStaminaPattern(history, presetId)
-      : null;
-
-    // ── Pace coaching seed ────────────────────────────────────────
-    // If the preset has a BPM ceiling with ≥ 4 sessions, arm the
-    // beat-feedback effect to fire a consolidation tip once the user
-    // starts playing at that ceiling band again this session.
-    paceCoachingFiredRef.current = false;
-    paceCoachingRef.current = (() => {
-      if (!presetId || !history) return null;
-      const summary = summarizePreset(presetId, presetName, history);
-      const { bpmCeiling } = detectRecurringIssues(summary);
-      if (!bpmCeiling || bpmCeiling.sessions < 4) return null;
-      return {
-        ceilingBpmLow: bpmCeiling.bpmLow,
-        suggestedBpm: Math.max(bpmCeiling.bpmLow - BPM_BAND_WIDTH, 40),
-        attemptCount: bpmCeiling.sessions,
-      };
-    })();
-
-    // ── Grid-lost tip ─────────────────────────────────────────────
-    gridLostFiredRef.current = false;
+    // ── Real-time tip seed ────────────────────────────────────────
+    // Arm stamina, pace-coaching, and grid-lost tips from history.
+    // All state lives in useRealtimeTips; resets fired-gates too.
+    seedRealtimeTips(presetId, presetName, history);
 
     const greeting = renderGreeting({
       presetId,
@@ -1729,7 +1348,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     realtimeWindowRef.current = [];
     beatsSinceLastCheckRef.current = 0;
     beatsInSegmentRef.current = 0;
-    wasPlayingRef.current = false;
+    resetSegmentCoach();
     segmentStartRef.current = Date.now();
     // Cancel any pending Signal A debounce — a config change committed
     // post-endSession would fire boundary_signal_a against a null
@@ -2092,160 +1711,6 @@ function pickInterventionForEvent(
   return pickIntervention(event, ctx, state, now);
 }
 
-/**
- * Phase 5 — build the chip list for a mini-report.
- *
- * Wraps `selectChips` + `answerChip` so the call site in the
- * mini-report effect stays compact. The selector is deterministic
- * given the input context, so two identical sessions show different
- * chips only because of recency tracking (chips shown last session are
- * scored ×0.7). Recency state lives in localStorage so it persists
- * across app restarts; the in-memory `recentIds` snapshot is the
- * pre-mini-report set (chips chosen for THIS report are saved AFTER
- * selection so they get penalized next time, not now).
- *
- * The returned list is the UI shape (`FeedChip[]`): chip id + label +
- * resolved answer + optional affordance. The CoachCard never has to
- * know about the `Chip` type — just renders what's here.
- *
- * Side effect: persists the selected chip ids via
- * `saveRecentChipIds(...)` so next session's selector applies the
- * recency penalty.
- */
-function buildChipsForMiniReport(args: {
-  report: SessionReport;
-  bpm: number;
-  timeSignature: number;
-  segments: SessionSegment[];
-  previousSessionScore?: number;
-}): FeedChip[] {
-  const storage: RecencyStorage =
-    typeof window !== "undefined" && window.localStorage
-      ? window.localStorage
-      : { getItem: () => null, setItem: () => {} };
-
-  const recentIds = loadRecentChipIds(storage);
-
-  // Sustained-rushing / -dragging flags look at the most recent ≤3
-  // segments. We don't bother with a more sophisticated trend test here
-  // — the chip selector's contextBonus uses these as hints, not hard
-  // gates, and the gatekeeper already has the rigorous logic.
-  const recent = args.segments.slice(-3);
-  const allRushing = recent.length > 0 && recent.every((s) => s.report.meanDeviationMs < -5);
-  const allDragging = recent.length > 0 && recent.every((s) => s.report.meanDeviationMs > 5);
-
-  const ctx: ChipContext = {
-    report: args.report,
-    bpm: args.bpm,
-    timeSignature: args.timeSignature,
-    previousSessionScore: args.previousSessionScore,
-    segmentsCompleted: args.segments.length,
-    sustainedRushing: allRushing,
-    sustainedDragging: allDragging,
-    recentChipIds: recentIds,
-    segments: args.segments,
-  };
-
-  const selected = selectChips(ctx);
-
-  // Persist the new recency set BEFORE building the UI shape so a
-  // mid-render crash doesn't desync localStorage.
-  saveRecentChipIds(storage, selected.map((s) => s.chip.id));
-
-  return selected.map((sel) => {
-    const chip = sel.chip;
-    const answer = answerChip(chip, ctx);
-    const affordanceLabel = renderAffordanceLabel(chip, ctx);
-    return {
-      id: chip.id,
-      label: chip.label,
-      answer,
-      affordance: chip.followUp
-        ? {
-            label: affordanceLabel ?? chip.followUp.label,
-            action: chip.followUp.action,
-            bpmDelta: chip.followUp.bpmDelta,
-          }
-        : undefined,
-    };
-  });
-}
-
-function formatMiniReport(report: SessionReport): string {
-  // Accuracy uses scored beats (hits + misses), NOT totalBeats — see
-  // `src/coach/reportStats.ts` for the rationale. Keeping this string
-  // in sync with the Rust score depends on that denominator.
-  const accuracy = accuracyPct(report);
-  return `Score ${report.score} · ${accuracy}% hits · avg ${Math.abs(report.meanDeviationMs).toFixed(1)}ms ${report.meanDeviationMs < 0 ? "early" : "late"}`;
-}
-
-/** Format context for the coach to generate a mini-report comment. */
-function formatMiniReportContext(
-  bpm: number,
-  timeSignature: number,
-  accuracy: number,
-  report: SessionReport,
-  instrumentLabel: string,
-  narrativeBlock?: string,
-  playMode?: "structured" | "noodling",
-): string {
-  const pocket = report.meanDeviationMs < -5 ? "ahead of the beat (rushing)"
-    : report.meanDeviationMs > 5 ? "behind the beat (dragging)"
-    : "right on the beat";
-  const style = report.gridCorrelation > 0.8 ? "structured exercise (high grid correlation)"
-    : report.gridCorrelation > 0.3 ? "semi-structured playing (medium grid correlation)"
-    : "free/improvisational playing (low grid correlation)";
-  const narrative = narrativeBlock ? `\n\n${narrativeBlock}` : "";
-
-  // Surface skipped-beat presence explicitly. If most metronome ticks
-  // had no detected onset, the player wasn't really "trying and
-  // missing" — they were warming up, talking, or playing too quietly
-  // to be heard. Without this hint, the LLM defaults to "rough patch"
-  // / "ease the tempo down" which feels accusatory and wrong.
-  const scored = scoredBeats(report);
-  const skipped = report.skippedBeats ?? Math.max(0, report.totalBeats - scored);
-  const presencePct = report.totalBeats > 0
-    ? Math.round((scored / report.totalBeats) * 100)
-    : 0;
-  // Threshold: if fewer than 60% of beats had any onset, frame the
-  // comment around "I'm only hearing some of your playing" not
-  // "rough patch."
-  const lowSignalHint = report.totalBeats > 8 && presencePct < 60
-    ? `\nIMPORTANT: only ${presencePct}% of beats had a detected onset (${skipped} skipped of ${report.totalBeats}). The player may have been warming up, not playing yet, or the input level may be too low — DO NOT say "rough patch" or "ease the tempo down." Acknowledge that you're not hearing many beats and ask them gently to check their input level or play a touch louder.`
-    : "";
-
-  // `Score:` MUST stay on its own line and lead the metric block —
-  // the Rust template-fallback parser (`coach.rs::extract_int`) keys
-  // off this exact prefix to surface the composite four-component
-  // score as the headline number in the no-LLM branch. Without it the
-  // template falls back to accuracy and the card reads "Rough patch at
-  // 50%" beside a score-65 badge (v0.9 bug). Keep this line stable
-  // unless you also update `format_mini_report` + its extractor.
-  //
-  // Plain integer (no `/100` suffix): `extract_int` greedily parses
-  // the first whitespace-separated token after the prefix and fails
-  // on `75/100`, which silently turned the score back into 0 in the
-  // wild. Keeping the value bare gives the parser something it can
-  // actually consume.
-  // Step 6 — noodling context: prepend framing so the LLM switches
-  // register. Must come BEFORE the metric block so the model picks it
-  // up as a system instruction. Score/Accuracy lines MUST stay intact
-  // below — the Rust no-LLM fallback parser keys off those prefixes.
-  const noodlingHint =
-    playMode === "noodling"
-      ? "CONTEXT: The player is free-playing/noodling (onset efficiency below the structured-practice threshold — their onsets are NOT aligning to the beat grid). This is exploratory practice, not a structured drill. Acknowledge the musical exploration positively. DO NOT criticise for missed beats or off-grid playing — they weren't trying to lock in. Comment on feel, energy, musical ideas, or what direction to explore next.\n"
-      : "";
-
-  return `${noodlingHint}The player (${instrumentLabel}) just finished a passage. Generate a brief coaching comment.
-BPM: ${bpm}, Time signature: ${timeSignature}/4
-Score: ${report.score} out of 100
-Playing style: ${style}
-Accuracy: ${accuracy}% of attempted beats (${report.perfectCount} perfect, ${report.goodCount} good, ${report.okCount} ok, ${report.missCount} miss out of ${scored} attempted)
-Beats with detected onset: ${presencePct}% (${scored} of ${report.totalBeats} total ticks)
-Timing tendency: ${pocket} (avg ${report.meanDeviationMs.toFixed(1)}ms)
-Longest clean streak: ${report.longestStreak} beats${lowSignalHint}${narrative}`;
-}
-
 /** Format context for end-of-session summary. */
 function formatSessionContext(
   durationSecs: number,
@@ -2347,21 +1812,6 @@ function buildPriorSummary(
   }
   return line;
 }
-
-/**
- * Render a compact pocket note ("solid pocket", "rushed", "dragged")
- * for embedding in the narrative `Segment N ended:` line. Returns an
- * empty string when the deviation is unremarkable so the appended text
- * stays tight.
- */
-function shortPocketNote(report: SessionReport): string | undefined {
-  const dev = report.meanDeviationMs;
-  if (dev < -10) return "rushed";
-  if (dev > 10) return "dragged";
-  if (Math.abs(dev) <= 5 && report.longestStreak >= 16) return "solid pocket";
-  return undefined;
-}
-
 
 /**
  * Aggregate multiple segment reports into a single session report.

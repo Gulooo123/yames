@@ -134,6 +134,10 @@ export function useActionDispatcher({
           setSubdivision(subs[(idx - 1 + subs.length) % subs.length]);
           break;
         }
+        case "sub-1": setSubdivision(1); break;
+        case "sub-2": setSubdivision(2); break;
+        case "sub-3": setSubdivision(3); break;
+        case "sub-4": setSubdivision(4); break;
         case "sig-next": {
           const vals = TIME_SIGNATURES.map((t) => t.beats);
           const idx = vals.indexOf(state.timeSignature);

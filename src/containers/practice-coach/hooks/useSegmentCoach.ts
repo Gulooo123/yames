@@ -1,0 +1,331 @@
+import { useRef, useEffect, useCallback } from "react";
+import type { Dispatch, MutableRefObject, SetStateAction } from "react";
+import type { FeedMessage, SessionSegment } from "../../../types";
+import {
+  appendCoachUtterance,
+  appendSegmentEnd,
+  formatForLLM,
+  type Narrative,
+} from "../../../coach/narrative";
+import { coachGenerate, getSessionReport, clearSession } from "../../../ipc";
+import {
+  accuracyPct,
+  accuracyRatio,
+  rescoreReport,
+  scoredBeats,
+} from "../../../coach/reportStats";
+import { createSessionToken } from "../../../coach/sessionGuard";
+import { coachDebug } from "../../../coach/debug";
+import { TEMPLATE_CATALOG } from "../../../coach/templateCatalog";
+import { pickTemplate, createShuffleState } from "../../../coach/templates";
+import {
+  buildChipsForMiniReport,
+  formatMiniReport,
+  formatMiniReportContext,
+  isSegmentReportable,
+  MIN_SEGMENT_BEATS_FOR_REPORT,
+  MIN_SEGMENT_HITS_FOR_REPORT,
+  MIN_SEGMENT_HIT_RATE_FOR_REPORT,
+  shortPocketNote,
+} from "../../../coach/miniReport";
+
+export function useSegmentCoach(params: {
+  // Reactive values — the useEffect deps arrays mirror these exactly
+  isPlaying: boolean;
+  active: boolean;
+  timeSignature: number;
+  instrumentLabel: string;
+  coachVerbosity: "less" | "default" | "more";
+  // Refs shared with endSession / startSession (owned by useSession)
+  segmentReportsRef: MutableRefObject<SessionSegment[]>;
+  segmentStartRef: MutableRefObject<number>;
+  prevSessionBestRef: MutableRefObject<number | undefined>;
+  narrativeRef: MutableRefObject<Narrative | null>;
+  coachLoadedRef: MutableRefObject<boolean>;
+  sessionIdRef: MutableRefObject<number>;
+  activeRef: MutableRefObject<boolean>;
+  playBpmRef: MutableRefObject<number>;
+  beatsInSegmentRef: MutableRefObject<number>;
+  // State setters
+  setMessages: Dispatch<SetStateAction<FeedMessage[]>>;
+  setPlayMode: Dispatch<SetStateAction<"structured" | "noodling" | undefined>>;
+}) {
+  const {
+    isPlaying,
+    active,
+    timeSignature,
+    instrumentLabel,
+    coachVerbosity,
+    segmentReportsRef,
+    segmentStartRef,
+    prevSessionBestRef,
+    narrativeRef,
+    coachLoadedRef,
+    sessionIdRef,
+    activeRef,
+    playBpmRef,
+    beatsInSegmentRef,
+    setMessages,
+    setPlayMode,
+  } = params;
+
+  // ── Falling/rising-edge detector ─────────────────────────────────────
+  // Tracks whether the user was playing on the previous effect run so
+  // both the rising edge (segment start) and falling edge (mini-report)
+  // can be detected without reading React state inside the async path.
+  const wasPlayingRef = useRef(false);
+  // Gates the muddy-hits tip to once per segment.
+  const muddy_hitsFiredRef = useRef<boolean>(false);
+  // Isolated shuffle-bag for muddy_hits variant dedup.
+  const muddy_hitsShuffleRef = useRef(createShuffleState());
+
+  // ── Rising edge: capture segment start time ───────────────────────────
+  // Runs when isPlaying transitions false→true. Sets segmentStartRef and
+  // resets beatsInSegmentRef so the first-4-beats TTS suppression rule
+  // starts fresh. `wasPlayingRef` check is the edge detector — without
+  // it this fires on every render when isPlaying is already true.
+  useEffect(() => {
+    if (isPlaying && !wasPlayingRef.current) {
+      segmentStartRef.current = Date.now();
+      // New playback start = new segment for the first-4-beats rule.
+      beatsInSegmentRef.current = 0;
+      // Reset the muddy-hits gate so it can fire again in the new segment.
+      muddy_hitsFiredRef.current = false;
+    }
+  }, [isPlaying, segmentStartRef, beatsInSegmentRef]);
+
+  // ── Falling edge: auto mini-report ────────────────────────────────────
+  // When playback stops during an active session, fetch the Rust segment
+  // report, score it, optionally rephrase via LLM, and push to the feed.
+  //
+  // ORDERING INVARIANT: clearSession() MUST fire before await coachGenerate().
+  // Moving it after would let the user's next exercise accumulate into the
+  // same Rust accumulator and wipe out those beats when clearSession fires
+  // post-rephrase — the "2 exercises, only 1 mini-report" bug (2026-05-16).
+  useEffect(() => {
+    if (wasPlayingRef.current && !isPlaying && active) {
+      const segmentBpm = playBpmRef.current;
+      const token = createSessionToken(sessionIdRef, activeRef);
+      getSessionReport().then(async (raw) => {
+        // Re-score the backend report through the same legacy formula
+        // every displayed score uses (`computeLegacyScore`). The
+        // segment-aware Rust score depends on DSP plumbing
+        // (idle gaps, spurious onsets) that produces inconsistent
+        // mini-report scores while the DSP doubling bug is open — see
+        // `rescoreReport`'s docstring. Wrapping here ensures the
+        // narrative, coach generation, and the aggregate built from
+        // these mini-reports all see the same score.
+        const report = raw ? rescoreReport(raw) : raw;
+        // Discard if a new session started OR the session ended while
+        // `getSessionReport` was in-flight — would otherwise land a
+        // stale segment summary in the next session's feed.
+        if (token.isStaleOrInactive()) {
+          coachDebug("mini-report.discard-pre-llm", { capturedAt: token.capturedAt, current: sessionIdRef.current, active: activeRef.current });
+          return;
+        }
+        const reportable = report ? isSegmentReportable(report) : false;
+        if (report) {
+          const scored = scoredBeats(report);
+          const rate = accuracyRatio(report);
+          coachDebug("mini-report.check", {
+            scoredBeats: scored,
+            hits: report.hitsCount,
+            misses: report.missCount,
+            hitRate: +rate.toFixed(2),
+            score: report.score,
+            reportable,
+            gates: {
+              beats: `${scored}>=${MIN_SEGMENT_BEATS_FOR_REPORT}? ${scored >= MIN_SEGMENT_BEATS_FOR_REPORT}`,
+              hits: `${report.hitsCount}>=${MIN_SEGMENT_HITS_FOR_REPORT}? ${report.hitsCount >= MIN_SEGMENT_HITS_FOR_REPORT}`,
+              rate: `${scored > 0 ? rate.toFixed(2) : "n/a"}>=${MIN_SEGMENT_HIT_RATE_FOR_REPORT}? ${rate >= MIN_SEGMENT_HIT_RATE_FOR_REPORT}`,
+            },
+          });
+        } else {
+          coachDebug("mini-report.no-report-from-backend");
+        }
+        if (report && reportable) {
+          // Step 5 — prefer the server-computed playMode (Rust derives it
+          // from onset_efficiency at segment close). Fall back to JS
+          // derivation so old saved sessions and short warmup bursts still
+          // resolve rather than leaving the UI undefined.
+          const derivedPlayMode: "structured" | "noodling" =
+            report.onsetEfficiency !== undefined
+              ? report.onsetEfficiency >= 0.65
+                ? "structured"
+                : "noodling"
+              : "structured";
+          setPlayMode(report.playMode ?? derivedPlayMode);
+
+          // Muddy-hits tip: player lands every beat but the signal is soft
+          // (confidence-weighted completeness low, raw coverage high).
+          if (
+            !muddy_hitsFiredRef.current &&
+            coachVerbosity !== "less" &&
+            report.hitCompleteness !== undefined &&
+            report.hitCompleteness < 0.70 &&
+            accuracyRatio(report) >= 0.85
+          ) {
+            muddy_hitsFiredRef.current = true;
+            const tipText = pickTemplate(TEMPLATE_CATALOG, muddy_hitsShuffleRef.current, {
+              vocab: instrumentLabel as any,
+              scenario: "muddy_hits",
+              severity: "neutral",
+            });
+            if (tipText) {
+              const tipMsg: FeedMessage = {
+                id: crypto.randomUUID(),
+                type: "coach-tip",
+                timestamp: Date.now(),
+                content: tipText,
+              };
+              setMessages((prev) => [...prev, tipMsg]);
+              if (narrativeRef.current) {
+                narrativeRef.current = appendCoachUtterance(narrativeRef.current, tipText);
+              }
+            }
+          }
+
+          const now = Date.now();
+          segmentReportsRef.current.push({ report, bpm: segmentBpm, timeSignature, startTime: segmentStartRef.current, endTime: now });
+
+          // Clear the Rust accumulator IMMEDIATELY — before the
+          // potentially multi-second LLM rephrase. If we wait until
+          // after `await coachGenerate(...)`, and the user starts a
+          // new exercise during the rephrase window, the next
+          // exercise's beats accumulate INTO the same accumulator and
+          // are wiped out when `clearSession()` finally fires. The
+          // second exercise's eventual `getSessionReport()` then
+          // either returns null (empty) or fails `isSegmentReportable`
+          // (too few scored beats), so no second mini-report ever
+          // emits. Captured + fixed 2026-05-16 — see "2 exercises,
+          // only 1 mini-report" report. Fire-and-forget is fine: the
+          // local `report` reference is the source of truth for the
+          // rest of this block.
+          clearSession();
+
+          // C1: log the segment-end into the narrative *before* coach
+          // generation so the LLM can see the segment summary in context.
+          if (narrativeRef.current) {
+            narrativeRef.current = appendSegmentEnd(
+              narrativeRef.current,
+              { score: report.score, bpm: segmentBpm, note: shortPocketNote(report) },
+              now,
+            );
+          }
+
+          // Generate coach comment (LLM or template-based).
+          // Accuracy uses SCORED beats (hits + misses) as the denominator
+          // — not totalBeats — so a session that started before the user
+          // picked up the instrument doesn't get a misleading "12%
+          // accuracy". See `src/coach/reportStats.ts`.
+          const accuracy = accuracyPct(report);
+          let comment = formatMiniReport(report);
+          if (coachLoadedRef.current) {
+            try {
+              const context = formatMiniReportContext(
+                segmentBpm,
+                timeSignature,
+                accuracy,
+                report,
+                instrumentLabel,
+                narrativeRef.current ? formatForLLM(narrativeRef.current) : undefined,
+                derivedPlayMode,
+              );
+              comment = await coachGenerate(context);
+            } catch (err) {
+              // Fall back to template — but log so we can diagnose
+              // "the LLM stopped paraphrasing" instead of guessing.
+              coachDebug("mini-report.llm-error", String(err));
+            }
+          }
+
+          // Post-LLM staleness recheck — the rephrase at `coachGenerate`
+          // can take 200–2000 ms, and during that window the user might
+          // start a new session (sid bump) OR end the current one
+          // (activeRef flip). Both must be dropped — see
+          // src/coach/sessionGuard.ts for the unified predicate.
+          if (token.isStaleOrInactive()) {
+            coachDebug("mini-report.discard-post-llm", { capturedAt: token.capturedAt, current: sessionIdRef.current, active: activeRef.current });
+            return;
+          }
+
+          // Phase 5 — pick suggestion chips for the user to tap.
+          // The selector is deterministic given the context, so two
+          // identical-looking sessions show different chips because
+          // of recency tracking (chips shown last session are
+          // down-weighted by 0.7×). See `src/coach/chips.ts`.
+          const chips = buildChipsForMiniReport({
+            report,
+            bpm: segmentBpm,
+            timeSignature,
+            segments: segmentReportsRef.current,
+            previousSessionScore: prevSessionBestRef.current,
+          });
+
+          // The mini-report carries ONLY the coach's commentary on the
+          // segment (score circle + text). The follow-up question chips
+          // ride on a separate `chip-prompt` message right after it so
+          // the input affordance is visually distinct from the coach's
+          // content — see the `chip-prompt` rationale on
+          // `FeedMessageType` in `src/types.ts`. `now` is already
+          // bound above (at the segmentReportsRef push) so we reuse
+          // it here for a stable shared timestamp.
+          const reportTs = Date.now();
+          const reportMsg: FeedMessage = {
+            id: crypto.randomUUID(),
+            type: "mini-report",
+            timestamp: reportTs,
+            content: comment,
+            report,
+            meta: { bpm: segmentBpm, timeSignature },
+          };
+          // Only emit a chip-prompt if the selector returned anything
+          // substantive. The Escape chip ("Ask something else…") was
+          // retired in v0.9 (the coach card pins a chat input to the
+          // bottom — the chip duplicated that affordance), so the
+          // selector now returns 0–3 substantive chips. An empty
+          // chip list means nothing to suggest — don't ship an empty
+          // bubble. See `selectChips` in `src/coach/chips.ts`.
+          const chipMsg: FeedMessage | null = chips.length > 0
+            ? {
+                id: crypto.randomUUID(),
+                type: "chip-prompt",
+                // +1 ms so the chip-prompt always sorts AFTER the
+                // mini-report when a consumer orders by timestamp.
+                timestamp: reportTs + 1,
+                content: "",
+                chips,
+              }
+            : null;
+          setMessages((prev) =>
+            chipMsg ? [...prev, reportMsg, chipMsg] : [...prev, reportMsg],
+          );
+          if (narrativeRef.current) {
+            narrativeRef.current = appendCoachUtterance(
+              narrativeRef.current,
+              comment,
+            );
+          }
+          // NOTE: `clearSession()` was called above, BEFORE the LLM
+          // rephrase, to keep the Rust accumulator from devouring the
+          // next exercise's data while this one's rephrase was in
+          // flight. See the rationale block at the call site.
+        }
+      });
+    }
+    wasPlayingRef.current = isPlaying;
+  }, [isPlaying, active, timeSignature, instrumentLabel,
+    playBpmRef, sessionIdRef, activeRef, segmentReportsRef, segmentStartRef,
+    prevSessionBestRef, narrativeRef, coachLoadedRef, setMessages, setPlayMode]);
+
+  /**
+   * Reset the falling-edge detector. Call from startSession (and endSession)
+   * to prevent a stale mini-report from the previous session firing.
+   */
+  const reset = useCallback(() => {
+    wasPlayingRef.current = false;
+    muddy_hitsFiredRef.current = false;
+  }, []);
+
+  return { reset };
+}

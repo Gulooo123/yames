@@ -166,6 +166,8 @@ export interface GreetingOutput {
     lastBpm?: number;
     personalBest?: number;
     targetScore?: number;
+    /** Mean score across all sessions for this preset (rounded). */
+    avgScore?: number;
     medianScore7d?: number;
     sessions7d?: number;
     onDowntrend?: boolean;
@@ -230,6 +232,9 @@ export function renderGreeting(input: GreetingInput): GreetingOutput {
       const personalBest = Math.max(...sessions.map((s) => s.report.score));
       const lastScore = last.report.score;
       const lastBpm = last.bpm;
+      const avgScore = Math.round(
+        sessions.reduce((sum, s) => sum + s.report.score, 0) / sessions.length,
+      );
       const targetScore = Math.min(
         personalBest,
         lastScore + SUGGEST_TARGET_DELTA,
@@ -287,6 +292,7 @@ export function renderGreeting(input: GreetingInput): GreetingOutput {
           lastBpm,
           personalBest,
           targetScore,
+          avgScore,
           onDowntrend,
           playedWithin4h,
           strugglePriorScore: struggleHit?.report.score,

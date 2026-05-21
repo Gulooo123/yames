@@ -43,11 +43,8 @@ pub const CALIBRATION_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 /// In practice the timing analyzer only fires the convergence callback
 /// when the running-median buffer is fully refilled with real samples
 /// (confidence == 1.0), so this is always satisfied; the constant is
-/// exported so callers can reason about the floor without re-deriving
-/// it. `dead_code` is gated to the lib target until a future caller
-/// (e.g. mid-session "save what we have so far on stop_evaluation")
-/// needs to consult it.
-#[allow(dead_code)]
+/// used by `persist_to_store` to filter out low-confidence entries
+/// before writing to disk.
 pub const PERSIST_CONFIDENCE_THRESHOLD: f64 = 0.95;
 
 /// One cached `(instrument, device)` calibration entry.
@@ -180,10 +177,25 @@ pub fn create_shared_calibration_cache() -> SharedCalibrationCache {
 /// Persist the current cache snapshot into the `settings.json` store.
 /// Best-effort — a failure here is logged but never bubbled. The in-
 /// memory cache stays authoritative until the next launch.
+///
+/// Only entries whose `confidence >= PERSIST_CONFIDENCE_THRESHOLD` are
+/// written to disk — low-confidence offsets aren't trustworthy enough
+/// to bootstrap a future session and are silently dropped here.
 pub fn persist_to_store(cache: &CalibrationCache, app_handle: &tauri::AppHandle) {
     use tauri_plugin_store::StoreExt;
+    // Filter to entries that met the confidence threshold before
+    // serializing. The in-memory cache is unchanged — only the
+    // on-disk snapshot is restricted.
+    let to_persist = CalibrationCache {
+        entries: cache
+            .entries
+            .iter()
+            .filter(|p| p.entry.confidence >= PERSIST_CONFIDENCE_THRESHOLD)
+            .cloned()
+            .collect(),
+    };
     if let Ok(store) = app_handle.store("settings.json") {
-        match serde_json::to_value(cache) {
+        match serde_json::to_value(&to_persist) {
             Ok(json) => {
                 store.set("calibrationCache", json);
             }

@@ -75,6 +75,11 @@ pub struct SessionReport {
     /// were recorded (mirrors the `onset_efficiency` sentinel exactly).
     #[serde(rename = "playMode", skip_serializing_if = "Option::is_none")]
     pub play_mode: Option<PlayMode>,
+    /// Mean hit completeness over the segment window (0.0–1.0).
+    /// `beat_count / total_expected_beats` averaged across segments.
+    /// `None` when no segments were recorded (mirrors `onset_efficiency`).
+    #[serde(rename = "hitCompleteness", skip_serializing_if = "Option::is_none")]
+    pub hit_completeness: Option<f32>,
 }
 
 /// Accumulates BeatFeedback events during a playing session.
@@ -441,6 +446,16 @@ impl SessionAccumulator {
                 PlayMode::Noodling
             }
         });
+        let hit_completeness = if self.segments.is_empty() {
+            None
+        } else {
+            let sum: f32 = self
+                .segments
+                .iter()
+                .map(|s| s.component_scores.hit_completeness)
+                .sum();
+            Some(sum / self.segments.len() as f32)
+        };
 
         SessionReport {
             total_beats,
@@ -466,6 +481,7 @@ impl SessionAccumulator {
             grid_correlation: if grid_correlations.is_empty() { 0.0 } else { grid_correlations.iter().sum::<f64>() / grid_correlations.len() as f64 },
             onset_efficiency,
             play_mode,
+            hit_completeness,
         }
     }
 }

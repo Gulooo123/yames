@@ -514,6 +514,14 @@ const GENERIC: ScenarioCatalog = {
       "{score}% at {bpm} BPM. Read the segment summary, then try again.",
     ],
   },
+  muddy_hits: {
+    neutral: [
+      "You're landing every beat but the signal is soft — try a sharper attack.",
+      "Beats are all there, but the transient is weak. Hit with more intention.",
+      "Coverage looks good but the hits are quiet. More force on the attack.",
+      "You're playing through the click, just softly. Try to make more contact.",
+    ],
+  },
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -705,6 +713,14 @@ const DRUMS: ScenarioCatalog = {
       "Lost the grid there. Planned fill or just drifting?",
     ],
   },
+  muddy_hits: {
+    neutral: [
+      "Every beat landed but the hits feel soft — try punching harder into the kick.",
+      "Good coverage but the stroke is light. Drive through the head, don't tap.",
+      "Landing every beat, just quietly. Put more weight into the stroke.",
+      "Beats are there but the signal is weak — increase velocity on the downstroke.",
+    ],
+  },
 } as const;
 
 const ELECTRIC_GUITAR: ScenarioCatalog = {
@@ -890,6 +906,14 @@ const ELECTRIC_GUITAR: ScenarioCatalog = {
     neutral: [
       "Lost the grid there — fill or free? If intentional, ignore me.",
       "Correlation dropped off the click. Noodling or was that a fill?",
+    ],
+  },
+  muddy_hits: {
+    neutral: [
+      "You're landing the beats but the pick attack is light — try a firmer stroke.",
+      "Good coverage, weak transient. Drive the pick through the string.",
+      "Every beat lands, but softly. A harder attack sharpens the signal.",
+      "Beats are all there — just dig in more with the pick for a cleaner attack.",
     ],
   },
 } as const;
@@ -1078,6 +1102,14 @@ const BASS: ScenarioCatalog = {
       "Correlation dropped off the click — are you running a fill?",
     ],
   },
+  muddy_hits: {
+    neutral: [
+      "Landing every note but the signal is soft — dig in more with your plucking hand.",
+      "Good coverage but the attack is quiet. More finger pressure on each pluck.",
+      "Every beat's there, just soft. Try plucking more aggressively.",
+      "Beats are landing but the transient is weak — anchor harder on the string.",
+    ],
+  },
 } as const;
 
 const ACOUSTIC_GUITAR: ScenarioCatalog = {
@@ -1264,6 +1296,14 @@ const ACOUSTIC_GUITAR: ScenarioCatalog = {
       "Correlation dropped off the click — are you running a fill?",
     ],
   },
+  muddy_hits: {
+    neutral: [
+      "You're landing every beat but the attack is light — try a firmer strum or pick.",
+      "Good coverage, soft hits. More wrist force through the strings.",
+      "Beats are all there, just quiet. Drive through the strings with more intent.",
+      "Landing the beats but softly — try a sharper attack on the downstroke.",
+    ],
+  },
 } as const;
 
 const PIANO: ScenarioCatalog = {
@@ -1448,6 +1488,14 @@ const PIANO: ScenarioCatalog = {
     neutral: [
       "Grid correlation dropped. Still with the click, or running a phrase?",
       "Lost the metric grid there. Fill or free passage?",
+    ],
+  },
+  muddy_hits: {
+    neutral: [
+      "Beats are all there but the attack is gentle — try a more intentional finger weight.",
+      "Good coverage but the keystrokes are soft. Push into the keys with more intention.",
+      "Every beat lands, just quietly. Commit more weight to each keypress.",
+      "Landing every note but the signal is weak — increase velocity through the key bed.",
     ],
   },
 } as const;

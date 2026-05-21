@@ -560,6 +560,11 @@ impl TimingAnalyzer {
         let mut consecutive_misses: u32 = 0;
         let mut grace_beats_remaining: u32 = 4; // warmup — never scored
 
+        // Per-beat cap: track how many onsets have matched in the current
+        // quarter-note period, and when the current quarter started.
+        let mut onsets_this_quarter: u32 = 0;
+        let mut quarter_start_ns: u64 = 0;
+
         while alive.load(Ordering::SeqCst) {
             thread::sleep(Duration::from_millis(5));
             // On stop, fall through and complete one final iteration
@@ -845,6 +850,37 @@ impl TimingAnalyzer {
                     activity = Activity::Active;
                     consecutive_misses = 0;
 
+                    // Reset per-quarter counter when a new quarter-note period starts.
+                    // Use ts_ns to detect the boundary; beat.expected_interval_ms is
+                    // the raw quarter-note interval from the clock.
+                    let quarter_interval_ns =
+                        (beat.expected_interval_ms * 1_000_000.0) as u64;
+                    if quarter_interval_ns > 0
+                        && beat.ts_ns >= quarter_start_ns.saturating_add(quarter_interval_ns)
+                    {
+                        onsets_this_quarter = 0;
+                        let periods_elapsed =
+                            (beat.ts_ns - quarter_start_ns) / quarter_interval_ns;
+                        quarter_start_ns = quarter_start_ns
+                            .saturating_add(periods_elapsed.saturating_mul(quarter_interval_ns));
+                    }
+
+                    // Hard cap: if we've already matched max_onsets_per_beat in this
+                    // quarter-note period, reclassify this onset as spurious and skip
+                    // calibration and scoring. Activity and consecutive_misses were
+                    // already updated above — the player IS playing, the note is just
+                    // over the density cap.
+                    if onsets_this_quarter >= profile.max_onsets_per_beat as u32 {
+                        if let Some(seg) = segment.as_mut() {
+                            seg.spurious_amplitudes.push(onset.amplitude);
+                        }
+                        if let Some(i) = onset_tel_idx {
+                            let mut tel = telemetry.lock().unwrap();
+                            tel.push_spurious(i);
+                        }
+                        continue;
+                    }
+
                     // Raw offset (before calibration) for calibration update
                     let raw_offset_ms =
                         (onset.ts_ns as f64 - beat.ts_ns as f64) / 1_000_000.0;
@@ -964,11 +1000,15 @@ impl TimingAnalyzer {
                             grid_alignment_denominator: 0.0,
                             matched_confidence_sum: 0.0,
                         });
+                        // Anchor the first quarter-note boundary to this onset so the
+                        // cap window starts from real play, not Unix epoch zero.
+                        quarter_start_ns = onset.ts_ns;
                     }
                     if let Some(seg) = segment.as_mut() {
                         seg.last_onset_ns = onset.ts_ns;
                         seg.last_onset_wall_ms = now_wall;
                         seg.onset_count = seg.onset_count.saturating_add(1);
+                        onsets_this_quarter = onsets_this_quarter.saturating_add(1);
                         seg.beat_count = seg.beat_count.saturating_add(1);
                         seg.total_expected_beats =
                             seg.total_expected_beats.saturating_add(1);
