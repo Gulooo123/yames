@@ -82,6 +82,9 @@ impl Instrument {
                 expected_onsets_per_beat: 1.0..=3.0,
                 spectral_weights: spectral_weights_broadband_low_high(),
                 activity_silence_beats: 8,
+                // Drums live or die by the click — raise grid_alignment,
+                // trim interval_consistency (fills break regularity by design).
+                score_weights: ScoreWeights { ic: 0.35, ga: 0.30, hc: 0.25, oe: 0.10 },
                 vocabulary: InstrumentVocabulary::Drums,
                 aubio_onset_method: "hfc",
             },
@@ -92,6 +95,9 @@ impl Instrument {
                 expected_onsets_per_beat: 0.5..=2.0,
                 spectral_weights: spectral_weights_mid(),
                 activity_silence_beats: 4,
+                // Default distribution — melodic phrasing is freer about
+                // the grid so no single component dominates.
+                score_weights: ScoreWeights::default(),
                 vocabulary: InstrumentVocabulary::Guitar,
                 aubio_onset_method: "complex",
             },
@@ -102,6 +108,8 @@ impl Instrument {
                 expected_onsets_per_beat: 0.5..=2.0,
                 spectral_weights: spectral_weights_mid_high(),
                 activity_silence_beats: 4,
+                // Same as electric: default weights.
+                score_weights: ScoreWeights::default(),
                 vocabulary: InstrumentVocabulary::Guitar,
                 aubio_onset_method: "complex",
             },
@@ -112,6 +120,10 @@ impl Instrument {
                 expected_onsets_per_beat: 0.5..=1.5,
                 spectral_weights: spectral_weights_low(),
                 activity_silence_beats: 4,
+                // Bass is the rhythmic anchor — modest ga bump, trim oe
+                // (bass lines are intentionally sparse so efficiency is
+                // less diagnostic).
+                score_weights: ScoreWeights { ic: 0.35, ga: 0.25, hc: 0.25, oe: 0.15 },
                 vocabulary: InstrumentVocabulary::Bass,
                 aubio_onset_method: "complex",
             },
@@ -122,6 +134,10 @@ impl Instrument {
                 expected_onsets_per_beat: 1.0..=4.0,
                 spectral_weights: spectral_weights_broadband(),
                 activity_silence_beats: 8,
+                // Piano plays dense chords — raise hit_completeness so
+                // missed chord beats count more; trim ga slightly since
+                // rubato phrasing is stylistically common.
+                score_weights: ScoreWeights { ic: 0.38, ga: 0.18, hc: 0.30, oe: 0.14 },
                 vocabulary: InstrumentVocabulary::Piano,
                 aubio_onset_method: "specflux",
             },
@@ -132,6 +148,8 @@ impl Instrument {
                 expected_onsets_per_beat: 0.5..=2.0,
                 spectral_weights: spectral_weights_moderate_broadband(),
                 activity_silence_beats: 5,
+                // Unknown instrument — use the default distribution.
+                score_weights: ScoreWeights::default(),
                 vocabulary: InstrumentVocabulary::Other,
                 aubio_onset_method: "specflux",
             },
@@ -153,6 +171,44 @@ pub enum InstrumentVocabulary {
     Bass,
     Piano,
     Other,
+}
+
+/// Per-segment score component weights. Sum must equal 1.0.
+///
+/// Each instrument profile carries its own `ScoreWeights` so scoring can
+/// reflect the physics of the instrument:
+///
+///   - Drums: grid_alignment raised (drumming is all about the click)
+///   - Bass: grid_alignment modestly raised (bass locks rhythm section)
+///   - Piano: hit_completeness raised (chord density makes misses costly)
+///   - Guitar / Other: default distribution (melody/harmony are freer)
+///
+/// The `Default` impl mirrors the pre-per-instrument constants
+/// (`W_INTERVAL_CONSISTENCY=0.40`, `W_GRID_ALIGNMENT=0.20`,
+/// `W_HIT_COMPLETENESS=0.25`, `W_ONSET_EFFICIENCY=0.15`) so that any
+/// code-path using `ScoreWeights::default()` behaves identically to the
+/// single-weight era.
+#[derive(Debug, Clone, Copy)]
+pub struct ScoreWeights {
+    /// Interval consistency weight (σ-based timing regularity).
+    pub ic: f32,
+    /// Grid alignment weight (beat-window placement quality).
+    pub ga: f32,
+    /// Hit completeness weight (matched / total expected beats).
+    pub hc: f32,
+    /// Onset efficiency weight (matched / total onsets, amplitude-penalised).
+    pub oe: f32,
+}
+
+impl Default for ScoreWeights {
+    fn default() -> Self {
+        ScoreWeights {
+            ic: 0.40,
+            ga: 0.20,
+            hc: 0.25,
+            oe: 0.15,
+        }
+    }
 }
 
 /// The instrument-aware constants every downstream phase consumes.
@@ -226,6 +282,10 @@ pub struct InstrumentProfile {
     /// bass + guitar are tighter.
     pub activity_silence_beats: u8,
 
+    /// Per-segment score component weights. See `ScoreWeights`.
+    /// Consumed by `timing::score_segment` to compute the weighted aggregate.
+    pub score_weights: ScoreWeights,
+
     /// Coach vocabulary hint. See `InstrumentVocabulary`.
     ///
     /// Consumed on the JS side (`src/coach/templates.ts` picks the
@@ -241,7 +301,7 @@ pub struct InstrumentProfile {
 /// or struct shape change. Session logs persist this number so historical
 /// analytics can apply the right interpretation. Increment on any tuning
 /// pass; never decrement.
-pub const INSTRUMENT_PROFILE_VERSION: u32 = 1;
+pub const INSTRUMENT_PROFILE_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Spectral weight presets

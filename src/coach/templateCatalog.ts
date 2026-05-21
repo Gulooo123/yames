@@ -458,6 +458,14 @@ const GENERIC: ScenarioCatalog = {
       "Ceiling at {bpm} BPM — {attemptCount} attempts confirms it. Park at {suggestedBpm} and let it settle.",
     ],
   },
+  grid_lost: {
+    neutral: [
+      "Grid correlation dropped — are you still playing to the click?",
+      "Lost the grid there. Intentional fill, or drifting off the click?",
+      "Correlation with the grid just dropped off. Still with the metronome?",
+      "Looks like the groove parted ways with the click. Fill or free?",
+    ],
+  },
   bias_only: {
     encouragement: [
       "Very consistent timing — just {biasMs}ms {direction}. Nudge everything {correctionDirection} to sit on the beat.",
@@ -685,6 +693,18 @@ const DRUMS: ScenarioCatalog = {
       "Low scatter but consistently {direction} — bring the whole kit's feel {correctionDirection} to center.",
     ],
   },
+  pace_coaching: {
+    neutral: [
+      "Ceiling at {bpm} — {attemptCount} attempts. Two sessions at {suggestedBpm} will lock the groove.",
+      "{attemptCount} hits at {bpm} BPM and the kit score's stuck. Drop to {suggestedBpm}, groove it solid, then push.",
+    ],
+  },
+  grid_lost: {
+    neutral: [
+      "Four beats without the grid — fill incoming or off-click?",
+      "Lost the grid there. Planned fill or just drifting?",
+    ],
+  },
 } as const;
 
 const ELECTRIC_GUITAR: ScenarioCatalog = {
@@ -858,6 +878,18 @@ const ELECTRIC_GUITAR: ScenarioCatalog = {
       "Your picking is {biasMs}ms {direction} the click consistently. Nudge your attack {correctionDirection} — it's a technique lean, not chaos.",
       "Every hit lands {biasMs}ms {direction}. That's a consistent lean — adjust your attack angle {correctionDirection}.",
       "Tight scatter, {biasMs}ms {direction}. Shift your pick attack {correctionDirection} to land on the click.",
+    ],
+  },
+  pace_coaching: {
+    neutral: [
+      "{attemptCount} attempts at {bpm} and the score's not moving. Drop to {suggestedBpm}, lock it in, then push again.",
+      "Ceiling confirmed at {bpm} — {attemptCount} tries. Park at {suggestedBpm} for a week and build it solid.",
+    ],
+  },
+  grid_lost: {
+    neutral: [
+      "Lost the grid there — fill or free? If intentional, ignore me.",
+      "Correlation dropped off the click. Noodling or was that a fill?",
     ],
   },
 } as const;
@@ -1034,6 +1066,18 @@ const BASS: ScenarioCatalog = {
       "Your attack sits {biasMs}ms {direction}. Very consistent — just shift {correctionDirection} to land on the beat.",
     ],
   },
+  pace_coaching: {
+    neutral: [
+      "Ceiling at {bpm} — {attemptCount} sessions in. Lock {suggestedBpm} first, then come back.",
+      "{attemptCount} attempts at {bpm} BPM and the groove's not locking. Drop to {suggestedBpm} and consolidate.",
+    ],
+  },
+  grid_lost: {
+    neutral: [
+      "Lost the grid there. Fill or improv? If intentional, carry on.",
+      "Correlation dropped off the click — are you running a fill?",
+    ],
+  },
 } as const;
 
 const ACOUSTIC_GUITAR: ScenarioCatalog = {
@@ -1208,6 +1252,18 @@ const ACOUSTIC_GUITAR: ScenarioCatalog = {
       "Consistent lean: {biasMs}ms {direction}. Shift the whole phrase {correctionDirection} and you'll be centered.",
     ],
   },
+  pace_coaching: {
+    neutral: [
+      "{attemptCount} attempts at {bpm} and it's not settling. Try {suggestedBpm} for two sessions, then revisit.",
+      "Ceiling confirmed at {bpm} — drop to {suggestedBpm} and let the fretting hand catch up.",
+    ],
+  },
+  grid_lost: {
+    neutral: [
+      "Lost the grid there. Fill or improv? If intentional, carry on.",
+      "Correlation dropped off the click — are you running a fill?",
+    ],
+  },
 } as const;
 
 const PIANO: ScenarioCatalog = {
@@ -1380,6 +1436,18 @@ const PIANO: ScenarioCatalog = {
     neutral: [
       "Keys are falling {biasMs}ms {direction} the click with low scatter. Shift your attack timing {correctionDirection}.",
       "Consistent {biasMs}ms {direction} — that's a lean, not jitter. Move everything {correctionDirection} to center it.",
+    ],
+  },
+  pace_coaching: {
+    neutral: [
+      "Keys ceiling at {bpm} — {attemptCount} attempts. Two sessions at {suggestedBpm} to consolidate.",
+      "{attemptCount} tries at {bpm} and the hands aren't settling. Park at {suggestedBpm} and groove it in.",
+    ],
+  },
+  grid_lost: {
+    neutral: [
+      "Grid correlation dropped. Still with the click, or running a phrase?",
+      "Lost the metric grid there. Fill or free passage?",
     ],
   },
 } as const;

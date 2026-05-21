@@ -293,6 +293,13 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
   } | null>(null);
   const paceCoachingFiredRef = useRef<boolean>(false);
 
+  // ── Grid-lost tip state ────────────────────────────────────────
+  // `gridLostFiredRef` gates the once-per-collapse rule. Resets when
+  // the grid recovers (majority of the recent window climbs back above
+  // the recovery threshold) so a second collapse in the same session
+  // still surfaces a tip.
+  const gridLostFiredRef = useRef<boolean>(false);
+
   // Speak a comment when voice mode is on. The notification-level
   // selector was removed — the coach is either fully audible or fully
   // silent. The `urgency` parameter is accepted for call-site clarity
@@ -833,6 +840,48 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
               narrativeRef.current = appendCoachUtterance(narrativeRef.current, paceTemplate);
             }
             speakAndRevealRef.current(tipId, paceTemplate, "normal");
+          }
+        }
+
+        // ── Grid-lost tip ─────────────────────────────────────────
+        // Check the last 6 beats for grid-correlation collapse
+        // (4 of 6 below 0.3). Fires once per collapse; re-arms when
+        // the grid recovers (3 of 6 rise above 0.5 again).
+        // Respects coachVerbosity — silent in "less" mode.
+        if (coachVerbosity !== "less") {
+          const recentWindow = realtimeWindowRef.current;
+          if (recentWindow.length >= 6) {
+            const recent6 = recentWindow.slice(-6);
+            const lowCount = recent6.filter((b) => b.gridCorrelation < 0.3).length;
+            const highCount = recent6.filter((b) => b.gridCorrelation > 0.5).length;
+            if (gridLostFiredRef.current && highCount >= 3) {
+              // Grid has recovered — re-arm so a second collapse still tips.
+              gridLostFiredRef.current = false;
+            } else if (!gridLostFiredRef.current && lowCount >= 4) {
+              const gridTemplate = pickTemplate(TEMPLATE_CATALOG, shuffleStateRef.current, {
+                vocab: vocabRef.current,
+                scenario: "grid_lost",
+                severity: "neutral",
+                context: {},
+              });
+              if (gridTemplate) {
+                gridLostFiredRef.current = true;
+                coachDebug("grid_lost.fire", { lowCount, recentCorr: recent6.map((b) => +b.gridCorrelation.toFixed(2)) });
+                const tipId = crypto.randomUUID();
+                const gridMsg: FeedMessage = {
+                  id: tipId,
+                  type: "coach-tip",
+                  timestamp: now,
+                  content: gridTemplate,
+                  pending: voiceMode === "voice",
+                };
+                setMessages((prev) => [...prev, gridMsg]);
+                if (narrativeRef.current) {
+                  narrativeRef.current = appendCoachUtterance(narrativeRef.current, gridTemplate);
+                }
+                speakAndRevealRef.current(tipId, gridTemplate, "normal");
+              }
+            }
           }
         }
 
@@ -1404,6 +1453,9 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         attemptCount: bpmCeiling.sessions,
       };
     })();
+
+    // ── Grid-lost tip ─────────────────────────────────────────────
+    gridLostFiredRef.current = false;
 
     const greeting = renderGreeting({
       presetId,

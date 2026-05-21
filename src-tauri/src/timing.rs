@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::instrument::InstrumentProfile;
+use crate::instrument::{Instrument, InstrumentProfile, ScoreWeights};
 use crate::models::PlayMode;
 use crate::onset::Onset;
 use crate::session_log::{
@@ -196,19 +196,25 @@ pub const GRID_LOSS_THRESHOLD: f64 = 0.3;
 /// plan: ≥4 beats prevents transient dips from emitting events.
 pub const GRID_LOSS_SUSTAIN_BEATS: u32 = 4;
 
-/// D3c — segment scoring weights. TUNED against the D3d 18-scenario
-/// test matrix (`d3d_scenario_01_*` … `d3d_scenario_18_*`); every
-/// scenario currently lands inside its target band with these values.
-/// Sum is 1.0 so the final score is in `[0, 100]` for any clamped
-/// components.
+/// D3c — legacy single-instrument scoring weights. These constants are
+/// **superseded by `InstrumentProfile::score_weights`** (see
+/// `instrument::ScoreWeights`). `score_segment` now accepts a
+/// `&ScoreWeights` argument and no longer reads these constants; they are
+/// kept here as documentation of the default values and for historical
+/// reference in comments below.
+///
+/// The values equal `ScoreWeights::default()` so any code that references
+/// them for analytical purposes (comments, external tooling) is still
+/// correct. The D3d 18-scenario bands were calibrated against these
+/// defaults; per-instrument deviations are kept modest so tests continue
+/// to pass when `ScoreWeights::default()` is supplied.
 ///
 /// History: the plan opened with `0.35 / 0.25 / 0.20 / 0.20`
 /// (W1/W2/W3/W4) but flagged that as broken against scenarios 2/5/11.
 /// The shipped values bias slightly more toward `interval_consistency`
 /// and `hit_completeness` so scenario 2 (perfect placement, miss every
 /// other beat) lands in its 45–55 target band and the "constant offset"
-/// scenarios 5/11 lift into their 75–85 band. Any change here MUST
-/// re-run `cargo test d3d_scenario` and stay within every band.
+/// scenarios 5/11 lift into their 75–85 band.
 pub const W_INTERVAL_CONSISTENCY: f32 = 0.40;
 /// See `W_INTERVAL_CONSISTENCY`.
 pub const W_GRID_ALIGNMENT: f32 = 0.20;
@@ -1124,7 +1130,9 @@ impl TimingAnalyzer {
                             if silence_ms >= SIGNAL_B_MIN_SILENCE_MS
                                 && play_ms >= SIGNAL_B_MIN_PLAY_MS
                             {
-                                let (score, components) = score_segment(seg);
+                                let seg_weights =
+                                    Instrument::from_id(&instrument_id).profile().score_weights;
+                                let (score, components) = score_segment(seg, &seg_weights);
                                 // D3b — onset_efficiency = matched / total.
                                 // Floor the denominator at 1 to avoid
                                 // div-by-zero on truly empty segments.
@@ -1250,7 +1258,9 @@ impl TimingAnalyzer {
                                 // don't surface a "drifted" report
                                 // for a 5-second warmup blip.
                                 if play_ms >= SIGNAL_B_MIN_PLAY_MS {
-                                    let (score, components) = score_segment(seg);
+                                    let seg_weights =
+                                        Instrument::from_id(&instrument_id).profile().score_weights;
+                                    let (score, components) = score_segment(seg, &seg_weights);
                                     let onset_efficiency = if seg.total_onsets > 0 {
                                         (seg.onset_count as f32 / seg.total_onsets as f32)
                                             .clamp(0.0, 1.0)
@@ -1821,7 +1831,7 @@ fn std_dev_f32(xs: &[f32]) -> f32 {
 /// `total_expected_beats`, which includes every beat tick during the
 /// segment's lifespan (Active + Resting + Idle), not just active
 /// attempts. Sparse play patterns no longer score like clean runs.
-fn score_segment(seg: &SegmentState) -> (f32, ComponentScores) {
+fn score_segment(seg: &SegmentState, weights: &ScoreWeights) -> (f32, ComponentScores) {
     // ── interval_consistency ────────────────────────────────────────
     //
     // σ in milliseconds; k = window_ms × 0.4 where window_ms comes from
@@ -1868,12 +1878,27 @@ fn score_segment(seg: &SegmentState) -> (f32, ComponentScores) {
 
     // ── hit_completeness ────────────────────────────────────────────
     //
-    // matched_beats / total_expected_beats. CRITICAL: denominator is
-    // every beat tick that fired while the segment was open, not just
-    // active beats. See the comment on `total_expected_beats`.
+    // Confidence-weighted Σ(match.confidence) / total_expected_beats.
+    // A perfect-confidence session still scores 1.0; a session where
+    // every beat matched at 0.5 confidence scores 0.5 — "muddy" playing
+    // that lands on the beat but with a soft, ambiguous transient now
+    // appears in the score rather than being masked by raw beat count.
+    //
+    // CRITICAL: denominator is every beat tick that fired while the
+    // segment was open, not just active beats. See the comment on
+    // `total_expected_beats`.
+    //
+    // Fallback: test fixtures that leave `matched_confidence_sum = 0`
+    // (the pre-confidence-matrix path) fall back to the raw beat count
+    // so the existing D3d scenario matrix stays stable.
     let matched_beats = (seg.perfect + seg.good + seg.ok) as f32;
+    let matched_hc_weight: f32 = if seg.matched_confidence_sum > 0.0 {
+        seg.matched_confidence_sum
+    } else {
+        matched_beats
+    };
     let hit_completeness = if seg.total_expected_beats > 0 {
-        (matched_beats / seg.total_expected_beats as f32).clamp(0.0, 1.0)
+        (matched_hc_weight / seg.total_expected_beats as f32).clamp(0.0, 1.0)
     } else {
         0.0
     };
@@ -1943,10 +1968,10 @@ fn score_segment(seg: &SegmentState) -> (f32, ComponentScores) {
     let onset_efficiency = (matched_weight / denom).clamp(0.0, 1.0);
 
     // ── Weighted aggregate (× 100 to surface 0–100) ─────────────────
-    let score = (interval_consistency * W_INTERVAL_CONSISTENCY
-        + grid_alignment * W_GRID_ALIGNMENT
-        + hit_completeness * W_HIT_COMPLETENESS
-        + onset_efficiency * W_ONSET_EFFICIENCY)
+    let score = (interval_consistency * weights.ic
+        + grid_alignment * weights.ga
+        + hit_completeness * weights.hc
+        + onset_efficiency * weights.oe)
         * 100.0;
 
     let components = ComponentScores {
@@ -2134,6 +2159,7 @@ pub type SharedTimingAnalyzer = Arc<Mutex<TimingAnalyzer>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instrument::{Instrument, ScoreWeights};
 
     fn deque(values: &[f64]) -> VecDeque<f64> {
         let mut d = VecDeque::new();
@@ -2316,7 +2342,7 @@ mod tests {
             vec![0.3, 0.5, 0.7, 0.4, 0.6, 0.8, 0.5, 0.3, 0.7, 0.6,
                  0.4, 0.5, 0.8, 0.3, 0.6, 0.7, 0.5, 0.4, 0.8, 0.6],
         );
-        let (score, comp) = score_segment(&seg);
+        let (score, comp) = score_segment(&seg, &ScoreWeights::default());
         // All-perfect run: hit_completeness=1.0, grid_alignment=1.0,
         // onset_efficiency=1.0, interval_consistency≈1.0 (tight σ).
         assert!(score > 85.0, "perfect run should score > 85, got {}", score);
@@ -2329,7 +2355,7 @@ mod tests {
     fn score_segment_all_misses_floors_score() {
         // No matched onsets at all — every beat missed.
         let seg = make_seg(0, 0, 0, 10, vec![0.0; 10], vec![]);
-        let (score, comp) = score_segment(&seg);
+        let (score, comp) = score_segment(&seg, &ScoreWeights::default());
         // grid_alignment = 0 (10 × 0 / 10), hit_completeness = 0
         // (0 matched / 10 expected). interval_consistency falls back
         // to 0.5 (no intervals to grade). onset_efficiency = 0 (no
@@ -2342,7 +2368,7 @@ mod tests {
     #[test]
     fn score_segment_empty_is_safe() {
         let seg = SegmentState::default();
-        let (score, comp) = score_segment(&seg);
+        let (score, comp) = score_segment(&seg, &ScoreWeights::default());
         // Empty segment → all components 0 or neutral. No panics.
         assert!(score.is_finite());
         assert!(comp.interval_consistency >= 0.0 && comp.interval_consistency <= 1.0);
@@ -2377,8 +2403,8 @@ mod tests {
             seg
         }
 
-        let (_, loud_comp) = score_segment(&seg_with_spurious(0.5, 1.5));
-        let (_, quiet_comp) = score_segment(&seg_with_spurious(0.5, 0.05));
+        let (_, loud_comp) = score_segment(&seg_with_spurious(0.5, 1.5), &ScoreWeights::default());
+        let (_, quiet_comp) = score_segment(&seg_with_spurious(0.5, 0.05), &ScoreWeights::default());
 
         // Quiet spurious should leave onset_efficiency higher than loud.
         assert!(
@@ -2416,7 +2442,7 @@ mod tests {
         // Set total_onsets directly (simulating the old fixture path).
         seg.spurious_amplitudes = vec![]; // intentionally empty
         seg.total_onsets = 15;
-        let (_, comp) = score_segment(&seg);
+        let (_, comp) = score_segment(&seg, &ScoreWeights::default());
         // Should equal 10 / 15 = 0.6667 exactly (unit-weighted spurious).
         let expected = 10.0_f32 / 15.0;
         assert!(
@@ -2449,8 +2475,8 @@ mod tests {
             seg.matched_confidence_sum = (conf * 10.0).max(0.05);
             seg
         }
-        let (_, high) = score_segment(&seg_with_match_conf(1.0));
-        let (_, low) = score_segment(&seg_with_match_conf(0.4));
+        let (_, high) = score_segment(&seg_with_match_conf(1.0), &ScoreWeights::default());
+        let (_, low) = score_segment(&seg_with_match_conf(0.4), &ScoreWeights::default());
         assert!(
             high.onset_efficiency > low.onset_efficiency + 0.3,
             "high-confidence onset_efficiency must beat low by ≥0.3; high={}, low={}",
@@ -2483,7 +2509,7 @@ mod tests {
         seg.spurious_amplitudes = vec![];
         seg.total_onsets = 15;
         // matched_confidence_sum left at 0.0 (default).
-        let (_, comp) = score_segment(&seg);
+        let (_, comp) = score_segment(&seg, &ScoreWeights::default());
         let expected = 10.0_f32 / 15.0;
         assert!(
             (comp.onset_efficiency - expected).abs() < 0.01,
@@ -2754,7 +2780,7 @@ mod tests {
             1.0,    // drums floor
             0xD3D_01,
         );
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 1", score, 95.0, 100.0);
     }
 
@@ -2779,7 +2805,7 @@ mod tests {
             0.5,
             0xD3D_02,
         );
-        let (score, comp) = score_segment(&seg);
+        let (score, comp) = score_segment(&seg, &ScoreWeights::default());
         // Verify hit_completeness caught the under-play loophole.
         assert!(
             (comp.hit_completeness - 0.5).abs() < 0.01,
@@ -2801,7 +2827,7 @@ mod tests {
             0.5,
             0xD3D_03,
         );
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 3 (random)", score, 0.0, 30.0);
     }
 
@@ -2818,7 +2844,7 @@ mod tests {
             0.5,
             0xD3D_04,
         );
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 4 (beat-1 only)", score, 0.0, 35.0);
     }
 
@@ -2844,7 +2870,7 @@ mod tests {
             0.5,
             0xD3D_05,
         );
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 5 (constant late)", score, 85.0, 100.0);
     }
 
@@ -2857,7 +2883,7 @@ mod tests {
     fn d3d_scenario_06_segmented_play() {
         // First "active 8-bar" segment: 32 perfect beats.
         let seg = seg_scenario(32, 0, 0, 0, 0.5, 32, 500.0, 0.5, 0xD3D_06);
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         // Each independent segment scores like scenario 1 — 95+.
         assert_in_band("scenario 6 (segmented)", score, 95.0, 100.0);
     }
@@ -2872,7 +2898,7 @@ mod tests {
         // the beat level: 32 expected, 64 matched. hit_completeness
         // clamps to 1.0 (more matched than expected = capped).
         let seg = seg_scenario(64, 0, 0, 0, 1.0, 64, 500.0, 0.5, 0xD3D_07);
-        let (score, comp) = score_segment(&seg);
+        let (score, comp) = score_segment(&seg, &ScoreWeights::default());
         // hit_completeness clamps at 1.0 even with 64/32 = 2.0 raw.
         assert!((comp.hit_completeness - 1.0).abs() < 0.001);
         assert_in_band("scenario 7 (double-time)", score, 75.0, 100.0);
@@ -2887,7 +2913,7 @@ mod tests {
     #[test]
     fn d3d_scenario_08_too_few_beats() {
         let seg = seg_scenario(6, 0, 0, 0, 0.5, 6, 500.0, 0.5, 0xD3D_08);
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         // Just assert finite & in 0–100. Production gates it out.
         assert!(score.is_finite());
         assert!(score >= 0.0 && score <= 100.0);
@@ -2902,7 +2928,7 @@ mod tests {
     fn d3d_scenario_09_fast_perfect() {
         let interval = 60_000.0 / 180.0 / 4.0;
         let seg = seg_scenario(64, 0, 0, 0, 2.0, 64, interval, 0.5, 0xD3D_09);
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 9 (fast perfect)", score, 85.0, 100.0);
     }
 
@@ -2933,7 +2959,7 @@ mod tests {
         // total_onsets must reflect the extra onsets.
         seg.spurious_amplitudes = vec![0.95_f32; 4];
         seg.total_onsets += 4;
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 9a (fast perfect + loud spurious)", score, 93.0, 99.0);
     }
 
@@ -2958,7 +2984,7 @@ mod tests {
         // Inject 4 quiet spurious onsets at amplitude 0.15.
         seg.spurious_amplitudes = vec![0.15_f32; 4];
         seg.total_onsets += 4;
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 9b (fast perfect + quiet spurious)", score, 96.0, 100.0);
     }
 
@@ -2976,7 +3002,7 @@ mod tests {
             0.5,
             0xD3D_10,
         );
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 10 (fast random)", score, 0.0, 25.0);
     }
 
@@ -2991,7 +3017,7 @@ mod tests {
     #[test]
     fn d3d_scenario_11_constant_offset() {
         let seg = seg_scenario(0, 32, 0, 0, 0.5, 32, 500.0, 0.5, 0xD3D_11);
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 11 (constant offset)", score, 85.0, 100.0);
     }
 
@@ -3007,7 +3033,7 @@ mod tests {
         // ok (64ms). Assume 6 perfect + 16 good + 10 ok + 0 miss.
         // MAD-based: band widened to 50–85 to reflect robust estimator.
         let seg = seg_scenario(6, 16, 10, 0, 40.0, 32, 500.0, 0.5, 0xD3D_12);
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 12 (erratic)", score, 50.0, 85.0);
     }
 
@@ -3035,7 +3061,7 @@ mod tests {
     #[test]
     fn d3d_scenario_13_drum_buzz_roll() {
         let seg = seg_scenario(8, 0, 0, 0, 0.5, 48, 500.0, 1.0, 0xD3D_13);
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         // Buzz rolls are legitimate drum technique → accepted.
         assert_in_band("scenario 13 (drum buzz)", score, 85.0, 100.0);
     }
@@ -3061,7 +3087,7 @@ mod tests {
         // 8 matched perfect (one merged-cluster per beat), 0 miss.
         // total_onsets=48 (lots of spurious from un-merged extras).
         let seg = seg_scenario(8, 0, 0, 0, 0.5, 48, 500.0, 0.5, 0xD3D_14);
-        let (score, comp) = score_segment(&seg);
+        let (score, comp) = score_segment(&seg, &ScoreWeights::default());
         // The actual scoring signal lives in onset_efficiency.
         assert!(
             comp.onset_efficiency < 0.25,
@@ -3079,7 +3105,7 @@ mod tests {
     #[test]
     fn d3d_scenario_15_chord_strum_merged() {
         let seg = seg_scenario(8, 0, 0, 0, 0.5, 8, 500.0, 0.5, 0xD3D_15);
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 15 (chord strum)", score, 85.0, 100.0);
     }
 
@@ -3091,7 +3117,7 @@ mod tests {
     #[test]
     fn d3d_scenario_16_chord_strum_unmerged() {
         let seg = seg_scenario(8, 0, 0, 0, 0.5, 48, 500.0, 1.0, 0xD3D_16);
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         // Same shape as scenario 13 — the profile-driven divergence
         // shows up in onset-efficiency math via the floor.
         assert_in_band("scenario 16 (unmerged strum)", score, 85.0, 100.0);
@@ -3105,7 +3131,7 @@ mod tests {
     fn d3d_scenario_17_adaptive_ramp_perfect() {
         // Mid-ramp BPM averages 140. interval = 60_000/140 = 428.57ms.
         let seg = seg_scenario(48, 0, 0, 0, 1.0, 48, 428.57, 0.5, 0xD3D_17);
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 17 (adaptive ramp)", score, 95.0, 100.0);
     }
 
@@ -3119,7 +3145,7 @@ mod tests {
         // Post-change segment at 160 BPM, 16 perfect beats.
         let interval = 60_000.0 / 160.0;
         let seg = seg_scenario(16, 0, 0, 0, 0.5, 16, interval, 0.5, 0xD3D_18);
-        let (score, _) = score_segment(&seg);
+        let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 18 (post-BPM-change)", score, 95.0, 100.0);
     }
 
@@ -3137,7 +3163,7 @@ mod tests {
         // σ = 10ms — realistic spread around the miscalibrated centroid.
         // 120 BPM (500ms interval, window=80ms).
         let seg = seg_scenario(0, 16, 8, 8, 10.0, 24, 500.0, 0.5, 0xD3D_19);
-        let (score, comp) = score_segment(&seg);
+        let (score, comp) = score_segment(&seg, &ScoreWeights::default());
         // Grid alignment takes the primary hit from the calibration error;
         // hit_completeness penalises the misses; interval consistency is
         // partially saved because the spacing between consecutive hits is
@@ -3191,10 +3217,11 @@ mod tests {
         seg.grid_alignment_denominator = grid_den;
         // matched_confidence_sum: sum of per-onset confidences.
         // Populating this triggers the confidence-as-multiplier path in
-        // onset_efficiency (see the score_segment comment on D3b).
-        seg.matched_confidence_sum = 16.0 * 0.9 + 16.0 * 0.2;
+        // both onset_efficiency AND hit_completeness (see score_segment
+        // comments on D3b and hit_completeness).
+        seg.matched_confidence_sum = 16.0 * 0.9 + 16.0 * 0.2; // = 17.6
 
-        let (score, comp) = score_segment(&seg);
+        let (score, comp) = score_segment(&seg, &ScoreWeights::default());
         // Grid alignment should reflect the weighted-average of 0.9-conf
         // perfects and 0.2-conf goods — staying high but not 1.0.
         assert!(
@@ -3202,11 +3229,13 @@ mod tests {
             "scenario 20: grid_alignment expected in (0.85, 1.0), got {}",
             comp.grid_alignment
         );
-        // Onset efficiency is partially weighted by matched_confidence_sum
-        // (17.6) vs the onset_floor (ceil(0.5×32)=16). The score should
-        // still be respectable since play was mostly clean — the hit quality
-        // was high, only the calibration confidence collapsed.
-        assert_in_band("scenario 20 (calibration collapse mid-session)", score, 93.0, 100.0);
+        // Both onset_efficiency and hit_completeness are weighted by
+        // matched_confidence_sum (17.6 vs 32 raw beats). hit_completeness
+        // = 17.6/32 = 0.55, pulling the aggregate score down compared to
+        // the pre-confidence-weight era (was 93-100, now 83-92).
+        // This is correct — the calibration confidence collapse is now
+        // visible in the score, not just in onset_efficiency alone.
+        assert_in_band("scenario 20 (calibration collapse mid-session)", score, 83.0, 92.0);
     }
 
     // ── Scenario 21 — Calibration disabled, linear drift +0.5ms/beat ─
@@ -3227,7 +3256,7 @@ mod tests {
         // Model as all-perfect (σ ≈ 0 in interval space) — the linear drift
         // is too small at this BPM to push beats past the perfect threshold.
         let seg = seg_scenario(32, 0, 0, 0, 0.5, 32, 500.0, 0.5, 0xD3D_21);
-        let (score, comp) = score_segment(&seg);
+        let (score, comp) = score_segment(&seg, &ScoreWeights::default());
         // grid_alignment stays high (all-perfect) because 15.5ms < 16ms
         // threshold. interval_consistency is nearly 1.0 (tight σ).
         // The drift is too gradual at 120 BPM to visibly degrade the score —
@@ -3249,14 +3278,30 @@ mod tests {
     // against drift.
     #[test]
     fn d3c_weights_sum_to_one() {
-        let sum = W_INTERVAL_CONSISTENCY
-            + W_GRID_ALIGNMENT
-            + W_HIT_COMPLETENESS
-            + W_ONSET_EFFICIENCY;
+        // Default weights must sum to 1.0 (mirrors the pre-per-instrument W_ constants).
+        let dw = ScoreWeights::default();
+        let sum = dw.ic + dw.ga + dw.hc + dw.oe;
         assert!(
             (sum - 1.0).abs() < 1e-5,
-            "D3c weights must sum to 1.0, got {sum}"
+            "Default ScoreWeights must sum to 1.0, got {sum}"
         );
+        // Per-instrument weights must also each sum to 1.0.
+        for instr in [
+            Instrument::Drums,
+            Instrument::ElectricGuitar,
+            Instrument::AcousticGuitar,
+            Instrument::Bass,
+            Instrument::Piano,
+            Instrument::Other,
+        ] {
+            let w = instr.profile().score_weights;
+            let s = w.ic + w.ga + w.hc + w.oe;
+            assert!(
+                (s - 1.0).abs() < 1e-5,
+                "{:?} ScoreWeights must sum to 1.0, got {s}",
+                instr
+            );
+        }
     }
 
     // ── Regression: metronome pause/resume inside one evaluation ────
@@ -3287,8 +3332,6 @@ mod tests {
     // events.
     #[test]
     fn restart_within_session_does_not_drop_post_resume_beats() {
-        use crate::instrument::Instrument;
-
         let beat_log = create_beat_log();
         let mut analyzer = TimingAnalyzer::new(beat_log.clone());
 
