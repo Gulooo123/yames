@@ -475,3 +475,56 @@ describe("stamina detection → template path", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Pace coaching → template path (acceptance test)
+// ---------------------------------------------------------------------------
+
+describe("pace coaching detection → template path", () => {
+  // 6 sessions at 130 BPM band (median < CEILING_MEDIAN_SCORE=70),
+  // giving sessions=6 which satisfies the ≥ 4 gate for pace_coaching.
+  // We also need ≥ RECURRING_MIN_SESSIONS (3) total sessions.
+  const ceilingSessions = [
+    makeSession(30, 60, 132, "pace-preset"),
+    makeSession(25, 62, 135, "pace-preset"),
+    makeSession(20, 58, 138, "pace-preset"),
+    makeSession(15, 55, 131, "pace-preset"),
+    makeSession(10, 63, 134, "pace-preset"),
+    makeSession(5, 61, 137, "pace-preset"),
+  ];
+
+  it("detectRecurringIssues returns a bpmCeiling with sessions ≥ 4", () => {
+    const summary = summarizePreset("pace-preset", "Ceiling Run", ceilingSessions);
+    const issues = detectRecurringIssues(summary);
+    expect(issues.bpmCeiling).not.toBeNull();
+    expect(issues.bpmCeiling!.bpmLow).toBe(130);
+    expect(issues.bpmCeiling!.sessions).toBeGreaterThanOrEqual(4);
+  });
+
+  it("pickTemplate fills {bpm}, {suggestedBpm}, {attemptCount} — no raw placeholders in output", () => {
+    const summary = summarizePreset("pace-preset", "Ceiling Run", ceilingSessions);
+    const issues = detectRecurringIssues(summary);
+    const ceiling = issues.bpmCeiling!;
+
+    const suggestedBpm = Math.max(ceiling.bpmLow - BPM_BAND_WIDTH, 40);
+    const state = createShuffleState();
+    const result = pickTemplate(TEMPLATE_CATALOG, state, {
+      vocab: "generic",
+      scenario: "pace_coaching",
+      severity: "neutral",
+      context: {
+        bpm: ceiling.bpmLow + 5, // representative BPM inside the ceiling band
+        suggestedBpm,
+        attemptCount: ceiling.sessions,
+      },
+      rng: () => 0,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result).not.toContain("{bpm}");
+    expect(result).not.toContain("{suggestedBpm}");
+    expect(result).not.toContain("{attemptCount}");
+    // The suggested BPM number must appear in the output text.
+    expect(result).toContain(String(suggestedBpm));
+  });
+});

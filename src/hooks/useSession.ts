@@ -15,6 +15,8 @@ import {
   type Narrative,
 } from "../coach/narrative";
 import {
+  BPM_BAND_WIDTH,
+  bpmBandLowFor,
   detectRecurringIssues,
   detectStaminaPattern,
   formatPresetSummaryForLLM,
@@ -279,6 +281,17 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
   // rule — the tip is suppressed after the first fire.
   const staminaPatternRef = useRef<StaminaPattern | null>(null);
   const staminaTipFiredRef = useRef<boolean>(false);
+
+  // ── Pace coaching tip state ────────────────────────────────────
+  // `paceCoachingRef` holds the BPM ceiling info loaded during
+  // startSession (null when no ceiling with ≥ 4 sessions exists).
+  // `paceCoachingFiredRef` enforces the once-per-session rule.
+  const paceCoachingRef = useRef<{
+    ceilingBpmLow: number;
+    suggestedBpm: number;
+    attemptCount: number;
+  } | null>(null);
+  const paceCoachingFiredRef = useRef<boolean>(false);
 
   // Speak a comment when voice mode is on. The notification-level
   // selector was removed — the coach is either fully audible or fully
@@ -736,6 +749,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         window,
         beatsInSegment: beatsInSegmentRef.current,
         inDrillRamp: inDrillRampRef.current,
+        verbosity: coachVerbosity,
       });
       gatekeeperRef.current = nextState;
       if (!event) {
@@ -779,6 +793,46 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
             // speakAndRevealRef handles voiceMode check internally —
             // non-voice calls reveal the message immediately.
             speakAndRevealRef.current(tipId, staminaTemplate, "normal");
+          }
+        }
+
+        // ── Pace coaching tip ────────────────────────────────────────
+        // Fire once per session when the user is playing at a BPM band
+        // they've already attempted ≥ 4 times without sticking (ceiling).
+        // Gated by coachVerbosity !== "less" (same as stamina).
+        const paceCoaching = paceCoachingRef.current;
+        if (
+          paceCoaching &&
+          !paceCoachingFiredRef.current &&
+          coachVerbosity !== "less" &&
+          bpmBandLowFor(playBpmRef.current) === paceCoaching.ceilingBpmLow
+        ) {
+          const paceTemplate = pickTemplate(TEMPLATE_CATALOG, shuffleStateRef.current, {
+            vocab: vocabRef.current,
+            scenario: "pace_coaching",
+            severity: "neutral",
+            context: {
+              bpm: playBpmRef.current,
+              suggestedBpm: paceCoaching.suggestedBpm,
+              attemptCount: paceCoaching.attemptCount,
+            },
+          });
+          if (paceTemplate) {
+            paceCoachingFiredRef.current = true;
+            coachDebug("pace_coaching.fire", { bpm: playBpmRef.current, ...paceCoaching });
+            const tipId = crypto.randomUUID();
+            const paceMsg: FeedMessage = {
+              id: tipId,
+              type: "coach-tip",
+              timestamp: now,
+              content: paceTemplate,
+              pending: voiceMode === "voice",
+            };
+            setMessages((prev) => [...prev, paceMsg]);
+            if (narrativeRef.current) {
+              narrativeRef.current = appendCoachUtterance(narrativeRef.current, paceTemplate);
+            }
+            speakAndRevealRef.current(tipId, paceTemplate, "normal");
           }
         }
 
@@ -1333,6 +1387,23 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     staminaPatternRef.current = (presetId && history)
       ? detectStaminaPattern(history, presetId)
       : null;
+
+    // ── Pace coaching seed ────────────────────────────────────────
+    // If the preset has a BPM ceiling with ≥ 4 sessions, arm the
+    // beat-feedback effect to fire a consolidation tip once the user
+    // starts playing at that ceiling band again this session.
+    paceCoachingFiredRef.current = false;
+    paceCoachingRef.current = (() => {
+      if (!presetId || !history) return null;
+      const summary = summarizePreset(presetId, presetName, history);
+      const { bpmCeiling } = detectRecurringIssues(summary);
+      if (!bpmCeiling || bpmCeiling.sessions < 4) return null;
+      return {
+        ceilingBpmLow: bpmCeiling.bpmLow,
+        suggestedBpm: Math.max(bpmCeiling.bpmLow - BPM_BAND_WIDTH, 40),
+        attemptCount: bpmCeiling.sessions,
+      };
+    })();
 
     const greeting = renderGreeting({
       presetId,
@@ -2382,12 +2453,15 @@ function severityForEvent(event: GatekeeperEvent): Severity {
   switch (event.scenario) {
     case "personal_best_streak":
     case "recovery":
+    case "recovery_confirmed":
     case "tempo_milestone":
     case "new_band_locked":
       return "encouragement";
     case "accuracy_drop":
     case "fatigue":
       return "correction";
+    case "bias_only":
+      return "neutral";
     case "rushing_trend":
     case "dragging_trend":
       return event.tier === "spoken" ? "correction" : "neutral";

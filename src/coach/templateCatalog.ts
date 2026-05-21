@@ -321,6 +321,23 @@ const GENERIC: ScenarioCatalog = {
       "You came back from the slip. Don't undo it by climbing too soon.",
     ],
   },
+  recovery_confirmed: {
+    encouragement: [
+      "Got it back.",
+      "Nice save — hold it.",
+      "Back and clean.",
+      "Pulled it back. Stay here.",
+    ],
+    neutral: [
+      "Accuracy's back. Keep this feel.",
+      "Back to clean after the dip.",
+      "Recovery confirmed. Hold steady.",
+    ],
+    correction: [
+      "Recovery's holding — don't push the tempo yet.",
+      "Back on track. Resist the urge to climb.",
+    ],
+  },
   tempo_milestone: {
     encouragement: [
       "{bpmLow} BPM — new gear.",
@@ -431,6 +448,30 @@ const GENERIC: ScenarioCatalog = {
       "Target reached: {endBpm} BPM. You climbed from {startBpm}.",
       "Ramp finished. {startBpm} → {endBpm} BPM complete.",
       "You held it to {endBpm} BPM. Ramp from {startBpm} done.",
+    ],
+  },
+  pace_coaching: {
+    neutral: [
+      "Fourth time at {bpm} — the ceiling's real. Two sessions at {suggestedBpm} to consolidate, then push again.",
+      "You've hit {bpm} BPM {attemptCount} times and it's not sticking. Drop to {suggestedBpm} for a week, build it solid.",
+      "{attemptCount} attempts at {bpm} BPM. Ceiling work: two sessions at {suggestedBpm}, then revisit.",
+      "Ceiling at {bpm} BPM — {attemptCount} attempts confirms it. Park at {suggestedBpm} and let it settle.",
+    ],
+  },
+  bias_only: {
+    encouragement: [
+      "Very consistent timing — just {biasMs}ms {direction}. Nudge everything {correctionDirection} to sit on the beat.",
+      "Great control — just a {biasMs}ms lean {direction}. A small shift {correctionDirection} will center it.",
+    ],
+    neutral: [
+      "You're landing {biasMs}ms {direction} the beat — very consistent, just shifted. Try moving everything {correctionDirection}.",
+      "Tight and consistent, but {biasMs}ms {direction} the click. Shift your attack {correctionDirection} to center it.",
+      "Your timing scatter is low, but the whole pattern sits {biasMs}ms {direction}. Nudge {correctionDirection}.",
+      "Low jitter, but offset by {biasMs}ms {direction}. That's a lean — adjust {correctionDirection} to land on the beat.",
+    ],
+    correction: [
+      "Consistent {biasMs}ms offset {direction} — not random, just a lean. Shift everything {correctionDirection}.",
+      "Every hit lands {biasMs}ms {direction}. That's a system bias, not jitter. Correct {correctionDirection}.",
     ],
   },
   boundary_signal_b: {
@@ -568,6 +609,13 @@ const DRUMS: ScenarioCatalog = {
       "Caught the slip before it ran away. Nice.",
     ],
   },
+  recovery_confirmed: {
+    encouragement: [
+      "Back in the pocket.",
+      "Groove's back. Hold it.",
+      "Kick-snare lock — stay there.",
+    ],
+  },
   fatigue: {
     encouragement: [
       "Hands tightening up? Shake the wrists out and come back.",
@@ -628,6 +676,13 @@ const DRUMS: ScenarioCatalog = {
       "Past the {staminaMinutes}-minute mark the limbs start to drift. Short break, then back at it.",
       "Fatigue shows around minute {staminaMinutes} on the kit. Rest the wrists, then return.",
       "You tend to lose the kick lock around minute {staminaMinutes}. Take a breather.",
+    ],
+  },
+  bias_only: {
+    neutral: [
+      "{biasMs}ms {direction} the click, very tight. Shift your strike point {correctionDirection}.",
+      "Your hits are locked together but sitting {biasMs}ms {direction}. Move the whole groove {correctionDirection}.",
+      "Low scatter but consistently {direction} — bring the whole kit's feel {correctionDirection} to center.",
     ],
   },
 } as const;
@@ -729,6 +784,13 @@ const ELECTRIC_GUITAR: ScenarioCatalog = {
       "Caught the drift. Hold this exact feel.",
     ],
   },
+  recovery_confirmed: {
+    encouragement: [
+      "Clean again — stay there.",
+      "Picking's back. Hold it.",
+      "Back on the click. Keep it.",
+    ],
+  },
   fatigue: {
     encouragement: [
       "Picking arm tightening up? Shake it out, then back in.",
@@ -789,6 +851,13 @@ const ELECTRIC_GUITAR: ScenarioCatalog = {
       "Around minute {staminaMinutes} the pick attack starts to drift. Quick break, then back in.",
       "Stamina wall at minute {staminaMinutes} — right hand tightens. Rest 30 seconds.",
       "You tend to lose edge on the picking around minute {staminaMinutes}. Short rest, then return.",
+    ],
+  },
+  bias_only: {
+    neutral: [
+      "Your picking is {biasMs}ms {direction} the click consistently. Nudge your attack {correctionDirection} — it's a technique lean, not chaos.",
+      "Every hit lands {biasMs}ms {direction}. That's a consistent lean — adjust your attack angle {correctionDirection}.",
+      "Tight scatter, {biasMs}ms {direction}. Shift your pick attack {correctionDirection} to land on the click.",
     ],
   },
 } as const;
@@ -890,6 +959,13 @@ const BASS: ScenarioCatalog = {
       "Brought it home. Stay there a minute.",
     ],
   },
+  recovery_confirmed: {
+    encouragement: [
+      "Groove's back.",
+      "Bass-kick lock — hold it.",
+      "Back in the pocket. Stay.",
+    ],
+  },
   fatigue: {
     encouragement: [
       "Plucking fingers tightening up? Quick stretch — back in.",
@@ -950,6 +1026,12 @@ const BASS: ScenarioCatalog = {
       "Around minute {staminaMinutes} the plucking hand starts to fatigue. Rest and return.",
       "Past the {staminaMinutes}-minute mark the bass lock starts to slip. Brief rest, then resume.",
       "You tend to fade around minute {staminaMinutes}. Take 30 seconds, come back clean.",
+    ],
+  },
+  bias_only: {
+    neutral: [
+      "Pluck is {biasMs}ms {direction} the click every time — low jitter, just offset. Adjust your attack {correctionDirection}.",
+      "Your attack sits {biasMs}ms {direction}. Very consistent — just shift {correctionDirection} to land on the beat.",
     ],
   },
 } as const;
@@ -1051,6 +1133,13 @@ const ACOUSTIC_GUITAR: ScenarioCatalog = {
       "Caught the drift. Hold this exact feel.",
     ],
   },
+  recovery_confirmed: {
+    encouragement: [
+      "Back on track.",
+      "Strum's clean again. Hold it.",
+      "Pulled it back. Stay there.",
+    ],
+  },
   fatigue: {
     encouragement: [
       "Strumming arm tightening up? Shake it out, then back in.",
@@ -1111,6 +1200,12 @@ const ACOUSTIC_GUITAR: ScenarioCatalog = {
       "Around minute {staminaMinutes} the strumming arm tightens. Brief break, then back in.",
       "Past the {staminaMinutes}-minute mark your accuracy tends to slip. Short rest, then resume.",
       "Fatigue shows at minute {staminaMinutes} on the acoustic. Take a breather.",
+    ],
+  },
+  bias_only: {
+    neutral: [
+      "Pick is landing {biasMs}ms {direction} consistently. Not chaos — adjust your attack {correctionDirection}.",
+      "Consistent lean: {biasMs}ms {direction}. Shift the whole phrase {correctionDirection} and you'll be centered.",
     ],
   },
 } as const;
@@ -1212,6 +1307,13 @@ const PIANO: ScenarioCatalog = {
       "Brought it home. Stay there a minute.",
     ],
   },
+  recovery_confirmed: {
+    encouragement: [
+      "Touch is clean again.",
+      "Hands back in sync. Hold it.",
+      "Back on the keys. Stay.",
+    ],
+  },
   fatigue: {
     encouragement: [
       "Wrists tightening up? Lift the hands, breathe, then back in.",
@@ -1272,6 +1374,12 @@ const PIANO: ScenarioCatalog = {
       "Around minute {staminaMinutes} the wrist tension creeps in. Brief rest, then resume.",
       "Past the {staminaMinutes}-minute mark the touch gets heavier. Short break, then back at the keys.",
       "Fatigue in the hands shows around minute {staminaMinutes}. Rest, then return.",
+    ],
+  },
+  bias_only: {
+    neutral: [
+      "Keys are falling {biasMs}ms {direction} the click with low scatter. Shift your attack timing {correctionDirection}.",
+      "Consistent {biasMs}ms {direction} — that's a lean, not jitter. Move everything {correctionDirection} to center it.",
     ],
   },
 } as const;

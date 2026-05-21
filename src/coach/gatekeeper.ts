@@ -127,6 +127,20 @@ export const TREND_PRIOR_NEUTRAL_MS = 2;
 export const TREND_CONFIRMATION_REQUIRED = 2;
 
 /**
+ * Bias-only detection thresholds.
+ *
+ * `bias_only` fires when the player has a CONSISTENT signed offset
+ * (|mean| > threshold) but LOW scatter (σ < std threshold). High
+ * scatter means jitter — a different problem addressed by the trend
+ * detectors. Low scatter with a large mean means the player is
+ * accurate but calibrated slightly off the grid.
+ */
+export const BIAS_MEAN_THRESHOLD_MS = 12;
+export const BIAS_STD_THRESHOLD_MS = 15;
+/** Min hit count in the analysis window before bias can fire. */
+export const BIAS_MIN_HITS = ACCURACY_DROP_WINDOW / 2;
+
+/**
  * Personal-best streak: min beats AND must beat session best.
  *
  * Bumped from 8 → 24 on 2026-05-17. At 8 the detector fired as soon as
@@ -250,7 +264,9 @@ export type ScenarioTag =
   | "rushing_trend"
   | "dragging_trend"
   | "recovery"
+  | "recovery_confirmed"
   | "fatigue"
+  | "bias_only"
   | "tempo_milestone"
   | "new_band_locked"
   | "low_confidence"
@@ -339,6 +355,13 @@ export type GatekeeperState = {
    * `REPETITION_HISTORY_MAX`.
    */
   recentScenarios: Array<{ scenario: ScenarioTag; tier: Tier }>;
+  /**
+   * True after `accuracy_drop` or `fatigue` fires; reset when
+   * `recovery_confirmed` fires. Gates the once-per-cycle rule for
+   * recovery confirmations: the coach only says "got it back" once per
+   * corrective tip cycle, not on every clean beat.
+   */
+  awaitingRecovery: boolean;
 };
 
 export type GatekeeperContext = {
@@ -370,6 +393,15 @@ export type GatekeeperContext = {
    * suppresses non-critical tips. Defaults to false when omitted.
    */
   inDrillRamp?: boolean;
+  /**
+   * User-tunable coaching verbosity level. Defaults to `"default"` when
+   * omitted.
+   *   - `"less"` — zero organic tips emitted; only forced boundary events
+   *     (Signal A/B) still fire. Equivalent to "silent" coaching mode.
+   *   - `"default"` — standard cooldown envelope (current behaviour).
+   *   - `"more"` — cooldowns scaled × 0.6, so tips fire ~40% more often.
+   */
+  verbosity?: "less" | "default" | "more";
 };
 
 // ---------------------------------------------------------------------------
@@ -385,24 +417,32 @@ export type GatekeeperContext = {
  * the 60s ceiling so the coach doesn't natter once the user is
  * settled in.
  */
-export function spokenCooldownMs(sinceSessionStartMs: number): number {
+export function spokenCooldownMs(
+  sinceSessionStartMs: number,
+  verbosity?: "less" | "default" | "more",
+): number {
   const scaled = sinceSessionStartMs * 0.1;
-  return Math.min(
+  const base = Math.min(
     SPOKEN_COOLDOWN_CEILING_MS,
     Math.max(SPOKEN_COOLDOWN_FLOOR_MS, scaled),
   );
+  return verbosity === "more" ? base * 0.6 : base;
 }
 
 /**
  * Cooldown duration for the written channel. Same shape, shorter
  * envelope — written notes can run hot.
  */
-export function writtenCooldownMs(sinceSessionStartMs: number): number {
+export function writtenCooldownMs(
+  sinceSessionStartMs: number,
+  verbosity?: "less" | "default" | "more",
+): number {
   const scaled = sinceSessionStartMs * 0.05;
-  return Math.min(
+  const base = Math.min(
     WRITTEN_COOLDOWN_CEILING_MS,
     Math.max(WRITTEN_COOLDOWN_FLOOR_MS, scaled),
   );
+  return verbosity === "more" ? base * 0.6 : base;
 }
 
 /**
@@ -437,6 +477,7 @@ export function createGatekeeper(sessionStartMs: number): GatekeeperState {
     recentFireTimes: [],
     warmupUntilMs: sessionStartMs + WARMUP_GRACE_MS,
     recentScenarios: [],
+    awaitingRecovery: false,
   };
 }
 
@@ -532,6 +573,7 @@ const ALWAYS_SPOKEN: ReadonlySet<ScenarioTag> = new Set([
   "boundary_signal_b",
   "tempo_milestone",
   "recovery",
+  "recovery_confirmed",
   "fatigue",
   "new_band_locked",
 ]);
@@ -562,16 +604,21 @@ function passesSpokenCooldown(
   state: GatekeeperState,
   scenario: ScenarioTag,
   now: number,
+  verbosity?: "less" | "default" | "more",
 ): boolean {
   if (isAlwaysSpoken(scenario)) return true;
   const elapsed = now - state.sessionStartMs;
-  const required = spokenCooldownMs(elapsed);
+  const required = spokenCooldownMs(elapsed, verbosity);
   return now - state.lastSpokenMs >= required;
 }
 
-function passesWrittenCooldown(state: GatekeeperState, now: number): boolean {
+function passesWrittenCooldown(
+  state: GatekeeperState,
+  now: number,
+  verbosity?: "less" | "default" | "more",
+): boolean {
   const elapsed = now - state.sessionStartMs;
-  const required = writtenCooldownMs(elapsed);
+  const required = writtenCooldownMs(elapsed, verbosity);
   return now - state.lastWrittenMs >= required;
 }
 
@@ -619,6 +666,9 @@ function passesWarmup(
   scenario: ScenarioTag,
   now: number,
 ): boolean {
+  // Fatigue tips are blocked during the initial 30-s warmup even though
+  // fatigue is ALWAYS_SPOKEN — cold-start imprecision is expected.
+  if (scenario === "fatigue" && isInInitialWarmup(state, now)) return false;
   if (isAlwaysSpoken(scenario)) return true;
   return now >= state.warmupUntilMs;
 }
@@ -687,6 +737,10 @@ const PER_SCENARIO_COOLDOWN_MS: Partial<Record<ScenarioTag, number>> = {
   // didn't land — anything tighter would feel like the coach piling on.
   accuracy_drop: 60_000,
   fatigue: 25_000,
+  // bias_only is a gentle calibration note. 90s prevents it from
+  // becoming a chant if the player's grip consistently lands slightly off;
+  // generous enough that the user has time to try adjusting first.
+  bias_only: 90_000,
 };
 
 function passesPerScenarioCooldown(
@@ -800,6 +854,7 @@ function passesAllGates(
   tier: Tier,
   now: number,
   inDrillRamp?: boolean,
+  verbosity?: "less" | "default" | "more",
 ): boolean {
   // Drill-ramp preempt: check before any other gate so the fast-path
   // short-circuit still works. Allowed scenarios (ALWAYS_SPOKEN,
@@ -815,9 +870,9 @@ function passesAllGates(
   if (!passesRepetition(state, scenario, tier)) return false;
   if (!passesBurstLimit(state, scenario, now)) return false;
   if (tier === "spoken") {
-    return passesSpokenCooldown(state, scenario, now);
+    return passesSpokenCooldown(state, scenario, now, verbosity);
   }
-  return passesWrittenCooldown(state, now);
+  return passesWrittenCooldown(state, now, verbosity);
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,6 +1056,76 @@ function detectTrend(
   return null;
 }
 
+/**
+ * Detect a timing bias: consistent signed offset with low scatter.
+ *
+ * A player landing {biasMs}ms early/late on EVERY hit isn't random
+ * — they have a technique or equipment lean. The right coach message
+ * is "shift everything", not "tighten up". Fires as "written" (a
+ * quiet heads-up) so it doesn't interrupt flow; the 90s per-scenario
+ * cooldown prevents it becoming a chant.
+ *
+ * Requires `ACCURACY_DROP_WINDOW` beats of hits (not misses/skips)
+ * so the window is statistically meaningful.
+ */
+function detectBias(
+  _state: GatekeeperState,
+  window: BeatFeedback[],
+): Detection | null {
+  if (window.length < ACCURACY_DROP_WINDOW) return null;
+  const recent = window.slice(-ACCURACY_DROP_WINDOW);
+  const hits = recent.filter(
+    (b) => b.classification !== "miss" && b.classification !== "skipped",
+  );
+  if (hits.length < BIAS_MIN_HITS) return null;
+
+  const m = hits.reduce((a, b) => a + b.deviationMs, 0) / hits.length;
+  if (Math.abs(m) <= BIAS_MEAN_THRESHOLD_MS) return null;
+
+  const variance =
+    hits.reduce((a, b) => a + (b.deviationMs - m) ** 2, 0) / hits.length;
+  const std = Math.sqrt(variance);
+  if (std >= BIAS_STD_THRESHOLD_MS) return null;
+
+  const direction = m < 0 ? "before" : "after";
+  const correctionDirection = m < 0 ? "later" : "earlier";
+  return {
+    scenario: "bias_only",
+    tier: "written",
+    context: {
+      biasMs: Math.round(Math.abs(m)),
+      direction,
+      correctionDirection,
+    },
+  };
+}
+
+/**
+ * Detect recovery after a corrective tip (accuracy_drop / fatigue).
+ *
+ * Fires as a fast reactive "got it back" acknowledgement within a
+ * few beats of the player cleaning up their timing. Only arms when
+ * `state.awaitingRecovery` is true (set by `commit` when a corrective
+ * fires) and disarms once fired to prevent repeating every clean beat.
+ *
+ * Criterion: ≥ 3 trailing clean (non-miss) beats in the window.
+ * This is deliberately loose — once the player has strung three
+ * consecutive hits back together the recovery is real enough to
+ * acknowledge.
+ */
+function detectRecoveryConfirmed(
+  state: GatekeeperState,
+  window: BeatFeedback[],
+): Detection | null {
+  if (!state.awaitingRecovery) return null;
+  if (trailingCleanStreak(window) < 3) return null;
+  return {
+    scenario: "recovery_confirmed",
+    tier: "spoken", // ALWAYS_SPOKEN — bypasses spoken cooldown
+    context: {},
+  };
+}
+
 function detectNewBandLocked(
   state: GatekeeperState,
   ctx: GatekeeperContext,
@@ -1176,6 +1301,16 @@ export function evaluate(
   // not trigger TTS during the warmup runway. Demoting to "written"
   // achieves both: silent acknowledgement, no audible interruption.
   if (ctx.force) {
+    // Fatigue tips are blocked entirely during the initial 30-s warmup,
+    // not just demoted. Cold-start imprecision is expected; a fatigue call
+    // that early would be misleading. Other forced events are only demoted
+    // to "written" (silent acknowledgement without TTS interruption).
+    if (
+      ctx.force.scenario === "fatigue" &&
+      isInInitialWarmup(state, ctx.now)
+    ) {
+      return { state, event: null };
+    }
     const tier: Tier = isInInitialWarmup(state, ctx.now) ? "written" : "spoken";
     const forced: GatekeeperEvent = {
       scenario: ctx.force.scenario,
@@ -1186,7 +1321,33 @@ export function evaluate(
     return commit(state, ctx.now, applyFirstBeatsRule(forced, ctx));
   }
 
+  // Verbosity gate: "less" suppresses all organic tips. Forced boundary
+  // events (Signal A/B above) are exempt — they're UI state-change acks,
+  // not coaching tips. This implements the silent-mode contract:
+  // coachVerbosity === "less" → zero organic coach utterances.
+  if (ctx.verbosity === "less") return { state, event: null };
+
   let working = state;
+
+  // 1.5. Recovery confirmation — reactive fast-path. Fires before
+  // accuracy_drop re-detection so the player hears "got it back"
+  // within a beat or two of cleaning up, not after another miss cycle.
+  // ALWAYS_SPOKEN → bypasses spoken cooldown. Gates itself via
+  // `awaitingRecovery` so it fires at most once per corrective cycle.
+  const recoveryDetection = detectRecoveryConfirmed(working, ctx.window);
+  if (
+    recoveryDetection &&
+    passesAllGates(
+      working,
+      recoveryDetection.scenario,
+      recoveryDetection.tier,
+      ctx.now,
+      ctx.inDrillRamp,
+      ctx.verbosity,
+    )
+  ) {
+    return commit(working, ctx.now, applyFirstBeatsRule(toEvent(recoveryDetection, ctx.bpm), ctx));
+  }
 
   // 2. Accuracy drop (intervention). Always escalates to spoken,
   // bypasses streak suppression. Requires
@@ -1214,6 +1375,7 @@ export function evaluate(
           dropProbe.detection.tier,
           ctx.now,
           ctx.inDrillRamp,
+          ctx.verbosity,
         )
       ) {
         return commit(
@@ -1235,7 +1397,7 @@ export function evaluate(
   const pb = detectPersonalBestStreak(working, ctx.window);
   if (pb) {
     if (pb.partialState) working = { ...working, ...pb.partialState };
-    if (passesAllGates(working, pb.scenario, pb.tier, ctx.now, ctx.inDrillRamp)) {
+    if (passesAllGates(working, pb.scenario, pb.tier, ctx.now, ctx.inDrillRamp, ctx.verbosity)) {
       return commit(
         working,
         ctx.now,
@@ -1250,7 +1412,7 @@ export function evaluate(
   if (band.partialState) working = { ...working, ...band.partialState };
   if (
     band.detection &&
-    passesAllGates(working, band.detection.scenario, band.detection.tier, ctx.now, ctx.inDrillRamp)
+    passesAllGates(working, band.detection.scenario, band.detection.tier, ctx.now, ctx.inDrillRamp, ctx.verbosity)
   ) {
     return commit(
       working,
@@ -1275,13 +1437,23 @@ export function evaluate(
     const suppressSpoken =
       inStreak && !isAlwaysSpoken(trend.scenario) && trend.tier === "spoken";
     const tier: Tier = suppressSpoken ? "written" : trend.tier;
-    if (passesAllGates(working, trend.scenario, tier, ctx.now, ctx.inDrillRamp)) {
+    if (passesAllGates(working, trend.scenario, tier, ctx.now, ctx.inDrillRamp, ctx.verbosity)) {
       return commit(
         working,
         ctx.now,
         applyFirstBeatsRule(toEvent({ ...trend, tier }, ctx.bpm), ctx),
       );
     }
+  }
+
+  // 5.5. Bias-only: consistent offset with low scatter. Written tier
+  // only — a gentle calibration note, not an accuracy alarm.
+  const bias = detectBias(working, ctx.window);
+  if (
+    bias &&
+    passesAllGates(working, bias.scenario, bias.tier, ctx.now, ctx.inDrillRamp, ctx.verbosity)
+  ) {
+    return commit(working, ctx.now, applyFirstBeatsRule(toEvent(bias, ctx.bpm), ctx));
   }
 
   // 6. Low-confidence caveat — one-shot per session.
@@ -1295,6 +1467,7 @@ export function evaluate(
       lowConf.detection.tier,
       ctx.now,
       ctx.inDrillRamp,
+      ctx.verbosity,
     )
   ) {
     return commit(
@@ -1307,7 +1480,7 @@ export function evaluate(
   // 7. Adaptive cooldown floor — emits at most once per quiet window
   // because committing updates `lastSpokenMs`.
   const checkIn = detectCheckIn(working, ctx.now);
-  if (checkIn && passesAllGates(working, checkIn.scenario, checkIn.tier, ctx.now, ctx.inDrillRamp)) {
+  if (checkIn && passesAllGates(working, checkIn.scenario, checkIn.tier, ctx.now, ctx.inDrillRamp, ctx.verbosity)) {
     return commit(
       working,
       ctx.now,
@@ -1368,12 +1541,21 @@ function commit(
     event.scenario === "boundary_signal_b"
       ? Math.max(state.warmupUntilMs, now + WARMUP_GRACE_TEMPO_MS)
       : state.warmupUntilMs;
+  // Update the awaiting-recovery flag: corrective tips arm it, the
+  // recovery confirmation disarms it. All other scenarios leave it as-is.
+  const awaitingRecovery =
+    event.scenario === "accuracy_drop" || event.scenario === "fatigue"
+      ? true
+      : event.scenario === "recovery_confirmed"
+        ? false
+        : state.awaitingRecovery;
   const base = {
     ...state,
     lastEventMs,
     recentFireTimes,
     recentScenarios,
     warmupUntilMs,
+    awaitingRecovery,
   };
   const next: GatekeeperState =
     event.tier === "spoken"

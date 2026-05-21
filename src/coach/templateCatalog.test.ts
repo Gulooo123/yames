@@ -31,7 +31,9 @@ const SCENARIOS = [
   "rushing_trend",
   "dragging_trend",
   "recovery",
+  "recovery_confirmed",
   "fatigue",
+  "bias_only",
   "tempo_milestone",
   "new_band_locked",
   "low_confidence",
@@ -73,6 +75,11 @@ const ALL_PLACEHOLDERS = {
   staminaMinutes: 5,
   startBpm: 120,
   endBpm: 160,
+  biasMs: 15,
+  direction: "before",
+  correctionDirection: "later",
+  suggestedBpm: 120,
+  attemptCount: 4,
 } as const;
 
 // ---------------------------------------------------------------------------
