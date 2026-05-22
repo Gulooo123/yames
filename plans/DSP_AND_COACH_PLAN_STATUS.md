@@ -100,11 +100,16 @@ fully complete.
 | Segment boundary on activity gap (Signal B) | ✅ | `SIGNAL_B_MIN_PLAY_MS = 30_000` + `SIGNAL_B_MIN_SILENCE_MS = 4_000` |
 | `PracticeSegmentEnded` event emission | ✅ | `timing.rs:66` struct + `on_segment_end(...)` callback |
 | Duration-weighted session score | ✅ | `session.rs::SessionAccumulator::report` now branches on `!self.segments.is_empty()` → `crate::timing::duration_weighted_session_score(&pairs)`. Falls back to the legacy `hit_rate*0.3 + accuracy_score*0.5 + consistency_score*0.2` formula when no segment boundaries fired (very short sessions). 5 new tests in `session.rs` lock in: weighting kicks in when segments present, fallback when absent, short-segment-doesnt-dominate-long-segment, single-segment, zero-duration safety. |
+| `activityTransitions` wired in D1 log | ✅ | **D4c (2026-05-22):** `SessionTelemetry.activity_transitions` added + `push_activity_transition` method. `timing.rs` emits `idle→active`, `resting→active`, `active→resting`, `active→idle`, `resting→idle` at every state change. `build_log_from_session` now wires `telemetry.activity_transitions` instead of `Vec::new()`. |
+| IC burst-practice fix (`had_gap` guard) | ✅ | **D4c (2026-05-22) BURST_DETECT_2:** `had_gap = consecutive_misses > 0` captured before reset. IC push guard extended to `&& !had_gap` — excludes cross-burst interval errors from IC regardless of rest-threshold. Covers the 84% of burst transitions (1–3 beat pauses) that BURST_DETECT_1 missed. BURST_DETECT_1 (prev_onset_ns clear at Resting entry) also still active. Together they cover all pause lengths. |
+| `intervalErrors` in `PracticeSegment` | ✅ | **D4c (2026-05-22):** Raw IC error array logged per segment in D1 session JSON (`intervalErrors: Vec<f64>`). Lets post-hoc analysis confirm whether `had_gap` fix resolved the IC=0.116 anomaly (observed in session of 2026-05-22; predicted MAD ~28ms, actual MAD ~62ms — source still unconfirmed). Use next session to validate. |
 
 **Verdict:** D2/D4 are largely shipped. **Three things I'd verify before
 calling them done:** (a) cluster merging before matching, (b)
 confidence-as-multiplier in `onset_efficiency`, (c) grid-correlation-based
 segment boundaries.
+
+**D4c open question (2026-05-22):** IC=0.116 (MAD≈62ms) observed in a burst-practice session vs predicted MAD≈28ms from timing data — unexplained 2.2× gap. `had_gap` + `intervalErrors` logging deployed to diagnose. Verify with next session: if `intervalErrors` in the log shows ~28ms MAD after `had_gap` filtering, the fix worked. If MAD is still high, there is an additional root cause to find.
 
 ---
 

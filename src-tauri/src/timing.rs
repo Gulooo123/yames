@@ -8,8 +8,8 @@ use crate::instrument::{Instrument, InstrumentProfile, ScoreWeights};
 use crate::models::PlayMode;
 use crate::onset::Onset;
 use crate::session_log::{
-    Classification, ComponentScores, DetectedOnset, ExpectedBeat, MatchDecision, MatchReason,
-    SegmentEndReason, SessionTelemetry,
+    ActivityTransition, Classification, ComponentScores, DetectedOnset, ExpectedBeat,
+    MatchDecision, MatchReason, SegmentEndReason, SessionTelemetry,
 };
 
 /// A logged beat tick from the metronome engine.
@@ -156,6 +156,11 @@ pub struct PracticeSegmentEnded {
     /// Serialised as "structured" / "noodling" for the JS coach.
     #[serde(rename = "playMode")]
     pub play_mode: PlayMode,
+    /// D4c — raw per-onset interval errors (ms) as fed into IC scoring.
+    /// Forwarded to the D1 log so post-hoc analysis can reconstruct
+    /// exactly which intervals drove the IC score.
+    #[serde(rename = "intervalErrors", default)]
+    pub interval_errors: Vec<f64>,
 }
 
 /// Path B — UI event emitted whenever the rhythm-inference's locked
@@ -846,9 +851,34 @@ impl TimingAnalyzer {
                 if let Some(idx) = best_idx {
                     let (onset, onset_tel_idx) = pending_onsets.remove(idx);
 
+                    // D4c — capture gap state BEFORE reset.
+                    // `had_gap` is true when at least one missed beat
+                    // preceded this onset (1–N beat pause). Used by the
+                    // IC push guard below to exclude cross-gap intervals.
+                    let had_gap = consecutive_misses > 0;
+                    let prev_activity = activity;
+
                     // Onset matched — transition to Active
                     activity = Activity::Active;
                     consecutive_misses = 0;
+
+                    // D4c — emit activity transition on state change.
+                    if prev_activity != Activity::Active {
+                        let label = match prev_activity {
+                            Activity::Idle    => "idle→active",
+                            Activity::Resting => "resting→active",
+                            Activity::Active  => unreachable!(),
+                        };
+                        let mut tel = telemetry.lock().unwrap();
+                        tel.push_activity_transition(ActivityTransition {
+                            timestamp_ms: ts_ns_to_wall_ms(
+                                onset.ts_ns,
+                                beat_base_wall_ms,
+                                beat_base_ns,
+                            ),
+                            transition: label.to_string(),
+                        });
+                    }
 
                     // Reset per-quarter counter when a new quarter-note period starts.
                     // Use ts_ns to detect the boundary; beat.expected_interval_ms is
@@ -1015,6 +1045,7 @@ impl TimingAnalyzer {
                             // beat of the segment; the matched-path
                             // bump below increments to 1.
                             total_expected_beats: 0,
+                            active_expected_beats: 0,
                             perfect: 0,
                             good: 0,
                             ok: 0,
@@ -1038,6 +1069,8 @@ impl TimingAnalyzer {
                         seg.beat_count = seg.beat_count.saturating_add(1);
                         seg.total_expected_beats =
                             seg.total_expected_beats.saturating_add(1);
+                        seg.active_expected_beats =
+                            seg.active_expected_beats.saturating_add(1);
                         let class_score: f64 = match classification {
                             "perfect" => {
                                 seg.perfect += 1;
@@ -1073,7 +1106,14 @@ impl TimingAnalyzer {
                         // to keep zero-confidence matches from vanishing.
                         seg.matched_confidence_sum += conf as f32;
                         seg.deviations.push(deviation_ms);
-                        if prev_onset_ns.is_some() && rhythm_inference.is_locked() {
+                        // D4c — had_gap: exclude cross-burst intervals
+                        // from IC. Resuming after a 1–N beat pause
+                        // measures gap precision, not rhythmic consistency
+                        // within a phrase — it would inflate IC variance.
+                        if prev_onset_ns.is_some()
+                            && rhythm_inference.is_locked()
+                            && !had_gap
+                        {
                             seg.interval_errors.push(interval_error_ms);
                         }
                         seg.amplitudes.push(onset.amplitude);
@@ -1130,9 +1170,37 @@ impl TimingAnalyzer {
                             if consecutive_misses >= silence_to_idle {
                                 activity = Activity::Idle;
                                 prev_onset_ns = None;
+                                // D4c — log transition for diagnostics.
+                                {
+                                    let mut tel = telemetry.lock().unwrap();
+                                    tel.push_activity_transition(ActivityTransition {
+                                        timestamp_ms: ts_ns_to_wall_ms(
+                                            beat.ts_ns,
+                                            beat_base_wall_ms,
+                                            beat_base_ns,
+                                        ),
+                                        transition: "active→idle".to_string(),
+                                    });
+                                }
                                 "skipped"
                             } else if consecutive_misses >= silence_to_rest {
                                 activity = Activity::Resting;
+                                // Burst-practice IC fix: clear the interval baseline
+                                // at rest entry so the first onset after a burst gap
+                                // doesn't compute a huge cross-gap interval error.
+                                prev_onset_ns = None;
+                                // D4c — log transition for diagnostics.
+                                {
+                                    let mut tel = telemetry.lock().unwrap();
+                                    tel.push_activity_transition(ActivityTransition {
+                                        timestamp_ms: ts_ns_to_wall_ms(
+                                            beat.ts_ns,
+                                            beat_base_wall_ms,
+                                            beat_base_ns,
+                                        ),
+                                        transition: "active→resting".to_string(),
+                                    });
+                                }
                                 "skipped"
                             } else {
                                 // Inside the tolerance window — these
@@ -1145,6 +1213,18 @@ impl TimingAnalyzer {
                             if consecutive_misses >= silence_to_idle {
                                 activity = Activity::Idle;
                                 prev_onset_ns = None;
+                                // D4c — log transition for diagnostics.
+                                {
+                                    let mut tel = telemetry.lock().unwrap();
+                                    tel.push_activity_transition(ActivityTransition {
+                                        timestamp_ms: ts_ns_to_wall_ms(
+                                            beat.ts_ns,
+                                            beat_base_wall_ms,
+                                            beat_base_ns,
+                                        ),
+                                        transition: "resting→idle".to_string(),
+                                    });
+                                }
                             }
                             "skipped"
                         }
@@ -1165,6 +1245,10 @@ impl TimingAnalyzer {
                             // arrived inside the window).
                             seg.grid_alignment_numerator += 0.0;
                             seg.grid_alignment_denominator += 1.0;
+                            // Active-state miss: counts toward HC denominator
+                            // (player attempted but missed — not a rest).
+                            seg.active_expected_beats =
+                                seg.active_expected_beats.saturating_add(1);
                         }
                     }
 
@@ -1234,6 +1318,8 @@ impl TimingAnalyzer {
                                     } else {
                                         PlayMode::Noodling
                                     },
+                                    // D4c — forward raw errors for D1 log.
+                                    interval_errors: seg.interval_errors.clone(),
                                 });
                                 segment = None;
                             }
@@ -1359,6 +1445,8 @@ impl TimingAnalyzer {
                                         } else {
                                             PlayMode::Noodling
                                         },
+                                        // D4c — forward raw errors for D1 log.
+                                        interval_errors: seg.interval_errors.clone(),
                                     });
                                 }
                                 segment = None;
@@ -1971,8 +2059,17 @@ fn score_segment(seg: &SegmentState, weights: &ScoreWeights) -> (f32, ComponentS
     } else {
         matched_beats
     };
-    let hit_completeness = if seg.total_expected_beats > 0 {
-        (matched_hc_weight / seg.total_expected_beats as f32).clamp(0.0, 1.0)
+    // Burst-practice fix: use active_expected_beats (Active-state hits + misses only)
+    // as the HC denominator. Resting/Idle "skipped" beats are intentional pauses —
+    // counting them against coverage unfairly penalises burst-practice patterns.
+    // total_expected_beats still drives the onset_efficiency floor (under-play guard).
+    let hc_denom = if seg.active_expected_beats > 0 {
+        seg.active_expected_beats
+    } else {
+        seg.total_expected_beats // fallback: no active beats recorded
+    };
+    let hit_completeness = if hc_denom > 0 {
+        (matched_hc_weight / hc_denom as f32).clamp(0.0, 1.0)
     } else {
         0.0
     };
@@ -2116,13 +2213,16 @@ struct SegmentState {
     /// `hit_completeness` — see `total_expected_beats`.
     beat_count: u32,
     /// D3c — EVERY beat tick processed while a segment was open,
-    /// regardless of activity state (Active / Resting / Idle). This
-    /// is the denominator for `hit_completeness` and closes the
-    /// under-play loophole: a player who plays 25% of beats and
-    /// lets the activity detector mask the rest no longer scores
-    /// like a clean run, because the "masked" beats still count
-    /// against expected.
+    /// regardless of activity state (Active / Resting / Idle).
+    /// Kept as the `onset_efficiency` floor (under-play guard): a player
+    /// who plays 2 perfect notes then goes silent still has a large
+    /// denominator so onset_efficiency stays low.
     total_expected_beats: u32,
+    /// Active-state beats only (matched hits + genuine misses within the
+    /// Active tolerance window). Resting/Idle "skipped" beats are NOT
+    /// counted here. Used as the `hit_completeness` denominator so
+    /// burst-practice rest periods don't count against coverage.
+    active_expected_beats: u32,
     perfect: u32,
     good: u32,
     ok: u32,
@@ -2387,6 +2487,8 @@ mod tests {
             spurious_amplitudes: vec![],
             beat_count: matched + miss,
             total_expected_beats: total_expected,
+            // Test fixtures have no rest periods — all beats are Active.
+            active_expected_beats: total_expected,
             perfect,
             good,
             ok,

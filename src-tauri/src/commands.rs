@@ -853,6 +853,8 @@ pub async fn start_evaluation(
                     inferred_divisor: segment_end.inferred_divisor,
                     inferred_divisor_confidence:
                         segment_end.inferred_divisor_confidence,
+                    // D4c — forward raw IC errors for post-hoc debugging.
+                    interval_errors: segment_end.interval_errors.clone(),
                 });
             }
         },

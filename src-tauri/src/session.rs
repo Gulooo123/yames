@@ -839,6 +839,7 @@ mod tests {
             // the sentinel-unknown 0/0.0 to mirror historic-log defaults.
             inferred_divisor: 0,
             inferred_divisor_confidence: 0.0,
+            interval_errors: Vec::new(),
         }
     }
 
@@ -951,6 +952,7 @@ mod tests {
             end_reason: crate::session_log::SegmentEndReason::ActivityGap,
             inferred_divisor: 0,
             inferred_divisor_confidence: 0.0,
+            interval_errors: Vec::new(),
         });
         acc.clear_segment_window();
 
@@ -1040,6 +1042,7 @@ mod tests {
             end_reason: crate::session_log::SegmentEndReason::ActivityGap,
             inferred_divisor: 0,
             inferred_divisor_confidence: 0.0,
+            interval_errors: Vec::new(),
         });
 
         acc.clear();

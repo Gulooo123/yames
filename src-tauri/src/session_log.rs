@@ -259,6 +259,12 @@ pub struct PracticeSegment {
     /// (fit ratio, 0.0–1.0). 0.0 if the matcher never locked.
     #[serde(rename = "inferredDivisorConfidence", default)]
     pub inferred_divisor_confidence: f64,
+    /// D4c — raw per-onset interval errors (ms) as fed into the IC
+    /// Gaussian. Logged for post-hoc diagnosis of anomalous IC scores
+    /// (e.g. burst-practice contamination). `#[serde(default)]` keeps
+    /// historic logs (written before this field) deserializing cleanly.
+    #[serde(rename = "intervalErrors", default)]
+    pub interval_errors: Vec<f64>,
 }
 
 /// D3c — four-component scoring breakdown. Each component is in `[0, 1]`
@@ -845,6 +851,10 @@ pub struct SessionTelemetry {
     /// streams. A 50k cap = ~14 hours of monitoring, which is well past
     /// any realistic session.
     pub audio_levels: Vec<AudioLevelSnapshot>,
+    /// D4c — activity state transitions (Idle ↔ Active ↔ Resting)
+    /// emitted by the timing analyzer on every state change. Used to
+    /// populate `SessionLog.activity_transitions` at session stop.
+    pub activity_transitions: Vec<ActivityTransition>,
 }
 
 /// Hard cap on each telemetry stream. Beyond this we stop pushing
@@ -899,6 +909,15 @@ impl SessionTelemetry {
         }
         self.audio_levels.push(snap);
     }
+
+    /// Append an activity state transition (D4c). Capped at
+    /// `TELEMETRY_BUFFER_CAP` like the other streams.
+    pub fn push_activity_transition(&mut self, t: ActivityTransition) {
+        if self.activity_transitions.len() >= TELEMETRY_BUFFER_CAP {
+            return;
+        }
+        self.activity_transitions.push(t);
+    }
 }
 
 /// Build a `SessionLog` from accumulator state (final report + any
@@ -932,7 +951,7 @@ pub fn build_log_from_session(
         detected_onsets: telemetry.detected_onsets,
         matches: telemetry.matches,
         spurious_onsets: telemetry.spurious_onset_indices,
-        activity_transitions: Vec::new(),
+        activity_transitions: telemetry.activity_transitions,
         segments,
         audio_levels: telemetry.audio_levels,
         report,
@@ -1227,6 +1246,7 @@ mod tests {
             // historic logs deserialize with.
             inferred_divisor: 0,
             inferred_divisor_confidence: 0.0,
+            interval_errors: Vec::new(),
         }];
         let log = build_log_from_session(
             120,
