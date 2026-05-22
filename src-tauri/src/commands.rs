@@ -944,6 +944,17 @@ pub async fn stop_evaluation(
     state: State<'_, SharedState>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
+    // Idempotency guard — if the analyzer is already stopped (e.g. double-call
+    // from a device change racing an explicit Stop), skip silently. The first
+    // call already drained telemetry and persisted the log.
+    {
+        let ta = timing_analyzer
+            .lock()
+            .map_err(|e| format!("Lock failed: {e}"))?;
+        if !ta.is_active() {
+            return Ok(());
+        }
+    }
     // Clear MIDI onset callback first (no lock ordering issue)
     {
         let listener = midi.lock().map_err(|e| format!("Lock failed: {e}"))?;

@@ -1,7 +1,101 @@
 import { ScoreRing, ScoreBadge } from "../drill/evaluation";
 import type { FeedAffordance, FeedChip, FeedMessage, SessionReport, SessionSegment } from "../../types";
 import { formatTime, formatDuration } from "./coachCardHelpers";
-import { accuracyPct } from "../../coach/reportStats";
+import { accuracyPct, scoredBeats } from "../../coach/reportStats";
+
+function MiniReportComponents({ report }: { report: SessionReport }) {
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  const cov = report.hitCompleteness;
+  const eff = report.onsetEfficiency;
+  const grid = report.gridCorrelation;
+
+  const covColor = cov === undefined ? undefined
+    : cov >= 0.70 ? "var(--feedback-perfect)"
+    : cov >= 0.40 ? "var(--feedback-ok)"
+    : "var(--feedback-miss)";
+
+  const effColor = eff === undefined ? undefined
+    : eff >= 0.65 ? "var(--feedback-perfect)"
+    : "var(--feedback-ok)";
+
+  const gridColor = grid >= 0.60 ? "var(--feedback-perfect)"
+    : grid >= 0.30 ? "var(--feedback-ok)"
+    : "var(--feedback-miss)";
+
+  return (
+    <div className="coach-mini-report-components">
+      <span style={{ color: covColor }}>Cov {cov !== undefined ? pct(cov) : "—"}</span>
+      <span className="coach-mini-report-comp-sep">·</span>
+      <span style={{ color: effColor }}>Eff {eff !== undefined ? pct(eff) : "—"}</span>
+      <span className="coach-mini-report-comp-sep">·</span>
+      <span style={{ color: gridColor }}>Grid {pct(grid)}</span>
+    </div>
+  );
+}
+
+function DeviationSparkline({ deviations }: { deviations: number[] }) {
+  if (deviations.length < 4) return null;
+
+  const MAX_BARS = 80;
+  const HEIGHT = 24;
+  const MID = HEIGHT / 2;
+  const MAX_BAR_H = 10;
+  const MAX_DEV = 60;
+
+  // Downsample if needed
+  const bars: number[] = (() => {
+    if (deviations.length <= MAX_BARS) return deviations;
+    const bucketSize = Math.ceil(deviations.length / MAX_BARS);
+    const result: number[] = [];
+    for (let i = 0; i < deviations.length; i += bucketSize) {
+      const slice = deviations.slice(i, i + bucketSize);
+      result.push(slice.reduce((a, b) => a + b, 0) / slice.length);
+    }
+    return result;
+  })();
+
+  const barW = Math.max(1, 100 / bars.length);
+
+  const color = (dev: number): string => {
+    const abs = Math.abs(dev);
+    if (abs <= 15) return "var(--accent, #f0a030)";
+    if (abs <= 37) return "rgba(240, 160, 48, 0.6)";
+    return "#c08020";
+  };
+
+  const barH = (dev: number): number =>
+    Math.min(Math.abs(dev) / MAX_DEV, 1) * MAX_BAR_H;
+
+  return (
+    <svg
+      width="100%"
+      height={HEIGHT}
+      className="coach-mini-report-sparkline"
+      aria-hidden="true"
+    >
+      {bars.map((dev, i) => {
+        const h = Math.max(1, barH(dev));
+        const x = `${(i / bars.length) * 100}%`;
+        const w = `${barW}%`;
+        // Early (negative) bars above midline, late bars below
+        const y = dev < 0 ? MID - h : MID;
+        return (
+          <rect
+            key={i}
+            x={x}
+            y={y}
+            width={w}
+            height={h}
+            fill={color(dev)}
+            rx={0.5}
+          />
+        );
+      })}
+      {/* Zero line */}
+      <line x1="0" y1={MID} x2="100%" y2={MID} stroke="rgba(255,255,255,0.08)" strokeWidth={0.5} />
+    </svg>
+  );
+}
 
 /**
  * Discriminated union of every action the feed can dispatch. Combines
@@ -89,6 +183,14 @@ export function FeedMessageItem({
                 <span className="coach-mini-report-text">{message.content}</span>
               </div>
             </div>
+          )}
+          {message.report?.deviations && message.report.deviations.length >= 4 && (
+            <div className="coach-mini-report-sparkline-wrap">
+              <DeviationSparkline deviations={message.report.deviations} />
+            </div>
+          )}
+          {message.report && (
+            <MiniReportComponents report={message.report} />
           )}
           <div className="coach-feed-msg-time">{formatTime(message.timestamp)}</div>
         </div>
@@ -199,8 +301,8 @@ function EndReportSummary({ report }: { report: SessionReport }) {
           <span className="coach-end-report-stat-value">{accuracy}%</span>
         </div>
         <div className="coach-end-report-stat">
-          <span className="coach-end-report-stat-label">Avg Deviation</span>
-          <span className="coach-end-report-stat-value">{Math.abs(report.meanDeviationMs).toFixed(1)}ms</span>
+          <span className="coach-end-report-stat-label">Avg Timing Error</span>
+          <span className="coach-end-report-stat-value">{"\u00B1"}{report.meanAbsDeviationMs.toFixed(1)}ms</span>
         </div>
         <div className="coach-end-report-stat">
           <span className="coach-end-report-stat-label">Beats</span>
@@ -303,6 +405,28 @@ function AffordanceRow({
   );
 }
 
+function SegmentBreakdownBar({ report }: { report: SessionReport }) {
+  const scored = scoredBeats(report);
+  if (scored === 0) return null;
+  const segments = [
+    { count: report.perfectCount, color: "var(--feedback-perfect)" },
+    { count: report.goodCount,    color: "var(--feedback-good)" },
+    { count: report.okCount,      color: "var(--feedback-ok)" },
+    { count: report.missCount,    color: "var(--feedback-miss)" },
+  ].filter((s) => s.count > 0);
+  return (
+    <div className="coach-segment-breakdown">
+      {segments.map((s, i) => (
+        <div
+          key={i}
+          className="coach-segment-breakdown-bar"
+          style={{ flex: s.count / scored, backgroundColor: s.color }}
+        />
+      ))}
+    </div>
+  );
+}
+
 function SegmentTimeline({ segments, sessionStart }: { segments: SessionSegment[]; sessionStart: number }) {
   return (
     <div className="coach-segment-timeline">
@@ -338,6 +462,7 @@ function SegmentTimeline({ segments, sessionStart }: { segments: SessionSegment[
               <span>{pocket}</span>
             </div>
             <ScoreBadge score={seg.report.score} />
+            <SegmentBreakdownBar report={seg.report} />
           </div>
         );
       })}

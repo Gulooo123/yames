@@ -95,9 +95,14 @@ impl Instrument {
                 expected_onsets_per_beat: 0.5..=2.0,
                 spectral_weights: spectral_weights_mid(),
                 activity_silence_beats: 4,
-                // Default distribution — melodic phrasing is freer about
-                // the grid so no single component dominates.
-                score_weights: ScoreWeights::default(),
+                // Guitar-tuned weights: IC leads (timing regularity is the
+                // primary practice signal), GA second (beat placement), OE
+                // minimal (guitar resonance produces spurious onsets so high
+                // OE weight unfairly penalises the instrument).
+                // HC = 0.0: hit_completeness penalises intentional sparse
+                // patterns (riffs, rhythm playing) — structurally wrong for
+                // free-form practice without a score reference.
+                score_weights: ScoreWeights { ic: 0.60, ga: 0.35, hc: 0.00, oe: 0.05 },
                 vocabulary: InstrumentVocabulary::Guitar,
                 aubio_onset_method: "complex",
             },
@@ -108,8 +113,8 @@ impl Instrument {
                 expected_onsets_per_beat: 0.5..=2.0,
                 spectral_weights: spectral_weights_mid_high(),
                 activity_silence_beats: 4,
-                // Same as electric: default weights.
-                score_weights: ScoreWeights::default(),
+                // Same guitar-tuned weights as electric (see above).
+                score_weights: ScoreWeights { ic: 0.60, ga: 0.35, hc: 0.00, oe: 0.05 },
                 vocabulary: InstrumentVocabulary::Guitar,
                 aubio_onset_method: "complex",
             },

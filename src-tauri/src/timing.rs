@@ -152,7 +152,7 @@ pub struct PracticeSegmentEnded {
     /// or play too erratic); ≥ 0.65 means the lock was confident.
     #[serde(rename = "inferredDivisorConfidence")]
     pub inferred_divisor_confidence: f64,
-    /// D3b — Structured if onset_efficiency ≥ 0.65; Noodling otherwise.
+    /// D3b — Structured if onset_efficiency ≥ 0.45; Noodling otherwise.
     /// Serialised as "structured" / "noodling" for the JS coach.
     #[serde(rename = "playMode")]
     pub play_mode: PlayMode,
@@ -910,16 +910,42 @@ impl TimingAnalyzer {
                     // Deviation after calibration (what the player feels)
                     let deviation_ms = raw_offset_ms - calibration_offset_ms;
 
-                    // Interval error: compare actual inter-onset interval
-                    // to the EFFECTIVE expected interval (under the
-                    // inferred divisor). At 16ths against 80 BPM, the
-                    // expected gap between active ticks is 187.5ms —
-                    // comparing to the raw 750ms quarter would mark
-                    // every 16th onset as way ahead of "expected".
+                    // Interval error: residual after snapping to the
+                    // nearest multiple of the effective expected interval.
+                    //
+                    // Old formula: `actual - expected` — blew up when the
+                    // player skipped N subdivision positions because the
+                    // interval spanned (N+1) × expected, producing errors
+                    // of N × expected_ms (e.g. 750ms at 16ths/80 BPM).
+                    // Those huge errors drove σ >> k and collapsed IC to 0
+                    // for ANY sparse subdivision playing, even when every
+                    // hit was perfectly on-grid.
+                    //
+                    // New formula: `actual - round(actual/expected) × expected`
+                    // — the residual from the nearest expected grid position.
+                    // A player who hits beat 1, skips beats 2–4, and lands
+                    // cleanly on beat 5 gets error ≈ 0ms. A player who
+                    // drifts 20ms late gets error = 20ms. Noodling at
+                    // random intervals still produces high σ → low IC.
+                    //
+                    // Sub-interval guard (n < 1): two onsets very close
+                    // together (double-trigger, chord cluster, ghost note).
+                    // Returning 0.0 excludes them from IC rather than
+                    // applying a large "too fast" penalty.
                     let interval_error_ms = if let Some(prev_ns) = prev_onset_ns {
                         let actual_interval_ms =
                             (onset.ts_ns as f64 - prev_ns as f64) / 1_000_000.0;
-                        actual_interval_ms - effective_interval_ms
+                        if effective_interval_ms > 0.0 {
+                            let n = (actual_interval_ms / effective_interval_ms).round();
+                            if n < 1.0 {
+                                // Sub-interval hit — exclude from IC.
+                                0.0
+                            } else {
+                                actual_interval_ms - n * effective_interval_ms
+                            }
+                        } else {
+                            actual_interval_ms - effective_interval_ms
+                        }
                     } else {
                         0.0
                     };
@@ -1203,7 +1229,7 @@ impl TimingAnalyzer {
                                         .current_divisor(),
                                     inferred_divisor_confidence:
                                         rhythm_inference.confidence(),
-                                    play_mode: if onset_efficiency >= 0.65 {
+                                    play_mode: if onset_efficiency >= 0.45 {
                                         PlayMode::Structured
                                     } else {
                                         PlayMode::Noodling
@@ -1328,7 +1354,7 @@ impl TimingAnalyzer {
                                             .current_divisor(),
                                         inferred_divisor_confidence:
                                             rhythm_inference.confidence(),
-                                        play_mode: if onset_efficiency >= 0.65 {
+                                        play_mode: if onset_efficiency >= 0.45 {
                                             PlayMode::Structured
                                         } else {
                                             PlayMode::Noodling
@@ -1886,7 +1912,15 @@ fn score_segment(seg: &SegmentState, weights: &ScoreWeights) -> (f32, ComponentS
     let interval_consistency = if seg.interval_errors.len() < 2 {
         0.5_f32
     } else {
-        let mut abs_devs: Vec<f64> = seg.interval_errors.iter().map(|d| d.abs()).collect();
+        // MAD-around-median: measure dispersion relative to the central
+        // tendency of the errors, not around zero. A player consistently
+        // rushing by a fixed offset (all errors = −38ms) gets sigma≈0
+        // and IC≈1.0, as the docstring promises. Systematic offset is
+        // captured separately by grid_alignment; IC measures only spread.
+        let mut errors: Vec<f64> = seg.interval_errors.iter().copied().collect();
+        errors.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med = median_f64(&errors);
+        let mut abs_devs: Vec<f64> = errors.iter().map(|d| (d - med).abs()).collect();
         abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let mad = median_f64(&abs_devs);
         let sigma = mad * 1.4826;

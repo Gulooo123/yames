@@ -1,3 +1,5 @@
+import type { SessionSegment } from "../types";
+
 /**
  * Tiny shared helpers for `SessionReport`-derived stats.
  *
@@ -179,10 +181,39 @@ export function commentForScore(score: number, scoredBeatCount: number): string 
  *   - Anywhere else a report is rendered.
  */
 export function rescoreReport<T extends RescorableFields & { grade: string; score: number }>(report: T): T {
-  const score = computeLegacyScore(report);
+  // Use the Rust segment-aware score when segments were recorded (signalled by
+  // onsetEfficiency being defined on the report). After MAD_FIX_1 and WEIGHTS_1
+  // the Rust formula is correct for guitar sessions. Fall back to
+  // computeLegacyScore only for no-segment sessions (short warmups, old saved
+  // sessions that pre-date the segment pipeline).
+  const hasSegments =
+    'onsetEfficiency' in report &&
+    (report as unknown as { onsetEfficiency?: number }).onsetEfficiency !== undefined;
+  const score = hasSegments ? report.score : computeLegacyScore(report);
   const grade = gradeForScore(score);
   if (score === report.score && grade === report.grade) {
     return report;
   }
   return { ...report, score, grade };
+}
+
+/**
+ * Rolling average of hitCompleteness over the last `n` segments.
+ * Returns undefined if fewer than `n` segments exist, or if none of
+ * them carry a hitCompleteness value (old saved sessions).
+ *
+ * Used by the gatekeeper's `low_completeness` scenario to detect chronic
+ * under-playing across multiple segments.
+ */
+export function computeRecentHitCompleteness(
+  segments: SessionSegment[],
+  n = 3,
+): number | undefined {
+  if (segments.length < n) return undefined;
+  const last = segments.slice(-n);
+  const values = last
+    .map((s) => s.report.hitCompleteness)
+    .filter((v): v is number => v !== undefined);
+  if (values.length === 0) return undefined;
+  return values.reduce((a, b) => a + b, 0) / values.length;
 }

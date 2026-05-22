@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { load } from "@tauri-apps/plugin-store";
-import type { AppState, BeatEvent, InstrumentId, SpeedRamp, Subdivision } from "./types";
+import type { AppState, BeatEvent, ComponentScores, InstrumentId, SegmentEndReason, SpeedRamp, Subdivision } from "./types";
 
 // Shared store instance (lazy singleton)
 let _store: Awaited<ReturnType<typeof load>> | null = null;
@@ -443,12 +443,45 @@ export function onInferredGridChanged(callback: (grid: InferredGridChanged) => v
   return listen<InferredGridChanged>("inferred-grid-changed", (e) => callback(e.payload));
 }
 
-// Note: the Rust side still emits `practice-segment-ended` (see
-// commands.rs::start_evaluation), but the JS coach drives mini-reports
-// off `isPlaying` falling-edge (see useSession.ts) and does not consume
-// this event. The emit is kept on the Rust side for the
-// SessionAccumulator side-effect (D1 log segments) and as a future
-// hook for richer signal-B handling. No JS binding intentionally.
+/**
+ * D4 Signal B — subscribe to practice-segment-ended events. Fires from the
+ * Rust timing analyzer when an active segment closes due to activity-gap OR
+ * grid-discontinuity. SettingsChange segments close via Signal A and do NOT
+ * emit this event.
+ *
+ * The JS mini-report logic (useSegmentCoach.ts) drives off the `isPlaying`
+ * falling edge and does not consume this event. This listener is for
+ * gatekeeper scenarios that must react to the specific end-reason — in
+ * particular `"grid-discontinuity"` which signals the player drifted off-grid
+ * while still playing.
+ */
+export type PracticeSegmentEndedPayload = {
+  startMs: number;
+  endMs: number;
+  score: number;
+  componentScores: ComponentScores;
+  bpm: number;
+  instrument: string;
+  presetId?: string;
+  endReason: SegmentEndReason;
+  onsetCount: number;
+  beatCount: number;
+  totalOnsets: number;
+  spuriousOnsets: number;
+  onsetEfficiency: number;
+  inferredDivisor: number;
+  inferredDivisorConfidence: number;
+  playMode: "structured" | "noodling";
+};
+
+export function onPracticeSegmentEnded(
+  callback: (payload: PracticeSegmentEndedPayload) => void,
+) {
+  return listen<PracticeSegmentEndedPayload>(
+    "practice-segment-ended",
+    (e) => callback(e.payload),
+  );
+}
 
 export async function getSessionReport(): Promise<SessionReport | null> {
   return invoke<SessionReport | null>("get_session_report");

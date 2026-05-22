@@ -522,6 +522,22 @@ const GENERIC: ScenarioCatalog = {
       "You're playing through the click, just softly. Try to make more contact.",
     ],
   },
+  grid_discontinuity: {
+    neutral: [
+      "You went off the grid — try locking back to the click before the next phrase.",
+      "The beat wandered from the click. Reset and find the pulse before you continue.",
+      "Grid tracking dropped — take a beat, then re-enter on the downbeat.",
+      "Drifted from the click there. Stop, breathe, and lock back in.",
+    ],
+  },
+  low_completeness: {
+    neutral: [
+      "You're hitting about half the expected beats — try to stay engaged for every one.",
+      "Coverage is low — make sure you're landing each beat, not just the ones that feel natural.",
+      "Around half the beats are going unplayed. Focus on completing the full pattern.",
+      "Beat coverage is low. Try counting aloud to make sure you're not skipping any.",
+    ],
+  },
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -721,6 +737,22 @@ const DRUMS: ScenarioCatalog = {
       "Beats are there but the signal is weak — increase velocity on the downstroke.",
     ],
   },
+  grid_discontinuity: {
+    neutral: [
+      "Your kit wandered from the click. Come back in on the downbeat and lock it.",
+      "Grid tracking dropped — stop the fill, find the pulse, re-enter clean.",
+      "The tempo drifted from the click. Reset your kick pattern and re-lock.",
+      "Went off-grid there. Take a rest, then re-enter with your hi-hat on the beat.",
+    ],
+  },
+  low_completeness: {
+    neutral: [
+      "You're hitting about half the expected beats — try to play every stroke in the pattern.",
+      "Coverage is low — make sure your kit lands each beat, not just the accents.",
+      "Around half the beats are going unplayed. Focus on completing the full drum pattern.",
+      "Beat coverage is low. Count aloud and make sure every hit has its place.",
+    ],
+  },
 } as const;
 
 const ELECTRIC_GUITAR: ScenarioCatalog = {
@@ -905,7 +937,7 @@ const ELECTRIC_GUITAR: ScenarioCatalog = {
   grid_lost: {
     neutral: [
       "Lost the grid there — fill or free? If intentional, ignore me.",
-      "Correlation dropped off the click. Noodling or was that a fill?",
+      "Correlation dropped off the click — were you running a fill?",
     ],
   },
   muddy_hits: {
@@ -914,6 +946,22 @@ const ELECTRIC_GUITAR: ScenarioCatalog = {
       "Good coverage, weak transient. Drive the pick through the string.",
       "Every beat lands, but softly. A harder attack sharpens the signal.",
       "Beats are all there — just dig in more with the pick for a cleaner attack.",
+    ],
+  },
+  grid_discontinuity: {
+    neutral: [
+      "Your picking drifted from the click. Mute and re-enter on the downbeat.",
+      "Grid tracking dropped — stop the riff, find the pulse, then come back in.",
+      "Went off-tempo there. Let the click breathe and re-lock your strumming.",
+      "The pick drifted from the grid. Take a beat and come back on the one.",
+    ],
+  },
+  low_completeness: {
+    neutral: [
+      "You're picking about half the expected beats — try to hit every note in the phrase.",
+      "Coverage is low — make sure each beat gets a pick, not just the ones that sit well.",
+      "Around half the beats are going unplayed. Focus on completing the full riff.",
+      "Beat coverage is low. Slow down if needed and make sure every beat lands.",
     ],
   },
 } as const;
@@ -1110,6 +1158,22 @@ const BASS: ScenarioCatalog = {
       "Beats are landing but the transient is weak — anchor harder on the string.",
     ],
   },
+  grid_discontinuity: {
+    neutral: [
+      "Your groove drifted from the click. Mute and re-enter on the downbeat.",
+      "Grid tracking dropped — stop the line, find the pulse, and re-lock.",
+      "Went off-tempo there. Let the click breathe and re-anchor your bass line.",
+      "The groove drifted from the grid. Take a beat and lock back in on the root.",
+    ],
+  },
+  low_completeness: {
+    neutral: [
+      "You're playing about half the expected beats — try to lock in every note of the line.",
+      "Coverage is low — make sure each beat gets a pluck, not just the root notes.",
+      "Around half the beats are going unplayed. Focus on filling out the full bass line.",
+      "Beat coverage is low. Slow down if needed and make sure every note lands.",
+    ],
+  },
 } as const;
 
 const ACOUSTIC_GUITAR: ScenarioCatalog = {
@@ -1304,6 +1368,22 @@ const ACOUSTIC_GUITAR: ScenarioCatalog = {
       "Landing the beats but softly — try a sharper attack on the downstroke.",
     ],
   },
+  grid_discontinuity: {
+    neutral: [
+      "Your strumming drifted from the click. Stop and re-enter on the downbeat.",
+      "Grid tracking dropped — let the click run a bar, then strum back in.",
+      "Went off-tempo there. Dampen the strings and re-lock to the click.",
+      "The strum pattern wandered from the grid. Take a breath and re-enter clean.",
+    ],
+  },
+  low_completeness: {
+    neutral: [
+      "You're strumming about half the expected beats — try to hit every beat in the pattern.",
+      "Coverage is low — make sure each beat gets a strum, not just the strong ones.",
+      "Around half the beats are going unplayed. Focus on completing the full strum pattern.",
+      "Beat coverage is low. Count aloud and make sure every downbeat and upbeat lands.",
+    ],
+  },
 } as const;
 
 const PIANO: ScenarioCatalog = {
@@ -1496,6 +1576,22 @@ const PIANO: ScenarioCatalog = {
       "Good coverage but the keystrokes are soft. Push into the keys with more intention.",
       "Every beat lands, just quietly. Commit more weight to each keypress.",
       "Landing every note but the signal is weak — increase velocity through the key bed.",
+    ],
+  },
+  grid_discontinuity: {
+    neutral: [
+      "Your playing drifted from the click. Pause and re-enter on the downbeat.",
+      "Grid tracking dropped — let the click run a bar, then come back in.",
+      "Went off-tempo there. Lift your hands, find the pulse, and re-enter.",
+      "The phrase wandered from the grid. Take a beat and lock back to the click.",
+    ],
+  },
+  low_completeness: {
+    neutral: [
+      "You're playing about half the expected beats — try to land every note in the phrase.",
+      "Coverage is low — make sure each beat gets a note, not just the melodic peaks.",
+      "Around half the beats are going unplayed. Focus on completing the full passage.",
+      "Beat coverage is low. Slow down and make sure every beat lands before moving on.",
     ],
   },
 } as const;

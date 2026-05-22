@@ -121,6 +121,8 @@ export const ACCURACY_DROP_CONFIRMATIONS = 2;
  */
 export const ACCURACY_DROP_MIN_SCORED = ACCURACY_DROP_WINDOW / 2;
 
+const LOW_COMPLETENESS_THRESHOLD = 0.50;
+
 /** Rushing/dragging trend thresholds. */
 export const TREND_OFFSET_THRESHOLD_MS = 5;
 export const TREND_PRIOR_NEUTRAL_MS = 2;
@@ -260,6 +262,7 @@ export const REPETITION_HISTORY_MAX = 3;
 
 export type ScenarioTag =
   | "accuracy_drop"
+  | "low_completeness"
   | "personal_best_streak"
   | "rushing_trend"
   | "dragging_trend"
@@ -273,6 +276,7 @@ export type ScenarioTag =
   | "check_in"
   | "boundary_signal_a"
   | "boundary_signal_b"
+  | "grid_discontinuity"
   | "ramp_complete";
 
 export type Tier = "spoken" | "written";
@@ -402,6 +406,12 @@ export type GatekeeperContext = {
    *   - `"more"` — cooldowns scaled × 0.6, so tips fire ~40% more often.
    */
   verbosity?: "less" | "default" | "more";
+  /**
+   * Rolling average hitCompleteness over the last 3 segments.
+   * Absent when fewer than 3 segments have been recorded.
+   * Used by the `low_completeness` scenario detector.
+   */
+  recentHitCompleteness?: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -741,6 +751,7 @@ const PER_SCENARIO_COOLDOWN_MS: Partial<Record<ScenarioTag, number>> = {
   // becoming a chant if the player's grip consistently lands slightly off;
   // generous enough that the user has time to try adjusting first.
   bias_only: 90_000,
+  low_completeness: 300_000,   // 5 min — effectively once per session
 };
 
 function passesPerScenarioCooldown(
@@ -1391,6 +1402,29 @@ export function evaluate(
     // unrelated dip to inherit the half-count and fire on first
     // contact.
     working = { ...working, accuracyDropConfirmations: 0 };
+  }
+
+  // 2.5. Low completeness — corrective. Player has been missing ≥half the
+  // beats across the last 3+ segments. Fires at most once per 5-min cooldown.
+  if (
+    ctx.recentHitCompleteness !== undefined &&
+    ctx.recentHitCompleteness < LOW_COMPLETENESS_THRESHOLD &&
+    passesAllGates(
+      working,
+      "low_completeness",
+      "spoken",
+      ctx.now,
+      ctx.inDrillRamp,
+      ctx.verbosity,
+    )
+  ) {
+    const ev: GatekeeperEvent = {
+      scenario: "low_completeness",
+      tier: "spoken",
+      context: { avgHitCompleteness: Math.round((ctx.recentHitCompleteness) * 100) },
+      taggedBpm: ctx.bpm,
+    };
+    return commit(working, ctx.now, applyFirstBeatsRule(ev, ctx));
   }
 
   // 3. Personal best streak — always speakable.

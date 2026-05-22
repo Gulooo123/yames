@@ -119,8 +119,13 @@ export function formatMiniReport(report: SessionReport): string {
   // Accuracy uses scored beats (hits + misses), NOT totalBeats — see
   // `src/coach/reportStats.ts` for the rationale. Keeping this string
   // in sync with the Rust score depends on that denominator.
+  //
+  // Uses meanAbsDeviationMs (average magnitude) NOT Math.abs(meanDeviationMs)
+  // (absolute value of the signed mean). Symmetric early/late errors cancel
+  // the signed mean to ~0 and make timing look perfect; the abs mean is the
+  // honest per-hit spread.
   const accuracy = accuracyPct(report);
-  return `Score ${report.score} · ${accuracy}% hits · avg ${Math.abs(report.meanDeviationMs).toFixed(1)}ms ${report.meanDeviationMs < 0 ? "early" : "late"}`;
+  return `Score ${report.score} · ${accuracy}% hits · avg ±${report.meanAbsDeviationMs.toFixed(1)}ms`;
 }
 
 /** Format context for the coach to generate a mini-report comment. */
@@ -180,14 +185,36 @@ export function formatMiniReportContext(
       ? "CONTEXT: The player is free-playing/noodling (onset efficiency below the structured-practice threshold — their onsets are NOT aligning to the beat grid). This is exploratory practice, not a structured drill. Acknowledge the musical exploration positively. DO NOT criticise for missed beats or off-grid playing — they weren't trying to lock in. Comment on feel, energy, musical ideas, or what direction to explore next.\n"
       : "";
 
+  // Beat coverage from hitCompleteness — tells the LLM how many of the
+  // expected subdivision positions were actually played. Critical for
+  // explaining the gap between "timing looks fine" and "score is low":
+  // a player hitting every 16th note with ±2ms precision but only landing
+  // 25% of the expected positions scores ~55 even though their individual
+  // hits are excellent. Without this the LLM sees good timing + low score
+  // and produces contradictory advice ("right in the pocket — ease the tempo
+  // down"). Surface it explicitly so the model can name the real issue.
+  const coverageNote =
+    report.hitCompleteness !== undefined
+      ? `\nBeat coverage: ${Math.round(report.hitCompleteness * 100)}% of expected subdivision positions played (hitCompleteness ${report.hitCompleteness.toFixed(2)})`
+      : "";
+
+  // Low coverage instruction: if coverage is below 50%, steer the LLM
+  // away from generic "rough patch" / "ease the tempo down" advice and
+  // toward the actual issue (missing subdivision positions, not bad timing).
+  const lowCoverageHint =
+    report.hitCompleteness !== undefined && report.hitCompleteness < 0.50
+      ? `\nIMPORTANT: Beat coverage is only ${Math.round(report.hitCompleteness * 100)}%. The player's individual hits may be well-timed but they are missing many expected beats/subdivisions. DO NOT say "right in the pocket" — focus on coverage and filling out the rhythm, not timing accuracy.`
+      : "";
+
   return `${noodlingHint}The player (${instrumentLabel}) just finished a passage. Generate a brief coaching comment.
 BPM: ${bpm}, Time signature: ${timeSignature}/4
 Score: ${report.score} out of 100
 Playing style: ${style}
 Accuracy: ${accuracy}% of attempted beats (${report.perfectCount} perfect, ${report.goodCount} good, ${report.okCount} ok, ${report.missCount} miss out of ${scored} attempted)
-Beats with detected onset: ${presencePct}% (${scored} of ${report.totalBeats} total ticks)
-Timing tendency: ${pocket} (avg ${report.meanDeviationMs.toFixed(1)}ms)
-Longest clean streak: ${report.longestStreak} beats${lowSignalHint}${narrative}`;
+Beats with detected onset: ${presencePct}% (${scored} of ${report.totalBeats} total ticks)${coverageNote}
+Timing tendency: ${pocket} (signed avg ${report.meanDeviationMs.toFixed(1)}ms — may be near zero if early/late cancel)
+Timing spread: avg ±${report.meanAbsDeviationMs.toFixed(1)}ms per hit, consistency ±${report.stdDeviationMs.toFixed(1)}ms
+Longest clean streak: ${report.longestStreak} beats${lowSignalHint}${lowCoverageHint}${narrative}`;
 }
 
 export function shortPocketNote(report: SessionReport): string | undefined {

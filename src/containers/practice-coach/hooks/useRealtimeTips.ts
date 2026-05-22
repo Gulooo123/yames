@@ -60,7 +60,12 @@ export function useRealtimeTips(params: {
   // the grid recovers (majority of the recent window climbs back above
   // the recovery threshold) so a second collapse in the same session
   // still surfaces a tip.
+  // `gridEstablishedRef` ensures we only fire grid_lost if the player
+  // previously had good grid correlation — you can't "lose" what you
+  // never had (prevents false positives when notes are played before
+  // the metronome starts, or right at session start).
   const gridLostFiredRef = useRef<boolean>(false);
+  const gridEstablishedRef = useRef<boolean>(false);
 
   /**
    * Seed tip data from session history at the start of each session.
@@ -93,6 +98,7 @@ export function useRealtimeTips(params: {
 
     // Grid-lost gate reset
     gridLostFiredRef.current = false;
+    gridEstablishedRef.current = false;
   }, []);
 
   /**
@@ -194,16 +200,30 @@ export function useRealtimeTips(params: {
     // (4 of 6 below 0.3). Fires once per collapse; re-arms when
     // the grid recovers (3 of 6 rise above 0.5 again).
     // Respects coachVerbosity — silent in "less" mode.
+    //
+    // Miss-count guard: subdivision playing (16ths, triplets) generates
+    // between-beat onsets that the per-beat gridCorrelation treats as
+    // off-grid, causing false positives even when the player is locked in.
+    // We only fire when both correlation AND accuracy are low — i.e., the
+    // player is also missing beats, not just playing subdivisions.
     if (coachVerbosity !== "less") {
       const recentWindow = realtimeWindowRef.current;
       if (recentWindow.length >= 6) {
         const recent6 = recentWindow.slice(-6);
         const lowCount = recent6.filter((b) => b.gridCorrelation < 0.3).length;
         const highCount = recent6.filter((b) => b.gridCorrelation > 0.5).length;
+        const missOrSkipCount = recent6.filter(
+          (b) => b.classification === "miss" || b.classification === "skipped",
+        ).length;
+        // Mark grid as established once a healthy majority appears.
+        // Only after establishment can we detect a loss.
+        if (highCount >= 3) {
+          gridEstablishedRef.current = true;
+        }
         if (gridLostFiredRef.current && highCount >= 3) {
           // Grid has recovered — re-arm so a second collapse still tips.
           gridLostFiredRef.current = false;
-        } else if (!gridLostFiredRef.current && lowCount >= 4) {
+        } else if (!gridLostFiredRef.current && gridEstablishedRef.current && lowCount >= 4 && missOrSkipCount >= 3) {
           const gridTemplate = pickTemplate(TEMPLATE_CATALOG, shuffleStateRef.current, {
             vocab: vocabRef.current,
             scenario: "grid_lost",
@@ -212,7 +232,7 @@ export function useRealtimeTips(params: {
           });
           if (gridTemplate) {
             gridLostFiredRef.current = true;
-            coachDebug("grid_lost.fire", { lowCount, recentCorr: recent6.map((b) => +b.gridCorrelation.toFixed(2)) });
+            coachDebug("grid_lost.fire", { lowCount, missOrSkipCount, recentCorr: recent6.map((b) => +b.gridCorrelation.toFixed(2)) });
             const tipId = crypto.randomUUID();
             const gridMsg: FeedMessage = {
               id: tipId,

@@ -150,7 +150,7 @@ export function useSegmentCoach(params: {
           // resolve rather than leaving the UI undefined.
           const derivedPlayMode: "structured" | "noodling" =
             report.onsetEfficiency !== undefined
-              ? report.onsetEfficiency >= 0.65
+              ? report.onsetEfficiency >= 0.45
                 ? "structured"
                 : "noodling"
               : "structured";

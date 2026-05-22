@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { getSessionReport, getSessionHistory, saveSession, clearSession, coachGenerate, loadCoachModel, isCoachLoaded, ttsSpeak, onBeatFeedback, onAdaptiveEval, setAdaptiveDecision, notifySettingsChange, clearCalibrationCacheEntry, onTtsSpeechStarted } from "../ipc";
+import { getSessionReport, getSessionHistory, saveSession, clearSession, coachGenerate, loadCoachModel, isCoachLoaded, ttsSpeak, onBeatFeedback, onAdaptiveEval, setAdaptiveDecision, notifySettingsChange, clearCalibrationCacheEntry, onTtsSpeechStarted, onPracticeSegmentEnded } from "../ipc";
 import type { AdaptiveEvalRequest } from "../ipc";
 import type { BeatFeedback, FeedChip, FeedMessage, SessionReport, SessionSegment } from "../types";
 import type { useEvaluation } from "./useEvaluation";
@@ -50,7 +50,7 @@ import {
   type InterventionRateState,
   type SelectedIntervention,
 } from "../coach/interventions";
-import { accuracyPct, commentForScore, computeLegacyScore, gradeForScore, rescoreReport, scoredBeats } from "../coach/reportStats";
+import { accuracyPct, commentForScore, computeLegacyScore, computeRecentHitCompleteness, gradeForScore, rescoreReport, scoredBeats } from "../coach/reportStats";
 import { createSessionToken } from "../coach/sessionGuard";
 import { coachDebug } from "../coach/debug";
 import { useRealtimeTips } from "../containers/practice-coach/hooks/useRealtimeTips";
@@ -523,6 +523,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         beatsInSegment: beatsInSegmentRef.current,
         inDrillRamp: inDrillRampRef.current,
         verbosity: coachVerbosity,
+        recentHitCompleteness: computeRecentHitCompleteness(segmentReportsRef.current),
       });
       gatekeeperRef.current = nextState;
       if (!event) {
@@ -1002,6 +1003,64 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       }
     };
   }, [active, bpm, presetId, presetName, timeSignature, instrument, vocab, maybeSpeak, voiceMode, speakAndReveal]);
+
+  // ── D4 Signal B extension — grid-discontinuity coaching ──────────
+  // Rust emits `practice-segment-ended` with endReason "grid-discontinuity"
+  // when the player sustains low grid-correlation while still playing
+  // (distinct from activity-gap / user-stopped). Force the coach to
+  // acknowledge it — bypasses cooldowns, same as ramp_complete / Signal A.
+  useEffect(() => {
+    if (!active) return;
+    let unlisten: (() => void) | null = null;
+    onPracticeSegmentEnded((payload) => {
+      if (payload.endReason !== "grid-discontinuity") return;
+      if (!activeRef.current) return;
+      // Warmup guard — the Rust grid-correlation detector can fire within
+      // the first few beats when the player hasn't started yet (correlation
+      // is 0 with no onsets). Require at least 8 beats so the coach never
+      // calls out a "dropped correlation" before the player has had a chance
+      // to play. 8 beats ≈ 6.8 s at 70 BPM, 4 s at 120 BPM.
+      if (payload.beatCount < 8) return;
+      const gk = gatekeeperRef.current;
+      if (!gk) return;
+      const now = Date.now();
+      const { state: nextState, event } = gatekeeperEvaluate(gk, {
+        now,
+        bpm: payload.bpm,
+        window: realtimeWindowRef.current,
+        beatsInSegment: beatsInSegmentRef.current,
+        verbosity: coachVerbosity,
+        force: {
+          scenario: "grid_discontinuity",
+          context: { score: Math.round(payload.score), bpm: payload.bpm },
+        },
+      });
+      gatekeeperRef.current = nextState;
+      if (!event) return;
+      const template = pickTemplate(TEMPLATE_CATALOG, shuffleStateRef.current, {
+        vocab: vocabRef.current,
+        scenario: "grid_discontinuity",
+        severity: "neutral",
+        context: { score: Math.round(payload.score), bpm: payload.bpm },
+      });
+      if (!template) return;
+      const msgId = crypto.randomUUID();
+      const msg: FeedMessage = {
+        id: msgId,
+        type: "coach-tip",
+        timestamp: now,
+        content: template,
+        urgency: "normal",
+        pending: voiceMode === "voice",
+      };
+      setMessages((prev) => [...prev, msg]);
+      if (narrativeRef.current) {
+        narrativeRef.current = appendCoachUtterance(narrativeRef.current, template);
+      }
+      speakAndReveal(msgId, template, "normal");
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [active]);
 
   const startSession = useCallback(async () => {
     if (active) {
