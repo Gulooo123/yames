@@ -1073,7 +1073,7 @@ impl TimingAnalyzer {
                         // to keep zero-confidence matches from vanishing.
                         seg.matched_confidence_sum += conf as f32;
                         seg.deviations.push(deviation_ms);
-                        if prev_onset_ns.is_some() {
+                        if prev_onset_ns.is_some() && rhythm_inference.is_locked() {
                             seg.interval_errors.push(interval_error_ms);
                         }
                         seg.amplitudes.push(onset.amplitude);

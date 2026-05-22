@@ -80,6 +80,16 @@ pub struct SessionReport {
     /// `None` when no segments were recorded (mirrors `onset_efficiency`).
     #[serde(rename = "hitCompleteness", skip_serializing_if = "Option::is_none")]
     pub hit_completeness: Option<f32>,
+    /// Mean interval consistency over the segment window (0.0–1.0).
+    /// Gaussian decay of inter-onset interval MAD. 1.0 = perfectly even spacing.
+    /// `None` when no segments were recorded.
+    #[serde(rename = "intervalConsistency", skip_serializing_if = "Option::is_none")]
+    pub interval_consistency: Option<f32>,
+    /// Mean grid alignment over the segment window (0.0–1.0).
+    /// Confidence-weighted hit-quality average (perfect=1.0, miss=0.0).
+    /// `None` when no segments were recorded.
+    #[serde(rename = "gridAlignment", skip_serializing_if = "Option::is_none")]
+    pub grid_alignment: Option<f32>,
 }
 
 /// Accumulates BeatFeedback events during a playing session.
@@ -456,6 +466,26 @@ impl SessionAccumulator {
                 .sum();
             Some(sum / self.segments.len() as f32)
         };
+        let interval_consistency = if self.segments.is_empty() {
+            None
+        } else {
+            let sum: f32 = self
+                .segments
+                .iter()
+                .map(|s| s.component_scores.interval_consistency)
+                .sum();
+            Some(sum / self.segments.len() as f32)
+        };
+        let grid_alignment = if self.segments.is_empty() {
+            None
+        } else {
+            let sum: f32 = self
+                .segments
+                .iter()
+                .map(|s| s.component_scores.grid_alignment)
+                .sum();
+            Some(sum / self.segments.len() as f32)
+        };
 
         SessionReport {
             total_beats,
@@ -482,6 +512,8 @@ impl SessionAccumulator {
             onset_efficiency,
             play_mode,
             hit_completeness,
+            interval_consistency,
+            grid_alignment,
         }
     }
 }

@@ -188,6 +188,14 @@ export type SessionReport = {
    *  `beat_count / total_expected_beats` averaged across segments.
    *  Absent when no segments were recorded. */
   hitCompleteness?: number;
+  /** Mean interval consistency over the segment window (0.0–1.0).
+   *  Gaussian decay of IOI MAD — 1.0 = perfectly even note spacing.
+   *  Absent when no segments were recorded. */
+  intervalConsistency?: number;
+  /** Mean grid alignment over the segment window (0.0–1.0).
+   *  Confidence-weighted hit quality — 1.0 = all hits perfectly on-beat.
+   *  Absent when no segments were recorded. */
+  gridAlignment?: number;
   /** Play mode derived server-side from onsetEfficiency (≥0.65 → structured).
    *  Absent when no segments were recorded. Falls back to JS derivation when
    *  absent (e.g. old saved sessions, short warmup bursts). */

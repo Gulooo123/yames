@@ -538,6 +538,30 @@ const GENERIC: ScenarioCatalog = {
       "Beat coverage is low. Try counting aloud to make sure you're not skipping any.",
     ],
   },
+  ic_spacing_drift: {
+    neutral: [
+      "Your beat placement looks good — but the space between notes keeps wandering. Try counting the subdivisions out loud as you play.",
+      "On the beat consistently, but note spacing is uneven. Tap your foot and count subdivisions as you go.",
+      "The beat timing is there — the gap between notes is shifting though. Count eighth notes (or sixteenths) out loud to lock the spacing.",
+      "Placement is solid, spacing is drifting. Try slowing down until the gaps feel even, then speed back up.",
+    ],
+  },
+  ic_placement_drift: {
+    neutral: [
+      "Note spacing is even — but you're landing off the beat. Anticipate each click by a hair and land right on it.",
+      "Even spacing, but the notes themselves are shifted from the grid. Focus on locking the first note of each group to the beat.",
+      "The rhythm between your notes is consistent — work on where they land relative to the click. Try playing just slightly ahead of where you expect the beat.",
+      "Good spacing feel. Now bring the whole phrase onto the grid — aim for the center of each beat.",
+    ],
+  },
+  ic_both_locked: {
+    neutral: [
+      "Beat placement and note spacing are both locked in. That's the feel right there.",
+      "Spacing and placement both on point. Clean session.",
+      "Both dimensions solid — you're playing exactly where you intend to be.",
+      "Timing is dialed in across the board. That's what consistent practice sounds like.",
+    ],
+  },
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -753,6 +777,30 @@ const DRUMS: ScenarioCatalog = {
       "Beat coverage is low. Count aloud and make sure every hit has its place.",
     ],
   },
+  ic_spacing_drift: {
+    neutral: [
+      "Your hits are landing on the beat, but the gaps between strokes keep shifting. Count the subdivisions out loud — let your mouth set the subdivision grid.",
+      "Groove placement is solid, but stroke spacing is uneven. Tap your hi-hat on every subdivision to lock the feel.",
+      "On the beat consistently, but the space between hits is wandering. Count sixteenths out loud while you play — let the words anchor the gaps.",
+      "Beat placement looks good — spacing between strokes is drifting though. Slow the tempo down until the gaps feel equal, then ramp back up.",
+    ],
+  },
+  ic_placement_drift: {
+    neutral: [
+      "Your stroke spacing is even — but the hits are landing off the click. Anticipate the beat slightly and drive your kick or snare right on it.",
+      "Even spacing between strokes, but the placement relative to the click is drifting. Lock your downbeat kick to the pulse first, then build around it.",
+      "The groove feel between strokes is consistent — work on where the whole pattern sits relative to the click. Try playing right on top of the beat, not slightly behind.",
+      "Spacing is there. Now anchor the pattern to the grid — aim to land each stroke exactly with the click.",
+    ],
+  },
+  ic_both_locked: {
+    neutral: [
+      "Stroke placement and spacing between hits are both locked in. That's pocket drumming.",
+      "Spacing and beat placement both on point. Solid groove.",
+      "Both dimensions dialed — you're playing with real precision right now.",
+      "Timing's locked across the board. That's the feel you're building toward.",
+    ],
+  },
 } as const;
 
 const ELECTRIC_GUITAR: ScenarioCatalog = {
@@ -962,6 +1010,30 @@ const ELECTRIC_GUITAR: ScenarioCatalog = {
       "Coverage is low — make sure each beat gets a pick, not just the ones that sit well.",
       "Around half the beats are going unplayed. Focus on completing the full riff.",
       "Beat coverage is low. Slow down if needed and make sure every beat lands.",
+    ],
+  },
+  ic_spacing_drift: {
+    neutral: [
+      "Your note placement is solid — but the space between notes keeps wandering. Try counting the subdivisions out loud as you pick.",
+      "On the beat well, but the gap between pick strokes is uneven. Tap your foot on every subdivision to anchor the spacing.",
+      "Beat timing is there — but the space between notes is shifting. Count sixteenths out loud as you play and let your mouth set the grid.",
+      "Placement is locked — spacing is drifting. Slow the riff down until the gaps feel even, then speed back up.",
+    ],
+  },
+  ic_placement_drift: {
+    neutral: [
+      "Your spacing is really even — but you're landing off the beat. Try anticipating the click by a hair and drive each note right on it.",
+      "Even spacing between notes, but the picks are shifted from the grid. Lock the first note of each riff to the beat, then let the rest follow.",
+      "The rhythm between your notes is consistent — now bring the whole riff onto the click. Aim for the center of each beat, not the edge.",
+      "Good spacing feel. Focus on where each note lands relative to the click — play just slightly ahead of where you expect the beat.",
+    ],
+  },
+  ic_both_locked: {
+    neutral: [
+      "Spacing and placement both locked in. That's the groove right there.",
+      "Note spacing and beat placement both on point. Clean riff.",
+      "Both dimensions dialed — you're playing exactly where you intend to be.",
+      "Timing is locked across the board. That's what the riff should feel like.",
     ],
   },
 } as const;
@@ -1174,6 +1246,30 @@ const BASS: ScenarioCatalog = {
       "Beat coverage is low. Slow down if needed and make sure every note lands.",
     ],
   },
+  ic_spacing_drift: {
+    neutral: [
+      "Your plucking lands on the beat well — but the space between notes keeps shifting. Try counting the subdivisions out loud as you play.",
+      "Beat placement is solid, but the gap between plucks is uneven. Tap your foot on every subdivision to lock the note spacing.",
+      "On the beat consistently, but spacing between notes is wandering. Count the subdivisions out loud — let your voice set the grid.",
+      "Good beat placement — the space between plucks is drifting though. Slow the line down until the gaps feel equal, then speed up.",
+    ],
+  },
+  ic_placement_drift: {
+    neutral: [
+      "Your pluck spacing is even — but you're landing off the beat. Anticipate the click by a hair and drive each pluck right on it.",
+      "Even spacing between notes, but the line is sitting off the grid. Lock the first note of each bar to the click, then let the rest follow.",
+      "The rhythm between plucks is consistent — now anchor the whole line to the grid. Aim for the center of each beat.",
+      "Good spacing feel in the line. Focus on where each pluck lands relative to the click — play slightly ahead of where you expect the beat.",
+    ],
+  },
+  ic_both_locked: {
+    neutral: [
+      "Pluck spacing and beat placement both locked in. That's the pocket right there.",
+      "Spacing and placement both on point. The bass line is sitting exactly where it should.",
+      "Both dimensions dialed — you're grooving with real precision.",
+      "Timing locked across the board. That's the bass line feel you want.",
+    ],
+  },
 } as const;
 
 const ACOUSTIC_GUITAR: ScenarioCatalog = {
@@ -1384,6 +1480,30 @@ const ACOUSTIC_GUITAR: ScenarioCatalog = {
       "Beat coverage is low. Count aloud and make sure every downbeat and upbeat lands.",
     ],
   },
+  ic_spacing_drift: {
+    neutral: [
+      "Your strum lands on the beat well — but the space between strokes keeps shifting. Try counting the subdivisions out loud as you strum.",
+      "On the beat consistently, but the gap between strums is uneven. Tap your foot on every subdivision to lock the spacing.",
+      "Beat placement is solid — but spacing between strums is wandering. Count the subdivisions aloud and let your voice keep the pattern even.",
+      "Good beat placement — the space between strums is drifting though. Slow the pattern down until the gaps feel equal, then speed back up.",
+    ],
+  },
+  ic_placement_drift: {
+    neutral: [
+      "Your strum spacing is even — but you're landing off the beat. Anticipate the click by a hair and drive each strum right on it.",
+      "Even spacing between strums, but the pattern is shifted from the grid. Lock the downstroke of each bar to the beat, then let the rest follow.",
+      "The rhythm between strums is consistent — now anchor the whole pattern to the click. Aim for the center of each beat.",
+      "Good spacing feel. Focus on where each strum lands relative to the click — play just slightly ahead of where you expect the beat.",
+    ],
+  },
+  ic_both_locked: {
+    neutral: [
+      "Strum spacing and beat placement both locked in. That's a clean strum pattern.",
+      "Spacing and placement both on point. The pattern is sitting exactly where it should.",
+      "Both dimensions dialed — you're playing with real precision right now.",
+      "Timing locked across the board. That's the strum feel you want.",
+    ],
+  },
 } as const;
 
 const PIANO: ScenarioCatalog = {
@@ -1592,6 +1712,30 @@ const PIANO: ScenarioCatalog = {
       "Coverage is low — make sure each beat gets a note, not just the melodic peaks.",
       "Around half the beats are going unplayed. Focus on completing the full passage.",
       "Beat coverage is low. Slow down and make sure every beat lands before moving on.",
+    ],
+  },
+  ic_spacing_drift: {
+    neutral: [
+      "Your note placement is solid — but the space between keystrokes keeps wandering. Try counting the subdivisions out loud as you play.",
+      "On the beat well, but the gap between notes is uneven. Tap your foot on every subdivision to lock the spacing between keystrokes.",
+      "Beat placement is there — but the space between notes is shifting. Count the subdivisions aloud and let your voice keep the gaps even.",
+      "Good beat placement — note spacing is drifting though. Slow the passage down until the gaps feel equal, then build speed again.",
+    ],
+  },
+  ic_placement_drift: {
+    neutral: [
+      "Your note spacing is really even — but you're landing off the beat. Anticipate the click by a hair and drive each keystroke right on it.",
+      "Even spacing between notes, but the keystrokes are sitting off the grid. Lock the first note of each phrase to the beat, then let the rest follow.",
+      "The rhythm between keystrokes is consistent — now anchor the whole phrase to the click. Aim for the center of each beat.",
+      "Good spacing feel. Focus on where each note lands relative to the click — try playing slightly ahead of where you expect the beat.",
+    ],
+  },
+  ic_both_locked: {
+    neutral: [
+      "Note spacing and beat placement both locked in. That's clean piano timing.",
+      "Spacing and placement both on point. The phrase is sitting exactly where it should.",
+      "Both dimensions dialed — you're playing with real precision right now.",
+      "Timing locked across the board. That's the feel you've been building toward.",
     ],
   },
 } as const;

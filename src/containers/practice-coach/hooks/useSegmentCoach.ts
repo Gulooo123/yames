@@ -78,6 +78,11 @@ export function useSegmentCoach(params: {
   const muddy_hitsFiredRef = useRef<boolean>(false);
   // Isolated shuffle-bag for muddy_hits variant dedup.
   const muddy_hitsShuffleRef = useRef(createShuffleState());
+  // Gates the IC/GA diagnostic tip to once per session (not per segment).
+  // Reset only in reset() — NOT on the rising edge.
+  const icGaTipFiredRef = useRef<boolean>(false);
+  // Isolated shuffle-bag for IC/GA scenario variant dedup.
+  const icGaShuffleRef = useRef(createShuffleState());
 
   // ── Rising edge: capture segment start time ───────────────────────────
   // Runs when isPlaying transitions false→true. Sets segmentStartRef and
@@ -181,6 +186,46 @@ export function useSegmentCoach(params: {
               setMessages((prev) => [...prev, tipMsg]);
               if (narrativeRef.current) {
                 narrativeRef.current = appendCoachUtterance(narrativeRef.current, tipText);
+              }
+            }
+          }
+
+          // IC/GA narrative tip — fires at most once per session.
+          // Requires COMP_SCORES_1: intervalConsistency and gridAlignment present.
+          if (
+            !icGaTipFiredRef.current &&
+            coachVerbosity !== "less" &&
+            report.intervalConsistency !== undefined &&
+            report.gridAlignment !== undefined
+          ) {
+            const ic = report.intervalConsistency;
+            const ga = report.gridAlignment;
+            let icGaScenario: string | null = null;
+            if (ic >= 0.80 && ga >= 0.80) {
+              icGaScenario = "ic_both_locked";
+            } else if (ic >= 0.75 && ga < 0.70) {
+              icGaScenario = "ic_placement_drift";
+            } else if (ic < 0.70 && ga >= 0.75) {
+              icGaScenario = "ic_spacing_drift";
+            }
+            if (icGaScenario) {
+              icGaTipFiredRef.current = true;
+              const tipText = pickTemplate(TEMPLATE_CATALOG, icGaShuffleRef.current, {
+                vocab: instrumentLabel as any,
+                scenario: icGaScenario,
+                severity: "neutral",
+              });
+              if (tipText) {
+                const tipMsg: FeedMessage = {
+                  id: crypto.randomUUID(),
+                  type: "coach-tip",
+                  timestamp: Date.now(),
+                  content: tipText,
+                };
+                setMessages((prev) => [...prev, tipMsg]);
+                if (narrativeRef.current) {
+                  narrativeRef.current = appendCoachUtterance(narrativeRef.current, tipText);
+                }
               }
             }
           }
@@ -325,6 +370,7 @@ export function useSegmentCoach(params: {
   const reset = useCallback(() => {
     wasPlayingRef.current = false;
     muddy_hitsFiredRef.current = false;
+    icGaTipFiredRef.current = false;
   }, []);
 
   return { reset };

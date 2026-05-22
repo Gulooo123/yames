@@ -1905,6 +1905,8 @@ function aggregateReports(reports: SessionReport[]): SessionReport {
   const allAmplitudes: number[] = [];
   const allIntervalErrors: number[] = [];
   const allGridCorrelations: number[] = [];
+  const allIntervalConsistencies: number[] = [];
+  const allGridAlignments: number[] = [];
 
   for (const r of reports) {
     totalBeats += r.totalBeats;
@@ -1919,6 +1921,8 @@ function aggregateReports(reports: SessionReport[]): SessionReport {
     if (r.meanAmplitude > 0) allAmplitudes.push(r.meanAmplitude);
     if (r.meanIntervalErrorMs !== 0) allIntervalErrors.push(r.meanIntervalErrorMs);
     if (r.gridCorrelation > 0) allGridCorrelations.push(r.gridCorrelation);
+    if (r.intervalConsistency !== undefined) allIntervalConsistencies.push(r.intervalConsistency);
+    if (r.gridAlignment !== undefined) allGridAlignments.push(r.gridAlignment);
   }
 
   const meanDev = allDeviations.length > 0
@@ -1991,6 +1995,12 @@ function aggregateReports(reports: SessionReport[]): SessionReport {
     gridCorrelation: allGridCorrelations.length > 0
       ? allGridCorrelations.reduce((a, b) => a + b, 0) / allGridCorrelations.length
       : 0,
+    intervalConsistency: allIntervalConsistencies.length > 0
+      ? allIntervalConsistencies.reduce((a, b) => a + b, 0) / allIntervalConsistencies.length
+      : undefined,
+    gridAlignment: allGridAlignments.length > 0
+      ? allGridAlignments.reduce((a, b) => a + b, 0) / allGridAlignments.length
+      : undefined,
   };
 }
 
