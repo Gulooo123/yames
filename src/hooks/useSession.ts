@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { getSessionReport, getSessionHistory, saveSession, clearSession, coachGenerate, loadCoachModel, isCoachLoaded, ttsSpeak, onBeatFeedback, onAdaptiveEval, setAdaptiveDecision, notifySettingsChange, clearCalibrationCacheEntry, onTtsSpeechStarted, onPracticeSegmentEnded } from "../ipc";
+import { getSessionReport, stopEvaluation, getSessionHistory, saveSession, clearSession, coachGenerate, loadCoachModel, isCoachLoaded, ttsSpeak, onBeatFeedback, onAdaptiveEval, setAdaptiveDecision, notifySettingsChange, clearCalibrationCacheEntry, onTtsSpeechStarted, onPracticeSegmentEnded } from "../ipc";
 import type { AdaptiveEvalRequest } from "../ipc";
 import type { BeatFeedback, FeedChip, FeedMessage, SessionReport, SessionSegment } from "../types";
 import type { useEvaluation } from "./useEvaluation";
@@ -1265,6 +1265,20 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     // check (which only triggers on a NEW session, not on idle).
     activeRef.current = false;
 
+    // SCORE_DISPLAY_FIX (Part B) — stop the timing analyzer BEFORE
+    // fetching the session report. When the analyzer thread exits it runs
+    // the session-end segment close (Part A in timing.rs), which calls
+    // acc.push_segment() so the D4 score is ready in the accumulator.
+    // Without this early stop, acc.segments is empty at getSessionReport()
+    // time and the Rust side falls back to the legacy hit-rate formula.
+    //
+    // evaluation.toggle() below (lines ~1319-1321) still runs to update
+    // React state; calling stop_evaluation twice is idempotent — the
+    // Rust command returns early if the analyzer is already stopped.
+    if (evaluation.enabled) {
+      await stopEvaluation();
+    }
+
     // Same rescoring rationale as the mini-report path above — see
     // `rescoreReport`. Without this the appendSegmentEnd call below
     // would slip the segment-aware backend score into the narrative.
@@ -1886,10 +1900,16 @@ function buildPriorSummary(
  *      the Rust segment formula. This produced scores that disagreed
  *      with displayed hit-rate trends.
  *
- * Both are fixed by always going through `computeLegacyScore` — the
- * same helper used for mini-reports and the displayed end-of-session
- * card — so every score the user sees uses one consistent formula
- * based on counts they can read off the report.
+ * Both are fixed in two stages:
+ *   - When all reports carry D4 segment data (`onsetEfficiency` defined),
+ *     the aggregate score is a `totalBeats`-weighted average of the
+ *     per-segment D4 scores (IC/GA/HC/OE). This path requires that the
+ *     Rust timing thread fires a segment boundary (SessionEnd or
+ *     ActivityGap) before the report is fetched.
+ *   - Otherwise (legacy path / short warmup / old sessions), the score
+ *     falls back to `computeLegacyScore` so every score the user sees
+ *     uses one consistent formula based on counts they can read off the
+ *     report.
  */
 function aggregateReports(reports: SessionReport[]): SessionReport {
   if (reports.length === 1) {
@@ -1947,17 +1967,37 @@ function aggregateReports(reports: SessionReport[]): SessionReport {
     ? Math.sqrt(allIntervalErrors.reduce((s, e) => s + (e - meanIntervalError) ** 2, 0) / (allIntervalErrors.length - 1))
     : 0;
 
-  // Use the SAME formula as `rescoreReport` / `computeLegacyScore` so
-  // a multi-mini-report session and a single-mini-report session that
-  // sum to the same counts get the same score.
-  const score = computeLegacyScore({
-    hitsCount,
-    missCount,
-    perfectCount,
-    goodCount,
-    okCount,
-    stdDeviationMs: stdDev,
-  });
+  // SCORE_DISPLAY_FIX (Part C): when all input reports carry D4 segment
+  // data (onsetEfficiency defined), aggregate using a totalBeats-weighted
+  // average of the per-segment D4 scores. This preserves the IC/GA/HC/OE
+  // formula for sessions where the timing analyzer fired at least one
+  // segment boundary (SessionEnd, ActivityGap, or GridDiscontinuity).
+  //
+  // Falls back to computeLegacyScore when any report lacks onsetEfficiency
+  // (short warmup, old saved sessions, or legacy Rust path).
+  //
+  // Note: totalBeats-weighting ≠ duration-weighting at variable BPM.
+  // A 60s segment at 200 BPM contributes 200 beats vs a 60s segment at
+  // 60 BPM contributing only 60. For fixed-BPM practice (the common
+  // case) this is equivalent to duration-weighting. If variable-BPM
+  // sessions are added later, weight by endMs - startMs instead.
+  const allHaveD4 = reports.every(
+    r => 'onsetEfficiency' in r && r.onsetEfficiency !== undefined
+  );
+  const score = (() => {
+    if (allHaveD4 && totalBeats > 0) {
+      const d4 = reports.reduce((s, r) => s + r.score * r.totalBeats, 0) / totalBeats;
+      return Math.round(d4);
+    }
+    return computeLegacyScore({
+      hitsCount,
+      missCount,
+      perfectCount,
+      goodCount,
+      okCount,
+      stdDeviationMs: stdDev,
+    });
+  })();
   const grade = gradeForScore(score);
 
   return {

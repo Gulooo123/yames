@@ -156,7 +156,16 @@ fn generate_template(context: &str) -> Result<String, String> {
     }
 
     // Mini-report
-    Ok(format_mini_report(score, accuracy, deviation, streak))
+    let ic = extract_metric(context, "IC:").unwrap_or(0.5);
+    let ga = extract_metric(context, "GA:").unwrap_or(0.5);
+    let burst_count = extract_int(context, "BurstCount:").unwrap_or(0);
+    let is_burst = burst_count >= 3;
+
+    let mut comment = format_mini_report(score, accuracy, deviation, streak);
+    if is_burst && ga < 0.65 && ic > ga + 0.1 {
+        comment.push_str(" Re-entries are pulling the grid score down — focus on locking the first note of each phrase.");
+    }
+    Ok(comment)
 }
 
 /// Template-fallback for the real-time rephrase prompt.
@@ -237,7 +246,11 @@ fn format_mini_report(score: u32, accuracy: f64, deviation: f64, streak: u32) ->
             format!("Score {score} — locked in, {timing}. Keep pushing for longer clean streaks.")
         }
     } else if score >= 65 {
-        format!("Score {score} — {timing}. {accuracy:.0}% hits landed; lock in with the click a touch more.")
+        if streak >= 8 {
+            format!("Score {score} — {timing}. {streak}-beat clean run; tighten the feel on re-entries.")
+        } else {
+            format!("Score {score} — {timing}. Keep phrases tighter and aim for longer clean streaks.")
+        }
     } else {
         // Real but rough — encourage adjustment without crushing the user.
         // The JS-side segment-reportable gate already keeps super-thin

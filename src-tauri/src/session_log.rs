@@ -53,6 +53,12 @@ pub struct SessionLog {
     pub subdivision: u8,
     /// Seconds since UNIX epoch (session start).
     pub timestamp: u64,
+    /// Human-readable session start time in RFC 3339 / ISO 8601 format (UTC).
+    /// Example: "2026-05-22T13:13:41Z".  Added alongside the numeric
+    /// `timestamp` field so logs are readable without a Unix-epoch converter.
+    /// Defaults to an empty string for old logs that pre-date this field.
+    #[serde(rename = "startedAt", default)]
+    pub started_at: String,
     #[serde(rename = "durationMs")]
     pub duration_ms: u64,
     pub instrument: Instrument,
@@ -798,6 +804,7 @@ pub fn build_log_from_raw(
         bpm,
         time_signature,
         subdivision,
+        started_at: secs_to_iso8601(timestamp),
         timestamp,
         duration_ms,
         instrument,
@@ -943,6 +950,7 @@ pub fn build_log_from_session(
         bpm,
         time_signature,
         subdivision,
+        started_at: secs_to_iso8601(timestamp_secs),
         timestamp: timestamp_secs,
         duration_ms,
         instrument,
@@ -976,6 +984,70 @@ fn profile_centroid_hint(profile: &InstrumentProfile) -> f32 {
     (band_idx as f32 + 0.5) * band_hz
 }
 
+/// Convert a Unix epoch seconds value to an RFC 3339 / ISO 8601 UTC string,
+/// e.g. `1779480661 → "2026-05-22T13:11:01Z"`.
+///
+/// Implemented without external crates using standard Gregorian arithmetic.
+/// Correct for all dates from 1970-01-01 through at least 2200-01-01.
+pub fn secs_to_iso8601(secs: u64) -> String {
+    let time_of_day = secs % 86400;
+    let h = time_of_day / 3600;
+    let m = (time_of_day % 3600) / 60;
+    let s = time_of_day % 60;
+
+    // Days since Unix epoch (1970-01-01).
+    let mut days = (secs / 86400) as u32;
+
+    // Walk years forward from 1970.
+    let mut year = 1970u32;
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+
+    // Walk months forward within the year.
+    let dim = days_in_month(year);
+    let mut month = 1u32;
+    for &d in &dim {
+        if days < d {
+            break;
+        }
+        days -= d;
+        month += 1;
+    }
+    let day = days + 1; // days is 0-based within the month.
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, h, m, s
+    )
+}
+
+fn is_leap_year(y: u32) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+}
+
+fn days_in_month(year: u32) -> [u32; 12] {
+    [
+        31,
+        if is_leap_year(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -997,6 +1069,19 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         base
+    }
+
+    #[test]
+    fn secs_to_iso8601_known_values() {
+        // Unix epoch itself → 1970-01-01T00:00:00Z
+        assert_eq!(secs_to_iso8601(0), "1970-01-01T00:00:00Z");
+        // 2000-01-01T00:00:00Z = 946684800
+        assert_eq!(secs_to_iso8601(946_684_800), "2000-01-01T00:00:00Z");
+        // The session log timestamp from the investigated session
+        // (1779480661 s = 2026-05-22T20:11:01Z UTC, verified externally).
+        assert_eq!(secs_to_iso8601(1_779_480_661), "2026-05-22T20:11:01Z");
+        // Leap day: 2000-02-29T12:00:00Z = 951825600
+        assert_eq!(secs_to_iso8601(951_825_600), "2000-02-29T12:00:00Z");
     }
 
     #[test]

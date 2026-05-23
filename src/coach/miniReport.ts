@@ -206,6 +206,14 @@ export function formatMiniReportContext(
       ? `\nIMPORTANT: Beat coverage is only ${Math.round(report.hitCompleteness * 100)}%. The player's individual hits may be well-timed but they are missing many expected beats/subdivisions. DO NOT say "right in the pocket" — focus on coverage and filling out the rhythm, not timing accuracy.`
       : "";
 
+  // IC and GA component scores — tell the Rust template parser what the
+  // per-component values were so it can produce specific burst-mode advice.
+  // Only emitted when the fields are present (they require DSP segment data).
+  const icGaLines =
+    report.intervalConsistency !== undefined && report.gridAlignment !== undefined
+      ? `\nIC: ${report.intervalConsistency.toFixed(2)}\nGA: ${report.gridAlignment.toFixed(2)}`
+      : "";
+
   return `${noodlingHint}The player (${instrumentLabel}) just finished a passage. Generate a brief coaching comment.
 BPM: ${bpm}, Time signature: ${timeSignature}/4
 Score: ${report.score} out of 100
@@ -214,7 +222,7 @@ Accuracy: ${accuracy}% of attempted beats (${report.perfectCount} perfect, ${rep
 Beats with detected onset: ${presencePct}% (${scored} of ${report.totalBeats} total ticks)${coverageNote}
 Timing tendency: ${pocket} (signed avg ${report.meanDeviationMs.toFixed(1)}ms — may be near zero if early/late cancel)
 Timing spread: avg ±${report.meanAbsDeviationMs.toFixed(1)}ms per hit, consistency ±${report.stdDeviationMs.toFixed(1)}ms
-Longest clean streak: ${report.longestStreak} beats${lowSignalHint}${lowCoverageHint}${narrative}`;
+Longest clean streak: ${report.longestStreak} beats${icGaLines}${lowSignalHint}${lowCoverageHint}${narrative}`;
 }
 
 export function shortPocketNote(report: SessionReport): string | undefined {
