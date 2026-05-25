@@ -88,7 +88,7 @@ impl TempoContext {
 
 pub type SharedTempoContext = Arc<TempoContext>;
 
-/// D2 refractory multiplier — `max(floor, subdivision_interval × 0.55)`.
+/// D2 refractory multiplier — `max(floor, subdivision_interval × k)`.
 /// Plan-specified value; lower for drums (separate path via the
 /// `profile.refractory_floor_ms` already), tighter at faster tempos.
 ///
@@ -104,18 +104,34 @@ pub type SharedTempoContext = Arc<TempoContext>;
 /// confidence distributions (mean amp 0.0082 each), confirming the
 /// detector couldn't distinguish a real hit from an envelope echo.
 ///
-/// 0.55 raises the same scenario's refractory to ≈ 103ms — wide enough
-/// to swallow the body-resonance peaks while still permitting 16ths up
-/// to ≈ 150 BPM (125ms ticks) and 8ths up to ≈ 290 BPM. Simulation
-/// against the six WAV-paired sessions: this fix removes 35–46% of the
-/// detected onsets, almost exactly matching the observed false-positive
-/// rate.
+/// 0.55 raised the refractory to ≈ 103ms at 80 BPM 16ths — but a 2026-05-23
+/// amplitude-ordering forensic on session_1779514382 revealed a second ghost
+/// band at 103–150ms. At 80 BPM 16ths (sub_interval = 187.5ms), 94 onset
+/// pairs had intervals in the 103–150ms range (27% of all pairs). Amplitude
+/// ordering showed only 33% of those pairs had a louder second onset across
+/// all three sub-buckets (103–115ms: 30%, 115–131ms: 36%, 131–150ms: 33%),
+/// confirming attack-then-resonance (not pick-noise-then-attack): the body
+/// resonance trails the pick attack by up to 150ms and was registering as a
+/// second onset, corrupting IC scores for a player whose real attacks were
+/// within ±0.5ms of the grid.
+///
+/// Bumped from 0.55 → 0.75 on 2026-05-23 to cover the full resonance window.
+/// At 80 BPM 16ths: refractory = 0.75 × 187.5 = 140.6ms → blocks ~83% of
+/// the ghost-onset band. At 120 BPM 16ths: refractory = 0.75 × 125 = 93.75ms,
+/// meaning a legit hit would need to arrive 31ms early to be blocked (4× the
+/// measured ±8.1ms timing spread — statistically negligible). Still permits
+/// 16ths up to any tempo and 8ths with extreme headroom.
+///
+/// NOTE: The 103–150ms ghost band at 120 BPM (52% second-louder, 71% in
+/// 131–150ms sub-bucket) shows a DIFFERENT pattern — likely pick-noise-then-
+/// attack rather than resonance. That is a cluster_window_ms concern, not a
+/// refractory concern, and is tracked separately.
 ///
 /// If we ever want to support 32nds or extreme tempos, drop the
 /// instrument refractory floor (instrument.rs) for that profile
 /// instead of pulling this constant back — the floor already exists
 /// specifically to protect fast articulations.
-pub const REFRACTORY_SUBDIVISION_FACTOR: f32 = 0.55;
+pub const REFRACTORY_SUBDIVISION_FACTOR: f32 = 0.75;
 
 /// Onset detector using spectral flux with adaptive threshold.
 ///
@@ -591,12 +607,16 @@ mod tests {
 
     #[test]
     fn refractory_factor_constant_matches_plan() {
-        // Plan-locked: 0.55 of subdivision interval is the "musical" knee
-        // between "too eager" and "blocking legit fast runs." Was 0.35
-        // — bumped 2026-05-17 after the doubling-bug WAV analysis (see
-        // constant's docstring for full forensics). The new value still
-        // permits 16ths up to ≈ 150 BPM at typical instrument floors.
-        assert!(approx_eq(REFRACTORY_SUBDIVISION_FACTOR, 0.55, 1e-6));
+        // Plan-locked: 0.75 of subdivision interval is the "musical" knee
+        // between "too eager" and "blocking legit fast runs."
+        // History: 0.35 → 0.55 on 2026-05-17 (doubling-bug WAV analysis).
+        //          0.55 → 0.75 on 2026-05-23 (amplitude-ordering forensic on
+        //          session_1779514382: 94 pairs at 103–150ms, 33% 2nd-louder
+        //          across all sub-buckets → attack-then-resonance confirmed).
+        // See constant's docstring for full forensics. New value still
+        // permits 16ths at any tempo (legit hit must be 31ms early at 120 BPM
+        // to be blocked — 4× the measured ±8.1ms timing spread).
+        assert!(approx_eq(REFRACTORY_SUBDIVISION_FACTOR, 0.75, 1e-6));
     }
 
     fn mk_onset(ts_ns: u64, amp: f32, centroid: f32, conf: f32) -> Onset {

@@ -217,6 +217,8 @@ export function formatMiniReportContext(
   return `${noodlingHint}The player (${instrumentLabel}) just finished a passage. Generate a brief coaching comment.
 BPM: ${bpm}, Time signature: ${timeSignature}/4
 Score: ${report.score} out of 100
+SignedDev: ${report.meanDeviationMs.toFixed(1)}
+HitCompleteness: ${(report.hitCompleteness ?? 1).toFixed(2)}
 Playing style: ${style}
 Accuracy: ${accuracy}% of attempted beats (${report.perfectCount} perfect, ${report.goodCount} good, ${report.okCount} ok, ${report.missCount} miss out of ${scored} attempted)
 Beats with detected onset: ${presencePct}% (${scored} of ${report.totalBeats} total ticks)${coverageNote}

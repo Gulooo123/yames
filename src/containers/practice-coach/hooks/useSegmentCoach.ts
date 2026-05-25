@@ -110,6 +110,13 @@ export function useSegmentCoach(params: {
   useEffect(() => {
     if (wasPlayingRef.current && !isPlaying && active) {
       const segmentBpm = playBpmRef.current;
+      const segmentDurationMs = Date.now() - segmentStartRef.current;
+      // Under 10 s → Signal A (BPM change) or accidental stop.
+      // Flush the Rust accumulator so stale data doesn't bleed into the
+      // next exercise, but skip the mini-report entirely.
+      if (segmentDurationMs < 10_000) {
+        clearSession();
+      } else {
       const token = createSessionToken(sessionIdRef, activeRef);
       getSessionReport().then(async (raw) => {
         // Re-score the backend report through the same legacy formula
@@ -357,6 +364,7 @@ export function useSegmentCoach(params: {
           // flight. See the rationale block at the call site.
         }
       });
+      } // end else (segment ≥ 10 s)
     }
     wasPlayingRef.current = isPlaying;
   }, [isPlaying, active, timeSignature, instrumentLabel,

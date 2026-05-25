@@ -99,7 +99,19 @@ pub fn generate(engine: &CoachEngine, context: &str) -> Result<String, String> {
 fn generate_template(context: &str) -> Result<String, String> {
     // Parse key metrics from the context string
     let accuracy = extract_metric(context, "Accuracy:").unwrap_or(0.0);
-    let deviation = extract_metric(context, "avg").unwrap_or(0.0);
+    // `SignedDev:` is a dedicated parseable line added by the JS context
+    // builder (miniReport.ts). The old "avg" key tried to extract from the
+    // human-readable "Timing spread: avg ±8.1ms" line — but "±8.1ms" has a
+    // ± prefix and "ms" suffix that defeat `parse::<f64>()`, so deviation
+    // always resolved to 0.0 and the template always reported "right in the
+    // pocket" regardless of actual timing. `SignedDev:` is plain digits only.
+    let deviation = extract_metric(context, "SignedDev:")
+        .unwrap_or_else(|| extract_metric(context, "avg").unwrap_or(0.0));
+    // Hit completeness — what fraction of expected subdivision positions had
+    // a matched onset. Low values (< 0.50) explain why a well-timed player
+    // can still score in the 40s: they're playing phrases, not every slot.
+    // Falls back to 1.0 (assume full coverage) if the field isn't present.
+    let hit_completeness = extract_metric(context, "HitCompleteness:").unwrap_or(1.0);
     let streak = extract_int(context, "Longest clean streak:").unwrap_or(0);
     // The mini-report card shows a `ScoreRing` with the composite
     // four-component score adjacent to the coach text. Surfacing the
@@ -161,7 +173,7 @@ fn generate_template(context: &str) -> Result<String, String> {
     let burst_count = extract_int(context, "BurstCount:").unwrap_or(0);
     let is_burst = burst_count >= 3;
 
-    let mut comment = format_mini_report(score, accuracy, deviation, streak);
+    let mut comment = format_mini_report(score, accuracy, deviation, streak, hit_completeness);
     if is_burst && ga < 0.65 && ic > ga + 0.1 {
         comment.push_str(" Re-entries are pulling the grid score down — focus on locking the first note of each phrase.");
     }
@@ -230,7 +242,7 @@ fn extract_original_quote(context: &str) -> Option<String> {
 /// branches because it's the clearest "how many beats did you land"
 /// signal — just clearly labelled (`{accuracy}% hits`) so it doesn't
 /// look like a competing headline.
-fn format_mini_report(score: u32, accuracy: f64, deviation: f64, streak: u32) -> String {
+fn format_mini_report(score: u32, _accuracy: f64, deviation: f64, streak: u32, hit_completeness: f64) -> String {
     let timing = if deviation.abs() < 5.0 {
         "right in the pocket"
     } else if deviation < -5.0 {
@@ -252,11 +264,25 @@ fn format_mini_report(score: u32, accuracy: f64, deviation: f64, streak: u32) ->
             format!("Score {score} — {timing}. Keep phrases tighter and aim for longer clean streaks.")
         }
     } else {
-        // Real but rough — encourage adjustment without crushing the user.
-        // The JS-side segment-reportable gate already keeps super-thin
-        // segments out of this path, so we can stay specific without
-        // worrying about a "0%" segment landing here.
-        format!("Score {score} — {timing}. Ease the tempo down a touch and rebuild from a clean bar.")
+        // Score < 65. Two distinct cases:
+        //   (a) Timing is off → tempo advice makes sense.
+        //   (b) Timing is solid but score is low → the issue is beat
+        //       coverage or grid alignment, NOT tempo. Telling a player
+        //       who is already "right in the pocket" to "ease the tempo
+        //       down" is contradictory and condescending — fixed here.
+        if timing == "right in the pocket" {
+            let pct = (hit_completeness * 100.0).round() as u32;
+            if pct < 50 {
+                // Low coverage — player is hitting phrases, not filling
+                // every subdivision. Name the actual issue.
+                format!("Score {score} — timing center is solid but only {pct}% of beats are filled. Focus on groove density.")
+            } else {
+                format!("Score {score} — right in the pocket. Focus on consistency through the full phrase.")
+            }
+        } else {
+            // Timing IS drifting — a tempo adjustment is appropriate.
+            format!("Score {score} — {timing}. Ease the tempo down a touch and rebuild from a clean bar.")
+        }
     }
 }
 
