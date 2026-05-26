@@ -4,6 +4,20 @@ use crate::models::PlayMode;
 use crate::session_log::PracticeSegment;
 use crate::timing::BeatFeedback;
 
+/// Coach operating mode. Controls scoring leniency (k-factor, weights).
+///
+/// `Default` widens the IC Gaussian tolerance and shifts guitar weights
+/// toward grid_alignment (more forgiving for learners).
+/// `Pro` uses the tighter original constants calibrated against
+/// competent players in the 2026-05-22 replay session.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CoachMode {
+    #[default]
+    Default,
+    Pro,
+}
+
 /// Accumulated session statistics from beat feedback events.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionReport {
@@ -90,6 +104,26 @@ pub struct SessionReport {
     /// `None` when no segments were recorded.
     #[serde(rename = "gridAlignment", skip_serializing_if = "Option::is_none")]
     pub grid_alignment: Option<f32>,
+    /// Coach mode active during this session. Determines which scoring
+    /// constants were applied (k-factor, score weights).
+    #[serde(rename = "coachMode")]
+    pub coach_mode: CoachMode,
+    /// Mean amplitude of downbeat onsets averaged across segments.
+    /// `None` when no segment had enough downbeat data points.
+    #[serde(rename = "downbeatAmpAvg", skip_serializing_if = "Option::is_none")]
+    pub downbeat_amp_avg: Option<f32>,
+    /// Mean amplitude of upbeat onsets averaged across segments.
+    /// `None` when no segment had enough upbeat data points.
+    #[serde(rename = "upbeatAmpAvg", skip_serializing_if = "Option::is_none")]
+    pub upbeat_amp_avg: Option<f32>,
+    /// Mean amplitude of subdivision onsets averaged across segments.
+    /// `None` when no segment had enough subdivision data points.
+    #[serde(rename = "subdivisionAmpAvg", skip_serializing_if = "Option::is_none")]
+    pub subdivision_amp_avg: Option<f32>,
+    /// Population std dev of all matched onset amplitudes averaged across segments.
+    /// `None` when no segment had enough matched onsets.
+    #[serde(rename = "ampStdDev", skip_serializing_if = "Option::is_none")]
+    pub amp_std_dev: Option<f32>,
 }
 
 /// Accumulates BeatFeedback events during a playing session.
@@ -137,6 +171,10 @@ pub struct SessionAccumulator {
     /// Full-session segments. Mirror of `segments` that survives
     /// `clear_segment_window()`.
     all_segments: Vec<PracticeSegment>,
+    /// Coach mode for this session. Set at session start via
+    /// `start_evaluation`. Propagated to `SessionReport` and into each
+    /// `SegmentState` so `score_segment` can branch on it.
+    pub coach_mode: CoachMode,
 }
 
 impl SessionAccumulator {
@@ -148,6 +186,7 @@ impl SessionAccumulator {
             session_start_ms: None,
             segments: Vec::new(),
             all_segments: Vec::new(),
+            coach_mode: CoachMode::Default,
         }
     }
 
@@ -487,6 +526,31 @@ impl SessionAccumulator {
             Some(sum / self.segments.len() as f32)
         };
 
+        let downbeat_amp_avg = {
+            let vals: Vec<f32> = self.segments.iter()
+                .filter_map(|s| s.component_scores.downbeat_amp_avg)
+                .collect();
+            if vals.is_empty() { None } else { Some(vals.iter().sum::<f32>() / vals.len() as f32) }
+        };
+        let upbeat_amp_avg = {
+            let vals: Vec<f32> = self.segments.iter()
+                .filter_map(|s| s.component_scores.upbeat_amp_avg)
+                .collect();
+            if vals.is_empty() { None } else { Some(vals.iter().sum::<f32>() / vals.len() as f32) }
+        };
+        let subdivision_amp_avg = {
+            let vals: Vec<f32> = self.segments.iter()
+                .filter_map(|s| s.component_scores.subdivision_amp_avg)
+                .collect();
+            if vals.is_empty() { None } else { Some(vals.iter().sum::<f32>() / vals.len() as f32) }
+        };
+        let amp_std_dev = {
+            let vals: Vec<f32> = self.segments.iter()
+                .filter_map(|s| s.component_scores.amp_std_dev)
+                .collect();
+            if vals.is_empty() { None } else { Some(vals.iter().sum::<f32>() / vals.len() as f32) }
+        };
+
         SessionReport {
             total_beats,
             hits_count,
@@ -514,7 +578,98 @@ impl SessionAccumulator {
             hit_completeness,
             interval_consistency,
             grid_alignment,
+            coach_mode: self.coach_mode,
+            downbeat_amp_avg,
+            upbeat_amp_avg,
+            subdivision_amp_avg,
+            amp_std_dev,
         }
+    }
+
+    /// Final-session report: identical to `report()` but reads all segment
+    /// buffers from `self.all_segments` (the never-cleared full-session
+    /// accumulator) instead of `self.segments` (the per-exercise window).
+    ///
+    /// # Why a separate method instead of changing `report()`?
+    ///
+    /// Mid-session mini-reports call `get_session_report` (which uses
+    /// `report()`) BEFORE `clearSession()` fires, and they deliberately show
+    /// per-exercise performance.  For the first exercise `all_segments ==
+    /// segments`, so there is no difference.  But for exercise N ≥ 2,
+    /// `all_segments` already contains segments from earlier exercises;
+    /// routing the mini-report through `report_final()` would show a
+    /// cumulative score (exercises 1 … N) instead of the per-exercise score
+    /// (exercise N alone) — a misleading UX regression.
+    ///
+    /// The session-end path uses a dedicated `get_final_session_report`
+    /// command that calls this method, so the two call sites stay independent.
+    pub fn report_final(&self) -> SessionReport {
+        // Start with the full beat-level report (hits, misses, deviations,
+        // streak, legacy score, etc.).  All those fields come from
+        // `self.feedbacks`, which is independent of which segment buffer
+        // we use.  We then override only the segment-derived fields.
+        let mut r = self.report();
+
+        let segs = &self.all_segments;
+        if segs.is_empty() {
+            // No segments recorded at all — legacy formula from report() is
+            // already correct; nothing to override.
+            return r;
+        }
+
+        // Score: duration-weighted mean across every segment in the session.
+        let pairs: Vec<(f32, u64)> = segs
+            .iter()
+            .map(|s| (s.score, s.end_ms.saturating_sub(s.start_ms)))
+            .collect();
+        r.score = crate::timing::duration_weighted_session_score(&pairs)
+            .round()
+            .clamp(0.0, 100.0) as u32;
+
+        // Grade and comment must be recomputed from the updated score.
+        // scored_beats = hits + misses (skipped excluded), mirroring report().
+        r.grade = match r.score {
+            95..=100 => "S",
+            85..=94  => "A",
+            70..=84  => "B",
+            55..=69  => "C",
+            40..=54  => "D",
+            _        => "F",
+        }
+        .to_string();
+        r.comment = generate_comment(&r.grade, r.score, r.hits_count + r.miss_count);
+
+        // Component averages from all_segments.
+        let len = segs.len() as f32;
+
+        let sum_oe: f32 = segs.iter().map(|s| s.component_scores.onset_efficiency).sum();
+        r.onset_efficiency = Some(sum_oe / len);
+        r.play_mode = r.onset_efficiency.map(|oe| {
+            if oe >= 0.65 { PlayMode::Structured } else { PlayMode::Noodling }
+        });
+
+        let sum_hc: f32 = segs.iter().map(|s| s.component_scores.hit_completeness).sum();
+        r.hit_completeness = Some(sum_hc / len);
+
+        let sum_ic: f32 = segs.iter().map(|s| s.component_scores.interval_consistency).sum();
+        r.interval_consistency = Some(sum_ic / len);
+
+        let sum_ga: f32 = segs.iter().map(|s| s.component_scores.grid_alignment).sum();
+        r.grid_alignment = Some(sum_ga / len);
+
+        let dba: Vec<f32> = segs.iter().filter_map(|s| s.component_scores.downbeat_amp_avg).collect();
+        r.downbeat_amp_avg = if dba.is_empty() { None } else { Some(dba.iter().sum::<f32>() / dba.len() as f32) };
+
+        let uba: Vec<f32> = segs.iter().filter_map(|s| s.component_scores.upbeat_amp_avg).collect();
+        r.upbeat_amp_avg = if uba.is_empty() { None } else { Some(uba.iter().sum::<f32>() / uba.len() as f32) };
+
+        let suba: Vec<f32> = segs.iter().filter_map(|s| s.component_scores.subdivision_amp_avg).collect();
+        r.subdivision_amp_avg = if suba.is_empty() { None } else { Some(suba.iter().sum::<f32>() / suba.len() as f32) };
+
+        let asd: Vec<f32> = segs.iter().filter_map(|s| s.component_scores.amp_std_dev).collect();
+        r.amp_std_dev = if asd.is_empty() { None } else { Some(asd.iter().sum::<f32>() / asd.len() as f32) };
+
+        r
     }
 }
 

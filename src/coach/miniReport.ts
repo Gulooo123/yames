@@ -137,6 +137,7 @@ export function formatMiniReportContext(
   instrumentLabel: string,
   narrativeBlock?: string,
   playMode?: "structured" | "noodling",
+  coachMode: "default" | "pro" = "default",
 ): string {
   const pocket = report.meanDeviationMs < -5 ? "ahead of the beat (rushing)"
     : report.meanDeviationMs > 5 ? "behind the beat (dragging)"
@@ -176,6 +177,10 @@ export function formatMiniReportContext(
   // on `75/100`, which silently turned the score back into 0 in the
   // wild. Keeping the value bare gives the parser something it can
   // actually consume.
+  const modeInstruction = coachMode === "default"
+    ? `CoachMode: default\nINSTRUCTION: Respond in plain musical language. Do not use any of these terms: IC, GA, grid alignment, onset efficiency, hit completeness, mean deviation, interval consistency. Say: beat, note, tempo, spacing, timing, feel, groove, rushing, dragging, subdivision, pocket, locked in.\n`
+    : `CoachMode: pro\nINSTRUCTION: Use musical vocabulary. You may include specific numbers in plain language (e.g. 'about 15ms early', 'only 40% of beats hit'). Do not use raw metric names as terms (IC, GA, HC).\n`;
+
   // Step 6 — noodling context: prepend framing so the LLM switches
   // register. Must come BEFORE the metric block so the model picks it
   // up as a system instruction. Score/Accuracy lines MUST stay intact
@@ -214,11 +219,21 @@ export function formatMiniReportContext(
       ? `\nIC: ${report.intervalConsistency.toFixed(2)}\nGA: ${report.gridAlignment.toFixed(2)}`
       : "";
 
-  return `${noodlingHint}The player (${instrumentLabel}) just finished a passage. Generate a brief coaching comment.
+  const timingPattern =
+    (report.stdDeviationMs ?? 0) > 20
+      ? "oscillating"
+      : (report.meanDeviationMs ?? 0) < -5
+      ? "rushing"
+      : (report.meanDeviationMs ?? 0) > 5
+      ? "dragging"
+      : "solid";
+
+  return `${modeInstruction}${noodlingHint}The player (${instrumentLabel}) just finished a passage. Generate a brief coaching comment.
 BPM: ${bpm}, Time signature: ${timeSignature}/4
 Score: ${report.score} out of 100
 SignedDev: ${report.meanDeviationMs.toFixed(1)}
 HitCompleteness: ${(report.hitCompleteness ?? 1).toFixed(2)}
+TimingPattern: ${timingPattern}
 Playing style: ${style}
 Accuracy: ${accuracy}% of attempted beats (${report.perfectCount} perfect, ${report.goodCount} good, ${report.okCount} ok, ${report.missCount} miss out of ${scored} attempted)
 Beats with detected onset: ${presencePct}% (${scored} of ${report.totalBeats} total ticks)${coverageNote}

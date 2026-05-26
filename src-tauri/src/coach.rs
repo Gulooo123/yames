@@ -5,6 +5,9 @@
 //! and chat Q&A. Without the feature, generates template-based responses.
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static VARIANT_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Thread-safe handle to the coach engine.
 pub type SharedCoachEngine = Arc<Mutex<CoachEngine>>;
@@ -95,6 +98,15 @@ pub fn generate(engine: &CoachEngine, context: &str) -> Result<String, String> {
     generate_template(context)
 }
 
+/// Extract the trimmed value after a key prefix from the context string.
+/// Searches all lines for the first one containing `key`, then returns
+/// everything after the key text, left-trimmed of whitespace.
+fn extract_str<'a>(context: &'a str, key: &str) -> Option<&'a str> {
+    context.lines()
+        .find(|l| l.trim_start().starts_with(key))
+        .map(|l| l[l.find(key).unwrap() + key.len()..].trim())
+}
+
 /// Template-based generation — parses the structured context and produces a response.
 fn generate_template(context: &str) -> Result<String, String> {
     // Parse key metrics from the context string
@@ -168,15 +180,17 @@ fn generate_template(context: &str) -> Result<String, String> {
     }
 
     // Mini-report
-    let ic = extract_metric(context, "IC:").unwrap_or(0.5);
-    let ga = extract_metric(context, "GA:").unwrap_or(0.5);
-    let burst_count = extract_int(context, "BurstCount:").unwrap_or(0);
-    let is_burst = burst_count >= 3;
+    let timing_pattern = extract_str(context, "TimingPattern:").unwrap_or("solid");
+    let coach_mode = extract_str(context, "CoachMode:").unwrap_or("default");
 
-    let mut comment = format_mini_report(score, accuracy, deviation, streak, hit_completeness);
-    if is_burst && ga < 0.65 && ic > ga + 0.1 {
-        comment.push_str(" Re-entries are pulling the grid score down — focus on locking the first note of each phrase.");
-    }
+    // Detect noodling: the JS side embeds a free-play hint rather than a key.
+    let is_noodling = context.contains("free-playing/noodling");
+
+    let comment = if is_noodling {
+        pick(NOODLING).to_string()
+    } else {
+        format_mini_report(score, hit_completeness, timing_pattern, coach_mode, accuracy, streak)
+    };
     Ok(comment)
 }
 
@@ -230,60 +244,163 @@ fn extract_original_quote(context: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// Score-first mini-report template.
+// ---------------------------------------------------------------------------
+// Phrase banks — 5 variants per scenario, picked via VARIANT_COUNTER.
+// Language rules: no IC/GA/HC/onset/grid-alignment/mean-deviation/interval-consistency.
+// Default mode: no millisecond numbers. Pro mode: can say "about 15ms early", etc.
+// ---------------------------------------------------------------------------
+
+const GREAT_DEFAULT: &[&str] = &[
+    "Really locked in — your timing is right there.",
+    "Solid feel, keep riding that groove.",
+    "Your timing is sitting right where it should be.",
+    "Clean rhythm — that's the pocket.",
+    "Locked in tight — great work.",
+];
+const GREAT_PRO: &[&str] = &[
+    "Tight beat placement and even note spacing — clean all-round.",
+    "Beat placement solid, spacing consistent — push the tempo when you're ready.",
+    "All timing components clean — good session.",
+    "Note spacing and placement both dialled in.",
+    "Timing is locked — consider bumping the tempo.",
+];
+
+const GOOD_STEADY_DEFAULT: &[&str] = &[
+    "Nice and steady — good consistent tempo.",
+    "Keeping it together — solid timing through the segment.",
+    "Tempo is holding well.",
+    "Good rhythm feel — consistent pulse.",
+    "Steady timing — you're building a solid foundation.",
+];
+const GOOD_STEADY_PRO: &[&str] = &[
+    "Solid beat placement, spacing mostly consistent — push the tempo or sharpen the attack.",
+    "Good consistency — a few positions drift but the center holds.",
+    "Timing center is on, spacing is reliable.",
+    "Placement and spacing solid — room to push harder.",
+    "Consistent feel — timing foundation is there.",
+];
+
+const RUSHING_DEFAULT: &[&str] = &[
+    "You're leaning into the beat a little — try letting it come to you.",
+    "Arriving a touch early — sit back and let the pulse breathe.",
+    "The tempo is pushing forward — ease off the attack slightly.",
+    "You're ahead of the beat — try staying back with it.",
+    "A bit of a rush happening — slow your attack, not your tempo.",
+];
+const RUSHING_PRO: &[&str] = &[
+    "Consistently landing early — directional early bias in the attack timing.",
+    "Note attacks are arriving before the beat — ease the attack forward slightly.",
+    "Early attack pattern — your notes are preceding the beat.",
+    "Consistent early bias — the attack is rushing the pulse.",
+    "Timing is shifted early — let the beat land first, then hit.",
+];
+
+const DRAGGING_DEFAULT: &[&str] = &[
+    "Settling a bit behind the beat — try staying a little more forward.",
+    "The tempo is dragging back — keep your attack crisp.",
+    "You're lagging slightly — push the attack forward.",
+    "Behind the beat — try keeping the energy moving forward.",
+    "A bit of drag happening — sharpen the attack.",
+];
+const DRAGGING_PRO: &[&str] = &[
+    "Consistently landing late — directional late bias in the attack timing.",
+    "Note attacks are landing after the beat — sharpen the attack slightly.",
+    "Late attack pattern — notes are trailing the beat.",
+    "Consistent late bias — the attack is dragging the pulse.",
+    "Timing is shifted late — push the attack to meet the beat.",
+];
+
+const OSCILLATING_DEFAULT: &[&str] = &[
+    "The tempo is moving around — speeding up and slowing down.",
+    "Note spacing is uneven — try keeping the gaps between notes equal.",
+    "The pulse is wandering a bit — focus on steady spacing between notes.",
+    "Rushing then dragging — try locking into one steady feel.",
+    "Tempo consistency needs work — focus on equal note spacing.",
+];
+const OSCILLATING_PRO: &[&str] = &[
+    "High timing variance despite a near-neutral average — the timing is genuinely unstable.",
+    "Not a directional bias — the timing is alternating early and late.",
+    "Tempo instability detected: spacing between notes is inconsistent.",
+    "Rushing-dragging pattern — not a fixed offset, true variance in the timing.",
+    "Timing variance is high — focus on keeping note spacing consistent.",
+];
+
+const LOW_SCORE_SOLID_DEFAULT: &[&str] = &[
+    "Your timing center is good — focus on hitting more of the beats.",
+    "Timing is in the right place, but you're missing some positions — fill those gaps.",
+    "Good timing feel, but the rhythm needs more coverage — play more of the beats.",
+    "The pulse is there but the rhythm is thin — try hitting more positions.",
+    "Your timing is centered well — now work on density.",
+];
+const LOW_SCORE_SOLID_PRO: &[&str] = &[
+    "Timing center and spacing are clean but beat coverage is low.",
+    "Good placement accuracy but too many beat positions are empty.",
+    "Note spacing is consistent but density is low — hit more of the beat positions.",
+    "Timing fundamentals are there, coverage is the gap.",
+    "Placement is accurate — focus on filling out more beat positions.",
+];
+
+const LOW_COVERAGE: &[&str] = &[
+    "I'm only hearing some of your playing — check your input level or play a touch louder.",
+    "Signal is coming in low — try playing with a bit more attack.",
+    "Low detection rate — you may need to turn up your input gain.",
+    "Only picking up part of your playing — check the input level in settings.",
+    "Weak signal coming in — play louder or check your input gain.",
+];
+
+const NOODLING: &[&str] = &[
+    "Good free feel — let the ideas flow.",
+    "Nice exploration — when you're ready, bring it back to the pulse.",
+    "Creative space — use it well.",
+    "Good free play — follow the feel.",
+    "Let it breathe — come back to the beat when you're ready.",
+];
+
+/// Pick the next phrase from a bank, rotating via the global counter.
+fn pick<'a>(bank: &[&'a str]) -> &'a str {
+    bank[VARIANT_COUNTER.fetch_add(1, Ordering::Relaxed) as usize % bank.len()]
+}
+
+/// Score-first mini-report using mode-aware phrase banks.
 ///
-/// `score` is the composite four-component segment score (the same
-/// number shown in the `ScoreRing` adjacent to this text). Branching
-/// on `score` rather than `accuracy` means the wording reinforces the
-/// badge instead of contradicting it: a 65-score segment never reads
-/// as "Rough patch at 50%" again.
-///
-/// Accuracy still appears as a secondary detail in the mid-tier
-/// branches because it's the clearest "how many beats did you land"
-/// signal — just clearly labelled (`{accuracy}% hits`) so it doesn't
-/// look like a competing headline.
-fn format_mini_report(score: u32, _accuracy: f64, deviation: f64, streak: u32, hit_completeness: f64) -> String {
-    let timing = if deviation.abs() < 5.0 {
-        "right in the pocket"
-    } else if deviation < -5.0 {
-        "slightly ahead of the beat"
+/// Scenario cascade (in priority order):
+///   accuracy < 60  → low_coverage (signal quality)
+///   oscillating    → oscillating
+///   rushing        → rushing
+///   dragging       → dragging
+///   score >= 85    → great
+///   score >= 65    → good_steady
+///   else           → low_score_solid_timing
+fn format_mini_report(
+    score: u32,
+    hit_completeness: f64,
+    timing_pattern: &str,
+    coach_mode: &str,
+    accuracy: f64,
+    streak: u32,
+) -> String {
+    let _ = hit_completeness; // retained in signature for future use
+    let _ = streak;           // retained in signature for future use
+    let is_pro = coach_mode == "pro";
+
+    let phrase = if accuracy < 60.0 {
+        pick(LOW_COVERAGE)
+    } else if timing_pattern == "oscillating" {
+        pick(if is_pro { OSCILLATING_PRO } else { OSCILLATING_DEFAULT })
+    } else if timing_pattern == "rushing" {
+        pick(if is_pro { RUSHING_PRO } else { RUSHING_DEFAULT })
+    } else if timing_pattern == "dragging" {
+        pick(if is_pro { DRAGGING_PRO } else { DRAGGING_DEFAULT })
+    } else if score >= 85 {
+        pick(if is_pro { GREAT_PRO } else { GREAT_DEFAULT })
+    } else if score >= 65 {
+        pick(if is_pro { GOOD_STEADY_PRO } else { GOOD_STEADY_DEFAULT })
     } else {
-        "slightly behind the beat"
+        // solid timing, low score → coverage issue
+        pick(if is_pro { LOW_SCORE_SOLID_PRO } else { LOW_SCORE_SOLID_DEFAULT })
     };
 
-    if score >= 85 {
-        if streak >= 16 {
-            format!("Score {score} — solid run, {timing}. {streak}-beat clean streak, nice consistency.")
-        } else {
-            format!("Score {score} — locked in, {timing}. Keep pushing for longer clean streaks.")
-        }
-    } else if score >= 65 {
-        if streak >= 8 {
-            format!("Score {score} — {timing}. {streak}-beat clean run; tighten the feel on re-entries.")
-        } else {
-            format!("Score {score} — {timing}. Keep phrases tighter and aim for longer clean streaks.")
-        }
-    } else {
-        // Score < 65. Two distinct cases:
-        //   (a) Timing is off → tempo advice makes sense.
-        //   (b) Timing is solid but score is low → the issue is beat
-        //       coverage or grid alignment, NOT tempo. Telling a player
-        //       who is already "right in the pocket" to "ease the tempo
-        //       down" is contradictory and condescending — fixed here.
-        if timing == "right in the pocket" {
-            let pct = (hit_completeness * 100.0).round() as u32;
-            if pct < 50 {
-                // Low coverage — player is hitting phrases, not filling
-                // every subdivision. Name the actual issue.
-                format!("Score {score} — timing center is solid but only {pct}% of beats are filled. Focus on groove density.")
-            } else {
-                format!("Score {score} — right in the pocket. Focus on consistency through the full phrase.")
-            }
-        } else {
-            // Timing IS drifting — a tempo adjustment is appropriate.
-            format!("Score {score} — {timing}. Ease the tempo down a touch and rebuild from a clean bar.")
-        }
-    }
+    phrase.to_string()
 }
 
 fn format_session_summary(accuracy: f64, deviation: f64, streak: u32) -> String {

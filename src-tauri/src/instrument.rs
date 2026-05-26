@@ -85,6 +85,8 @@ impl Instrument {
                 // Drums live or die by the click — raise grid_alignment,
                 // trim interval_consistency (fills break regularity by design).
                 score_weights: ScoreWeights { ic: 0.35, ga: 0.30, hc: 0.25, oe: 0.10 },
+                // Default mode: same as pro (no instrument-specific tuning for drums yet).
+                default_score_weights: ScoreWeights { ic: 0.35, ga: 0.30, hc: 0.25, oe: 0.10 },
                 vocabulary: InstrumentVocabulary::Drums,
                 aubio_onset_method: "hfc",
             },
@@ -103,6 +105,9 @@ impl Instrument {
                 // patterns (riffs, rhythm playing) — structurally wrong for
                 // free-form practice without a score reference.
                 score_weights: ScoreWeights { ic: 0.60, ga: 0.35, hc: 0.00, oe: 0.05 },
+                // Default mode: shift weight toward GA so learners are rewarded
+                // for landing on the beat, not just for spacing evenness.
+                default_score_weights: ScoreWeights { ic: 0.55, ga: 0.40, hc: 0.00, oe: 0.05 },
                 vocabulary: InstrumentVocabulary::Guitar,
                 aubio_onset_method: "complex",
             },
@@ -115,6 +120,8 @@ impl Instrument {
                 activity_silence_beats: 4,
                 // Same guitar-tuned weights as electric (see above).
                 score_weights: ScoreWeights { ic: 0.60, ga: 0.35, hc: 0.00, oe: 0.05 },
+                // Default mode: same shift as electric guitar.
+                default_score_weights: ScoreWeights { ic: 0.55, ga: 0.40, hc: 0.00, oe: 0.05 },
                 vocabulary: InstrumentVocabulary::Guitar,
                 aubio_onset_method: "complex",
             },
@@ -129,6 +136,8 @@ impl Instrument {
                 // (bass lines are intentionally sparse so efficiency is
                 // less diagnostic).
                 score_weights: ScoreWeights { ic: 0.35, ga: 0.25, hc: 0.25, oe: 0.15 },
+                // Default mode: same as pro (no instrument-specific tuning for bass yet).
+                default_score_weights: ScoreWeights { ic: 0.35, ga: 0.25, hc: 0.25, oe: 0.15 },
                 vocabulary: InstrumentVocabulary::Bass,
                 aubio_onset_method: "complex",
             },
@@ -143,6 +152,8 @@ impl Instrument {
                 // missed chord beats count more; trim ga slightly since
                 // rubato phrasing is stylistically common.
                 score_weights: ScoreWeights { ic: 0.38, ga: 0.18, hc: 0.30, oe: 0.14 },
+                // Default mode: same as pro (no instrument-specific tuning for piano yet).
+                default_score_weights: ScoreWeights { ic: 0.38, ga: 0.18, hc: 0.30, oe: 0.14 },
                 vocabulary: InstrumentVocabulary::Piano,
                 aubio_onset_method: "specflux",
             },
@@ -155,6 +166,8 @@ impl Instrument {
                 activity_silence_beats: 5,
                 // Unknown instrument — use the default distribution.
                 score_weights: ScoreWeights::default(),
+                // Default mode: same as pro for unknown instrument.
+                default_score_weights: ScoreWeights::default(),
                 vocabulary: InstrumentVocabulary::Other,
                 aubio_onset_method: "specflux",
             },
@@ -285,6 +298,12 @@ pub struct InstrumentProfile {
     /// Per-segment score component weights. See `ScoreWeights`.
     /// Consumed by `timing::score_segment` to compute the weighted aggregate.
     pub score_weights: ScoreWeights,
+
+    /// Score weights used when coach mode is `Default` (learner mode).
+    /// For guitar instruments, shifts weight from IC toward GA so beginners
+    /// are rewarded more for landing on the beat than for evenness of spacing.
+    /// For all other instruments, mirrors `score_weights` (no change from Pro).
+    pub default_score_weights: ScoreWeights,
 
     /// Coach vocabulary hint. See `InstrumentVocabulary`.
     ///

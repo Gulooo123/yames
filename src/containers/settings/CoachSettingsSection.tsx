@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type {
   BrainTier,
+  CoachMode,
   InstrumentId,
   ModelTier,
   Verbosity,
@@ -48,6 +49,8 @@ export function CoachSettingsSection({
   setCoachVoiceName,
   coachVerbosity,
   setCoachVerbosity,
+  coachMode,
+  setCoachMode,
   modelStatus,
   setModelStatus,
   modelDownloading,
@@ -66,6 +69,8 @@ export function CoachSettingsSection({
   setCoachVoiceName: Dispatch<SetStateAction<string>>;
   coachVerbosity: Verbosity;
   setCoachVerbosity: Dispatch<SetStateAction<Verbosity>>;
+  coachMode: CoachMode;
+  setCoachMode: Dispatch<SetStateAction<CoachMode>>;
   modelStatus: ModelStatus | null;
   setModelStatus: Dispatch<SetStateAction<ModelStatus | null>>;
   modelDownloading: boolean;
@@ -266,6 +271,31 @@ export function CoachSettingsSection({
           >
             Full
           </button>
+        </div>
+      </div>
+      <div className="setting-row">
+        <div className="setting-label">
+          <label>Scoring Mode</label>
+          <span className="setting-hint">How the coach grades your timing</span>
+          <span className="setting-hint" style={{ marginTop: 4 }}>
+            {coachMode === "pro"
+              ? "Every subdivision graded against the beat grid. Designed for players drilling tight accuracy — significantly more demanding."
+              : "Grades on feel and groove — the right mode for most players. Rewards locking into the pulse, not subdivision-by-subdivision precision."}
+          </span>
+        </div>
+        <div className="toggle-group">
+          {(["default", "pro"] as const).map((mode) => (
+            <button
+              key={mode}
+              className={`toggle-btn ${coachMode === mode ? "active" : ""}`}
+              onClick={() => {
+                setCoachMode(mode);
+                storeSave("coachMode", mode);
+              }}
+            >
+              {mode === "default" ? "Default" : "Pro"}
+            </button>
+          ))}
         </div>
       </div>
       <div className="setting-row">

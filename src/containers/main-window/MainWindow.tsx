@@ -86,10 +86,11 @@ import "../../styles/audio-input-test.css";
 export function MainWindow() {
   useDrag();
   const { state, currentBeat } = useMetronome();
-  const evaluation = useEvaluation();
-  const [inputTestOpen, setInputTestOpen] = useState(false);
-  // Practice Coach model + voice state
+  // Practice Coach model + voice state (must come before useEvaluation so
+  // coachMode is available when wiring the startEvaluation IPC call).
   const coach = useCoachDownload();
+  const [inputTestOpen, setInputTestOpen] = useState(false);
+  const evaluation = useEvaluation({ coachMode: coach.coachMode });
   // Active tab + transition rules (stop playback on tab change, persist,
   // restore on mount, scroll-to-top for track/settings) — owned by a
   // dedicated hook. `contentRef` is also returned so the scrollable
@@ -146,6 +147,7 @@ export function MainWindow() {
     presetName: activePreset?.name,
     voiceMode: coach.coachVoiceMode,
     coachVerbosity: coach.coachVerbosity,
+    coachMode: coach.coachMode,
     instrument,
     // Phase 5 — chip "set-bpm" affordances delegate to the canonical
     // BPM IPC. The hook is `setBpm`-agnostic; we pass the IPC fn so
@@ -636,6 +638,8 @@ export function MainWindow() {
             setCoachVoiceName={coach.setCoachVoiceName}
             coachVerbosity={coach.coachVerbosity}
             setCoachVerbosity={coach.setCoachVerbosity}
+            coachMode={coach.coachMode}
+            setCoachMode={coach.setCoachMode}
             modelStatus={coach.modelStatus}
             setModelStatus={coach.setModelStatus}
             modelDownloading={coach.modelDownloading}

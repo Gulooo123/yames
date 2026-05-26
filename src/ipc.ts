@@ -389,10 +389,11 @@ export function onAudioInputDevicesChanged(callback: (devices: AudioInputDevice[
   return listen<AudioInputDevice[]>("audio-input-devices-changed", (e) => callback(e.payload));
 }
 
-export async function startEvaluation(deviceName?: string, inputChannel?: number): Promise<void> {
+export async function startEvaluation(deviceName?: string, inputChannel?: number, coachMode?: "default" | "pro"): Promise<void> {
   return invoke("start_evaluation", {
     deviceName: deviceName ?? null,
     inputChannel: inputChannel ?? null,
+    coachMode: coachMode ?? null,
   });
 }
 
@@ -485,6 +486,19 @@ export function onPracticeSegmentEnded(
 
 export async function getSessionReport(): Promise<SessionReport | null> {
   return invoke<SessionReport | null>("get_session_report");
+}
+
+/**
+ * Session-end report: reads from `all_segments` (never-cleared) so the
+ * score reflects every segment even after `clearSession()` wiped the
+ * per-exercise window mid-session.
+ *
+ * Use this in `endSession()` instead of `getSessionReport()`.
+ * Mid-session mini-reports must continue using `getSessionReport()` so
+ * they show per-exercise (not cumulative) scores.
+ */
+export async function getFinalSessionReport(): Promise<SessionReport | null> {
+  return invoke<SessionReport | null>("get_final_session_report");
 }
 
 export async function clearSession(): Promise<void> {

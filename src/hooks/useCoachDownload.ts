@@ -13,7 +13,7 @@ import {
   ttsVoiceDiagnostics,
 } from "../ipc";
 import type { DownloadProgress, ModelStatus, VoiceDiagnostic } from "../ipc";
-import type { BrainTier, ModelTier, VoiceMode, Verbosity } from "../types";
+import type { BrainTier, CoachMode, ModelTier, VoiceMode, Verbosity } from "../types";
 
 // Legacy persisted values may still carry "chime" from an earlier
 // release; we collapse it to "silent" on load and rewrite the store so
@@ -58,6 +58,9 @@ export function useCoachDownload() {
   // C5 verbosity. "default" honours the gatekeeper's tier verbatim.
   // "more" promotes written-tier events to spoken (see useSession).
   const [coachVerbosity, setCoachVerbosity] = useState<Verbosity>("default");
+  // Scoring mode: "default" is musical-feel focused; "pro" grades against
+  // the full beat grid for players pushing accuracy.
+  const [coachMode, setCoachMode] = useState<CoachMode>("default");
   const [availableVoices, setAvailableVoices] = useState<[string, string][]>(
     [],
   );
@@ -100,6 +103,9 @@ export function useCoachDownload() {
     });
     storeLoad<Verbosity>("coachVerbosity").then((v) => {
       if (v === "default" || v === "more") setCoachVerbosity(v);
+    });
+    storeLoad<CoachMode>("coachMode").then((v) => {
+      if (v === "default" || v === "pro") setCoachMode(v);
     });
     storeLoad<number>("coachTtsVolume").then((v) => {
       if (typeof v === "number" && Number.isFinite(v)) {
@@ -213,6 +219,8 @@ export function useCoachDownload() {
     setCoachVoiceName,
     coachVerbosity,
     setCoachVerbosity,
+    coachMode,
+    setCoachMode,
     availableVoices,
     voiceDiagnostics,
     ttsVolume,

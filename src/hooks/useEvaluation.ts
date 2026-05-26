@@ -46,12 +46,19 @@ export const FEEDBACK_COLORS = {
   skipped: "transparent",
 };
 
-export function useEvaluation() {
+export function useEvaluation(options?: { coachMode?: "default" | "pro" }) {
   const [enabled, setEnabled] = useState(false);
   const [devices, setDevices] = useState<AudioInputDevice[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string | undefined>(undefined);
   /** 0-indexed channel index (0 = default, matches Rust-side). */
   const [selectedChannel, setSelectedChannel] = useState<number>(0);
+
+  // Keep a ref so that all three startEvaluation call sites always send the
+  // current coachMode without needing it in their useCallback dep arrays.
+  const coachModeRef = useRef<"default" | "pro">("default");
+  useEffect(() => {
+    coachModeRef.current = options?.coachMode ?? "default";
+  }, [options?.coachMode]);
   const [spectrum, setSpectrum] = useState<AudioSpectrum | null>(null);
   const [showRealtime, setShowRealtime] = useState(true);
   const unlistenRef = useRef<(() => void) | null>(null);
@@ -204,7 +211,7 @@ export function useEvaluation() {
       setEnabled(false);
     } else {
       await refreshDevices();
-      await startEvaluation(selectedDevice, selectedChannel);
+      await startEvaluation(selectedDevice, selectedChannel, coachModeRef.current);
       setEnabled(true);
     }
   }, [enabled, selectedDevice, selectedChannel, refreshDevices]);
@@ -224,7 +231,7 @@ export function useEvaluation() {
       restartingRef.current = true;
       try {
         await stopEvaluation();
-        await startEvaluation(deviceName, 0);
+        await startEvaluation(deviceName, 0, coachModeRef.current);
       } finally {
         restartingRef.current = false;
       }
@@ -240,7 +247,7 @@ export function useEvaluation() {
       restartingRef.current = true;
       try {
         await stopEvaluation();
-        await startEvaluation(selectedDevice, channel);
+        await startEvaluation(selectedDevice, channel, coachModeRef.current);
       } finally {
         restartingRef.current = false;
       }

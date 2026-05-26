@@ -301,6 +301,23 @@ pub struct ComponentScores {
     pub hit_completeness: f32,
     #[serde(rename = "onsetEfficiency")]
     pub onset_efficiency: f32,
+    /// Mean amplitude of onsets that fell on downbeat positions (beats 1, 3
+    /// of a 4/4 bar at the active subdivision). `None` when fewer than 2
+    /// data points were collected (segment too short, or no hits on those
+    /// positions).
+    #[serde(rename = "downbeatAmpAvg", skip_serializing_if = "Option::is_none", default)]
+    pub downbeat_amp_avg: Option<f32>,
+    /// Mean amplitude of onsets that fell on upbeat positions (beats 2, 4).
+    #[serde(rename = "upbeatAmpAvg", skip_serializing_if = "Option::is_none", default)]
+    pub upbeat_amp_avg: Option<f32>,
+    /// Mean amplitude of onsets that fell on subdivision positions (all
+    /// positions that are neither downbeat nor upbeat).
+    #[serde(rename = "subdivisionAmpAvg", skip_serializing_if = "Option::is_none", default)]
+    pub subdivision_amp_avg: Option<f32>,
+    /// Population standard deviation of all matched onset amplitudes.
+    /// `None` when fewer than 4 matched onsets were recorded.
+    #[serde(rename = "ampStdDev", skip_serializing_if = "Option::is_none", default)]
+    pub amp_std_dev: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

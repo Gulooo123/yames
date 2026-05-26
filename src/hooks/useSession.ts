@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { getSessionReport, stopEvaluation, getSessionHistory, saveSession, clearSession, coachGenerate, loadCoachModel, isCoachLoaded, ttsSpeak, onBeatFeedback, onAdaptiveEval, setAdaptiveDecision, notifySettingsChange, clearCalibrationCacheEntry, onTtsSpeechStarted, onPracticeSegmentEnded } from "../ipc";
+import { getFinalSessionReport, stopEvaluation, getSessionHistory, saveSession, clearSession, coachGenerate, loadCoachModel, isCoachLoaded, ttsSpeak, onBeatFeedback, onAdaptiveEval, setAdaptiveDecision, notifySettingsChange, clearCalibrationCacheEntry, onTtsSpeechStarted, onPracticeSegmentEnded } from "../ipc";
 import type { AdaptiveEvalRequest } from "../ipc";
 import type { BeatFeedback, FeedChip, FeedMessage, SessionReport, SessionSegment } from "../types";
 import type { useEvaluation } from "./useEvaluation";
@@ -88,6 +88,10 @@ interface UseSessionOptions {
    *                promoted to spoken (more talkative coach).
    *  Defaults to "default" if absent. */
   coachVerbosity?: "less" | "default" | "more";
+  /** Scoring mode. "default" focuses on musical feel and steady time;
+   *  "pro" grades against the full beat grid subdivision-by-subdivision.
+   *  Defaults to "default" if absent. */
+  coachMode?: "default" | "pro";
   instrument?: string;
   /** Optional BPM setter so chip affordances can land tempo nudges
    *  (e.g. "Drop to 130 BPM"). When absent, set-bpm affordances are
@@ -124,7 +128,7 @@ interface UseSessionOptions {
   drillCompleted?: boolean;
 }
 
-export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId, presetName, voiceMode = "silent", coachVerbosity = "default", instrument = "electric-guitar", setBpm, inDrillRamp = false, drillStartBpm, drillTargetBpm, drillCompleted = false }: UseSessionOptions) {
+export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId, presetName, voiceMode = "silent", coachVerbosity = "default", coachMode = "default", instrument = "electric-guitar", setBpm, inDrillRamp = false, drillStartBpm, drillTargetBpm, drillCompleted = false }: UseSessionOptions) {
   const instrumentLabel = instrument === "drums" ? "drums/percussion"
     : instrument === "electric-guitar" ? "electric guitar"
     : instrument === "acoustic-guitar" ? "acoustic guitar"
@@ -381,7 +385,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
   // mini-report generation. wasPlayingRef lives inside the hook.
   const { reset: resetSegmentCoach } = useSegmentCoach({
     isPlaying, active, timeSignature, instrumentLabel,
-    coachVerbosity,
+    coachVerbosity, coachMode,
     segmentReportsRef, segmentStartRef, prevSessionBestRef,
     narrativeRef, coachLoadedRef, sessionIdRef, activeRef, playBpmRef,
     beatsInSegmentRef, setMessages, setPlayMode,
@@ -1282,7 +1286,17 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     // Same rescoring rationale as the mini-report path above — see
     // `rescoreReport`. Without this the appendSegmentEnd call below
     // would slip the segment-aware backend score into the narrative.
-    const rawLast = await getSessionReport();
+    //
+    // SCORE_FINAL_1: use getFinalSessionReport() (backed by all_segments,
+    // the never-cleared full-session buffer) instead of getSessionReport()
+    // (backed by self.segments, the per-exercise window). After a
+    // play → idle → end flow, clearSession() wiped self.segments before
+    // this call, making getSessionReport() fall back to the legacy formula
+    // and show 68 instead of 81. all_segments is never cleared mid-session
+    // so it always has every segment regardless of clearSession() calls.
+    // Mini-reports continue using getSessionReport() to show per-exercise
+    // (not cumulative) scores.
+    const rawLast = await getFinalSessionReport();
     const lastReport = rawLast ? rescoreReport(rawLast) : rawLast;
     if (lastReport) {
       coachDebug("endSession.lastReport", {

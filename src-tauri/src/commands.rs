@@ -4,7 +4,7 @@ use crate::engine::MetronomeEngine;
 use crate::instrument::Instrument;
 use crate::midi::{MidiBinding, MidiDeviceInfo, MidiMsgType, SharedMidi};
 use crate::onset::{SharedOnsetDetector, SharedTempoContext};
-use crate::session::{SessionReport, SharedSessionAccumulator};
+use crate::session::{CoachMode, SessionReport, SharedSessionAccumulator};
 use crate::state::{AppState, SharedState};
 use crate::timing::SharedTimingAnalyzer;
 use crate::tts::{SharedTts, SharedTtsActive, SharedTtsDim};
@@ -713,6 +713,7 @@ pub async fn list_audio_input_devices() -> Vec<AudioDevice> {
 pub async fn start_evaluation(
     device_name: Option<String>,
     input_channel: Option<usize>,
+    coach_mode: Option<String>,
     audio_input: State<'_, SharedAudioInput>,
     onset_detector: State<'_, SharedOnsetDetector>,
     timing_analyzer: State<'_, SharedTimingAnalyzer>,
@@ -724,6 +725,10 @@ pub async fn start_evaluation(
     cal_cache: State<'_, crate::calibration_cache::SharedCalibrationCache>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
+    let coach_mode = match coach_mode.as_deref().unwrap_or("default") {
+        "pro" => CoachMode::Pro,
+        _ => CoachMode::Default,
+    };
     // Stop any existing evaluation first (idempotent — prevents deadlock if called twice)
     {
         let listener = midi.lock().unwrap();
@@ -740,6 +745,7 @@ pub async fn start_evaluation(
     {
         let mut acc = session_acc.lock().unwrap();
         acc.clear();
+        acc.coach_mode = coach_mode;
         let (secs, ms) = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| (d.as_secs(), d.as_millis() as u64))
@@ -809,6 +815,7 @@ pub async fn start_evaluation(
         ta_instrument,
         ta_preset_id,
         initial_calibration_offset_ms,
+        coach_mode,
         move |feedback| {
             let _ = app_for_timing.emit("beat-feedback", &feedback);
             // Accumulate for session report
@@ -1147,6 +1154,27 @@ pub async fn get_session_report(session_acc: State<'_, SharedSessionAccumulator>
         Ok(None)
     } else {
         Ok(Some(acc.report()))
+    }
+}
+
+/// Session-end report: uses `all_segments` (never cleared) so the score
+/// reflects every segment from the full session even after `clearSession()`
+/// wiped the per-exercise window buffer mid-session.
+///
+/// Intentionally separate from `get_session_report` — that command uses the
+/// window buffer (`self.segments`) so mid-session mini-reports stay
+/// per-exercise. Merging the two would make exercise-N mini-reports show a
+/// cumulative score instead of exercise-N's individual score.
+#[tauri::command]
+pub async fn get_final_session_report(session_acc: State<'_, SharedSessionAccumulator>) -> Result<Option<SessionReport>, String> {
+    let acc = session_acc.lock().map_err(|e| format!("Lock failed: {e}"))?;
+    // Use all_segments; report_final() returns None-equivalent (legacy
+    // formula) when all_segments is empty, but surface that as Ok(None)
+    // here to keep the JS side consistent with get_session_report.
+    if acc.all_segments().is_empty() && acc.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(acc.report_final()))
     }
 }
 

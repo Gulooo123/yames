@@ -611,7 +611,7 @@ const DRUMS: ScenarioCatalog = {
       "Snare's rushing. Count the in-between 16ths and place beat 2 right on the click.",
       "You're driving the click. Slow the right hand; the foot will follow.",
       "Hi-hat's pushing ahead. Relax the right hand and let the click set the pace.",
-      "Snare's racing. Sit deeper in the throne and let it breathe.",
+      "Snare's racing. Ease into the groove and let it breathe.",
       "Drop a few BPM. Get the kick-snare to sit ON the click before bringing it back up.",
       "Sticks are leading. Hold them back — let the metronome arrive first.",
       "Pause the kit. Tap the click with just the foot for a bar, then bring the hands.",
@@ -624,7 +624,7 @@ const DRUMS: ScenarioCatalog = {
       "Push the hi-hat ahead; the kick should sit ON the click, not after.",
       "Stick attack's heavy. Lift earlier — meet the click on top.",
       "Backbeat's late. Push beats 2 and 4 forward.",
-      "Hi-hat's behind. Lift the wrist sooner and play with more bounce.",
+      "Hi-hat's behind. Come in earlier and play with more bounce.",
       "Drop the tempo and play with more lift. The drag clears when it feels easy.",
       "Sticks landing late. Imagine the click is a hair earlier than it is.",
     ],
@@ -843,7 +843,7 @@ const ELECTRIC_GUITAR: ScenarioCatalog = {
   rushing_trend: {
     correction: [
       "Down-picks are leading — land the up-picks right on the click.",
-      "Picking hand's rushing. Plant the wrist; let the metronome lead the down-stroke.",
+      "Picking hand's rushing. Let the metronome lead each down-stroke.",
       "Count the in-between eighths and feel the gap between each click.",
       "Pull the tempo back five BPM and let the click pull each note out of you.",
       "Pause one bar. Hear the click, then come in right on beat 1.",
@@ -854,14 +854,14 @@ const ELECTRIC_GUITAR: ScenarioCatalog = {
   },
   dragging_trend: {
     correction: [
-      "Up-picks are lagging — lift the wrist; meet the click on the down.",
+      "Up-picks are lagging — meet the click on the down.",
       "Picking hand's dragging. Play with the click, don't wait for it.",
-      "Push from the forearm, not the fingers — let the pick lead.",
+      "Let the pick lead — meet each note rather than reaching for it.",
       "Each note's landing late. Aim for the front edge of every click.",
       "Drop the tempo a bit and play with more lift. The drag clears when it feels easy.",
       "Imagine the click is a hair earlier than it is, and meet that.",
       "Stop, take a breath, then come in pushing slightly forward.",
-      "Open up the wrist. The pick's getting stuck in the strings.",
+      "The pick's catching — ease the pressure and let it flow.",
     ],
   },
   personal_best_streak: {
@@ -971,9 +971,9 @@ const ELECTRIC_GUITAR: ScenarioCatalog = {
   },
   bias_only: {
     neutral: [
-      "Your picking is {biasMs}ms {direction} the click consistently. Nudge your attack {correctionDirection} — it's a technique lean, not chaos.",
-      "Every hit lands {biasMs}ms {direction}. That's a consistent lean — adjust your attack angle {correctionDirection}.",
-      "Tight scatter, {biasMs}ms {direction}. Shift your pick attack {correctionDirection} to land on the click.",
+      "Your notes are consistently {biasMs}ms {direction} the click. Shift the whole phrase {correctionDirection} — it's a timing lean, not chaos.",
+      "Every hit lands {biasMs}ms {direction}. That's a consistent lean — shift your timing {correctionDirection} to center it.",
+      "Tight scatter, {biasMs}ms {direction}. Shift your timing {correctionDirection} to land on the click.",
     ],
   },
   pace_coaching: {
@@ -1147,7 +1147,7 @@ const BASS: ScenarioCatalog = {
       "Plucking fingers tightening up? Quick stretch — back in.",
       "Forearm starting to lock? Bass down for 60 seconds.",
       "Tension building in the right hand? Brief break, then come back in.",
-      "Fretting hand getting heavy? Loosen the grip and continue.",
+      "Fretting hand getting heavy? Take a moment, then continue.",
       "Right hand feels tight? Shake it out, then resume.",
       "Shoulder lifting? Drop it, breathe, then continue.",
       "Forearm working too hard. Quick rest.",
@@ -1299,7 +1299,7 @@ const ACOUSTIC_GUITAR: ScenarioCatalog = {
   },
   accuracy_drop: {
     correction: [
-      "Strumming hand is losing the grid. Plant the thumb against the strings.",
+      "Strumming hand is losing the grid. Lock to the downbeat first.",
       "Hits are scattering. Soften the strum and accent the downbeat.",
       "Just down-strums on open strings to the click, then come back in.",
       "Stop, play a single chord on every click for a bar, then add the pattern.",
@@ -1312,7 +1312,7 @@ const ACOUSTIC_GUITAR: ScenarioCatalog = {
   rushing_trend: {
     correction: [
       "Strumming arm is leading — land the down-strum right on the click.",
-      "Strumming hand's rushing. Slow the wrist; let the click drive the strum.",
+      "Strumming hand's rushing. Let the click drive the strum.",
       "Count the in-betweens — feel the gap between each click.",
       "Pull the tempo back five BPM and let the click pull each strum out of you.",
       "Pause one bar. Hear the click, then come in on beat 1.",
@@ -1323,14 +1323,14 @@ const ACOUSTIC_GUITAR: ScenarioCatalog = {
   },
   dragging_trend: {
     correction: [
-      "Strum is lagging — lift the wrist earlier; meet the click on the down.",
+      "Strum is lagging — meet the click on the down.",
       "Strumming hand's dragging. Play with the click; don't wait for it.",
-      "Drive from the elbow, not just the wrist.",
+      "Give the strum more momentum and meet the click on the down.",
       "Each strum's landing late. Aim for the front edge of every click.",
       "Drop the tempo and play with more lift. The drag will clear when it feels easy.",
       "Imagine the click is a hair earlier than it is, and meet that.",
       "Stop, take a breath, then come in pushing slightly forward.",
-      "Open up the wrist. The strum's getting stuck.",
+      "The strum's getting caught — ease off and let it flow.",
     ],
   },
   personal_best_streak: {
@@ -1440,7 +1440,7 @@ const ACOUSTIC_GUITAR: ScenarioCatalog = {
   },
   bias_only: {
     neutral: [
-      "Pick is landing {biasMs}ms {direction} consistently. Not chaos — adjust your attack {correctionDirection}.",
+      "Pick is landing {biasMs}ms {direction} consistently. Not chaos — shift your timing {correctionDirection} to center it.",
       "Consistent lean: {biasMs}ms {direction}. Shift the whole phrase {correctionDirection} and you'll be centered.",
     ],
   },
@@ -1559,12 +1559,12 @@ const PIANO: ScenarioCatalog = {
     correction: [
       "Left hand is lagging — lead with the bass, not the melody.",
       "Dragging — lead the downbeat with the left hand; don't wait for the click.",
-      "Lift the wrists earlier — meet the click on the front of each note.",
+      "Lead with the attack — meet the click on the front of each note.",
       "Each note's landing late. Aim for the front edge of every click.",
       "Drop the tempo and play with more lift. The drag clears when it feels easy.",
       "Imagine the click is a hair earlier than it is, and meet that.",
       "Stop, take a breath, then come in pushing slightly forward.",
-      "Open up the wrists. The fingers are getting heavy on the keys.",
+      "The fingers are getting heavy. Lighten your touch and let them float.",
     ],
   },
   personal_best_streak: {
@@ -1751,4 +1751,308 @@ export const TEMPLATE_CATALOG: TemplateCatalog = {
   "acoustic-guitar": ACOUSTIC_GUITAR,
   bass: BASS,
   piano: PIANO,
+};
+
+// ---------------------------------------------------------------------------
+// Default-mode overlay catalog
+//
+// Variants here are checked FIRST when the caller passes this catalog as the
+// `modeCatalog` argument to `pickTemplate`. They override (or introduce) the
+// phrasing for scenarios that are specific to the "default" (musical-feel)
+// scoring mode. The main TEMPLATE_CATALOG remains the fallback for any
+// scenario / severity not covered here.
+//
+// All entries use the `generic` vocabulary and `neutral` severity so they
+// apply regardless of instrument and tone.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_MODE_GENERIC: ScenarioCatalog = {
+  muddy_hits: {
+    neutral: [
+      "You're hitting the beats but the signal is coming in soft — try playing with a firmer touch.",
+      "The rhythm is there but your attack is light — dig in a bit more.",
+      "Beats are landing but with a soft touch — try a stronger stroke.",
+      "Good rhythm, but the signal is a little soft — put more into each note.",
+      "You're connecting with the beats, but try adding more weight to each stroke.",
+    ],
+  },
+  ic_both_locked: {
+    neutral: [
+      "Your timing is locked in — spacing and placement are both solid.",
+      "Nice and tight — your notes are landing in the right spots and they're evenly spaced.",
+      "Really consistent — your beat placement and note spacing are both dialled in.",
+      "Great feel — evenly spaced notes hitting right on the pulse.",
+      "Your timing is right in the pocket — spacing and placement are both there.",
+    ],
+  },
+  ic_placement_drift: {
+    neutral: [
+      "Your notes are evenly spaced but drifting off the click — try anchoring to the pulse more.",
+      "Good even spacing but you're a little off the beat — try locking to the pulse.",
+      "The gaps between your notes are consistent but they're not quite on the beat — anchor to the click.",
+      "Even note spacing but the placement is wandering — focus on landing each note on the beat.",
+      "Your internal timing is consistent but the notes are drifting off the pulse — anchor to the click.",
+    ],
+  },
+  ic_spacing_drift: {
+    neutral: [
+      "You're landing close to each beat but the spaces between notes are uneven — focus on making those gaps more equal.",
+      "Good beat placement but uneven note spacing — try keeping the gaps between notes equal.",
+      "You're close to the beat but the spacing between notes varies — focus on even gaps.",
+      "Your note positions are close but the spacing is a bit scattered — even out the gaps.",
+      "Landing near the beat positions but the note spacing is inconsistent — work on keeping the spaces equal.",
+    ],
+  },
+  great: {
+    neutral: [
+      "Really locked in — your timing is right there.",
+      "Solid feel, keep riding that groove.",
+      "Your timing is sitting right where it should be.",
+      "Clean rhythm — that's the pocket.",
+      "Locked in tight — great work.",
+      "That's a great feel — tempo is solid throughout.",
+    ],
+  },
+  good_steady: {
+    neutral: [
+      "Nice and steady — good consistent tempo.",
+      "Keeping it together — solid timing through the segment.",
+      "Tempo is holding well.",
+      "Good rhythm feel — consistent pulse.",
+      "Steady timing — you're building a solid foundation.",
+    ],
+  },
+  rushing: {
+    neutral: [
+      "You're leaning into the beat a little — try letting it come to you.",
+      "Arriving a touch early — sit back and let the pulse breathe.",
+      "The tempo is pushing forward — ease off the attack slightly.",
+      "You're ahead of the beat — try staying back with it.",
+      "A bit of a rush happening — slow your attack, not your tempo.",
+    ],
+  },
+  dragging: {
+    neutral: [
+      "Settling a bit behind the beat — try staying a little more forward.",
+      "The tempo is dragging back — keep your attack crisp.",
+      "You're lagging slightly — push the attack forward.",
+      "Behind the beat — try keeping the energy moving forward.",
+      "A bit of drag happening — sharpen the attack.",
+    ],
+  },
+  oscillating: {
+    neutral: [
+      "The tempo is moving around — speeding up and slowing down.",
+      "Note spacing is uneven — try keeping the gaps between notes equal.",
+      "The pulse is wandering a bit — focus on steady spacing between notes.",
+      "Rushing then dragging — try locking into one steady feel.",
+      "Tempo consistency needs work — focus on equal note spacing.",
+    ],
+  },
+  low_score_solid_timing: {
+    neutral: [
+      "Your timing center is good — focus on hitting more of the beats.",
+      "Timing is in the right place, but you're missing some positions — fill those gaps.",
+      "Good timing feel, but the rhythm needs more coverage — play more of the beats.",
+      "The pulse is there but the rhythm is thin — try hitting more positions.",
+      "Your timing is centered well — now work on density.",
+    ],
+  },
+  low_coverage: {
+    neutral: [
+      "I'm only hearing some of your playing — check your input level or play a touch louder.",
+      "Signal is coming in low — try playing with a bit more attack.",
+      "Low detection rate — you may need to turn up your input gain.",
+      "Only picking up part of your playing — check the input level in settings.",
+      "Weak signal coming in — play louder or check your input gain.",
+    ],
+  },
+  noodling: {
+    neutral: [
+      "Good free feel — let the ideas flow.",
+      "Nice exploration — when you're ready, bring it back to the pulse.",
+      "Creative space — use it well.",
+      "Good free play — follow the feel.",
+      "Let it breathe — come back to the grid when you're ready.",
+    ],
+  },
+  flat_dynamics: {
+    neutral: [
+      "Your playing is very even dynamically — try letting the downbeats breathe a little.",
+      "Every note is about the same volume — experiment with accenting the main beats.",
+      "Nice consistency, but try adding some dynamic shape — hit the downbeats a touch harder.",
+    ],
+  },
+  weak_downbeats: {
+    neutral: [
+      "Try hitting beats 1 and 3 a touch harder — your downbeats are blending in.",
+      "Your upbeats are a little strong — ease off them and push the downbeats.",
+      "The main beats need more weight — let beats 1 and 3 lead.",
+    ],
+  },
+  good_accents: {
+    neutral: [
+      "Nice dynamic shape — your downbeats have good weight.",
+      "Great accent on the main beats — the groove has a clear pulse.",
+      "Your downbeats are coming through clearly — nice feel.",
+    ],
+  },
+  subdivisions_too_loud: {
+    neutral: [
+      "The fills are a bit heavy — let the in-between notes sit lighter.",
+      "Try making the subdivision fills softer — let the main beats carry the weight.",
+      "The fill notes are competing with your downbeats — ease off between the beats.",
+    ],
+  },
+};
+
+export const DEFAULT_MODE_CATALOG: TemplateCatalog = {
+  generic: DEFAULT_MODE_GENERIC,
+};
+
+// ---------------------------------------------------------------------------
+// Pro mode catalog — mode-aware overrides for PRO_MODE
+// ---------------------------------------------------------------------------
+
+const PRO_MODE_GENERIC: ScenarioCatalog = {
+  muddy_hits: {
+    neutral: [
+      "Your beats are landing but the signal confidence is low — try a firmer attack on each note.",
+      "The detector sees your hits but with low confidence — your transients may be too soft.",
+      "Beats are registering but the signal is weak — sharpen the attack to get a cleaner transient.",
+      "Low signal confidence on your hits — dig in more to improve the attack strength.",
+      "Your attack is too soft for reliable detection — play with more conviction.",
+    ],
+  },
+  ic_both_locked: {
+    neutral: [
+      "Note spacing is consistent and beat placement is solid — tight all-round timing.",
+      "Both note spacing and beat placement are on point — clean timing overall.",
+      "Even note spacing and accurate beat placement — this is what locked-in feels like.",
+      "Spacing and placement are both dialled in — timing is solid.",
+      "Consistent spacing and clean beat placement — nothing to fix here.",
+    ],
+  },
+  ic_placement_drift: {
+    neutral: [
+      "Note spacing is even but beat placement is drifting — your internal clock is consistent but not synced to the pulse.",
+      "Consistent note spacing but the beats are landing off-center — your internal rhythm is good, just anchor it to the grid.",
+      "Even spacing between notes but the placement is wandering off the beat — sync to the pulse.",
+      "Your note spacing is reliable but the beat positions are drifting — the internal clock is there, just align it to the click.",
+      "Spacing consistency is good but beat placement is off — focus on landing each note on the pulse.",
+    ],
+  },
+  ic_spacing_drift: {
+    neutral: [
+      "Beat placement is on target but subdivision spacing is inconsistent — anchor points are right, the fills between them are scattered.",
+      "Good beat placement but the gaps between notes vary — your positions are correct, the spacing is not.",
+      "You're close to the beat positions but note spacing is uneven — the placement is there, even out the gaps.",
+      "Accurate beat placement, inconsistent note spacing — the anchor points are correct, work on even gaps.",
+      "Beat positions are solid but subdivision spacing is irregular — the placement is there, now even out the fills.",
+    ],
+  },
+  great: {
+    neutral: [
+      "Tight beat placement and even note spacing — clean all-round timing.",
+      "Beat placement solid, spacing consistent — push the tempo when you're ready.",
+      "All timing components clean — good session.",
+      "Note spacing and placement both dialled in.",
+      "Timing is locked — consider bumping the tempo or tightening the subdivisions.",
+    ],
+  },
+  good_steady: {
+    neutral: [
+      "Consistent spacing and placement — solid foundation. Push tempo 5 BPM or sharpen the attack.",
+      "Good timing consistency — a few positions drift but the center holds.",
+      "Placement and spacing reliable — room to push harder.",
+      "Timing center is on, spacing is consistent — push the tempo to challenge it.",
+      "Solid timing foundation — focus on sharpening the attack on weaker beats.",
+    ],
+  },
+  rushing: {
+    neutral: [
+      "Consistently arriving early — directional early bias in the attack timing.",
+      "Note attacks are arriving before the beat — ease the onset forward slightly.",
+      "Early attack pattern — your notes are preceding the beat consistently.",
+      "Consistent early bias — the attack is rushing the pulse.",
+      "Timing is shifted early — let the beat land first, then hit.",
+    ],
+  },
+  dragging: {
+    neutral: [
+      "Consistently arriving late — directional late bias in the attack timing.",
+      "Note attacks are landing after the beat — sharpen the attack slightly.",
+      "Late attack pattern — notes are trailing the beat consistently.",
+      "Consistent late bias — the attack is dragging the pulse.",
+      "Timing is shifted late — push the attack to meet the beat.",
+    ],
+  },
+  oscillating: {
+    neutral: [
+      "High timing variance despite a near-neutral average — the timing is genuinely unstable.",
+      "Not a directional bias — the timing is alternating early and late.",
+      "Tempo instability: note spacing is inconsistent across the segment.",
+      "Rushing-dragging pattern — not a fixed offset, true variance in the timing.",
+      "Timing variance is high — focus on keeping note spacing consistent.",
+    ],
+  },
+  low_score_solid_timing: {
+    neutral: [
+      "Timing center and spacing are clean but beat coverage is low.",
+      "Good placement accuracy but too many beat positions are empty.",
+      "Note spacing is consistent but density is low — hit more of the grid positions.",
+      "Timing fundamentals are solid, coverage is the gap — fill out more positions.",
+      "Placement is accurate — focus on hitting more of the beat positions.",
+    ],
+  },
+  low_coverage: {
+    neutral: [
+      "Only a fraction of beat positions had a detected hit — signal may be too quiet.",
+      "Detection rate is low — check your input gain or play louder.",
+      "Most beat positions are empty — check the input level, this isn't a playing-quality issue.",
+      "Low hit detection — increase input gain or attack strength.",
+      "Signal is too quiet for reliable detection — play louder or adjust your input level.",
+    ],
+  },
+  noodling: {
+    neutral: [
+      "Free-play mode — beat placement isn't being graded here.",
+      "Exploring freely — use it to warm up, then rein it back to the grid.",
+      "No scoring in free play — this is your creative space.",
+      "Free-form mode active — grading resumes when you lock back to the pulse.",
+      "Ungraded free play — let it flow, come back to the grid when ready.",
+    ],
+  },
+  flat_dynamics: {
+    neutral: [
+      "Low amplitude variation across beat positions — try varying your pick attack.",
+      "Minimal dynamic shaping across the bar — increase accent differential on the downbeats.",
+      "Amplitude is consistent across positions — build in a dynamic hierarchy: downbeats strongest, upbeats lighter.",
+    ],
+  },
+  weak_downbeats: {
+    neutral: [
+      "Anti-accent pattern detected — downbeats are quieter than upbeats.",
+      "Your upbeats are dominating — increase pick attack on beats 1 and 3.",
+      "Downbeat amplitude is below upbeat amplitude — reverse the dynamic hierarchy.",
+    ],
+  },
+  good_accents: {
+    neutral: [
+      "Healthy accent differential — downbeats are clearly stronger than upbeats.",
+      "Good dynamic shaping — downbeat amplitude is well above upbeat amplitude.",
+      "Strong accent structure — downbeats leading the dynamic hierarchy.",
+    ],
+  },
+  subdivisions_too_loud: {
+    neutral: [
+      "Subdivision amplitude is close to downbeat amplitude — fills are overwhelming the accent structure.",
+      "The fills are as loud as the main beats — reduce attack on the subdivision notes.",
+      "No dynamic hierarchy between beats and fills — downbeats should lead, subdivisions should follow.",
+    ],
+  },
+};
+
+export const PRO_MODE_CATALOG: TemplateCatalog = {
+  generic: PRO_MODE_GENERIC,
 };

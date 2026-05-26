@@ -119,6 +119,11 @@ export function createShuffleState(): ShuffleState {
  * entry for this slot. Returns `null` if there are no templates
  * available even after fallback.
  *
+ * If `modeCatalog` is provided it is checked first — before both
+ * the main catalog and the generic fallback. This lets callers
+ * overlay mode-specific phrasing (e.g. "default" vs "pro") without
+ * polluting the shared catalog or the test iteration over it.
+ *
  * Mutates `state` to track shuffle-bag draws and the similarity
  * ring. Returns the filled (placeholder-substituted) text.
  *
@@ -135,9 +140,14 @@ export function pickTemplate(
     context?: Record<string, string | number | boolean>;
     rng?: () => number;
   },
+  modeCatalog?: TemplateCatalog,
 ): string | null {
   const rng = args.rng ?? Math.random;
-  const variants = resolveVariants(catalog, args.vocab, args.scenario, args.severity);
+  const variants =
+    (modeCatalog
+      ? resolveVariants(modeCatalog, args.vocab, args.scenario, args.severity)
+      : null) ??
+    resolveVariants(catalog, args.vocab, args.scenario, args.severity);
   if (!variants || variants.length === 0) return null;
 
   const key = slotKey(args.vocab, args.scenario, args.severity);

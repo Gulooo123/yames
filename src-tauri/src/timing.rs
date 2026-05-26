@@ -5,6 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::instrument::{Instrument, InstrumentProfile, ScoreWeights};
+use crate::session::CoachMode;
 use crate::models::PlayMode;
 use crate::onset::Onset;
 use crate::session_log::{
@@ -185,6 +186,13 @@ pub const SIGNAL_B_MIN_PLAY_MS: u64 = 30_000;
 /// D4 Signal-B trigger: minimum silence since the last onset before
 /// we treat an "Active" stretch as ended.
 pub const SIGNAL_B_MIN_SILENCE_MS: u64 = 4_000;
+/// D4 Active→Resting debounce: wall-clock silence must exceed this
+/// duration before the state machine commits to Resting. Prevents
+/// guitar pick decay and natural intra-phrase gaps (200–400ms) from
+/// creating spurious Resting transitions mid-phrase. 500ms ≈ 2.7
+/// 16th notes at 80 BPM — long enough to skip decay, short enough
+/// to catch genuine pauses between exercises.
+const RESTING_DEBOUNCE_MS: u64 = 500;
 /// D4 Signal-B — beat-gap threshold for detecting a metronome pause.
 /// If consecutive beat `ts_ns` values differ by more than this, the
 /// metronome was stopped and restarted between them. The silence
@@ -334,6 +342,7 @@ impl TimingAnalyzer {
         instrument_id: String,
         preset_id: Option<String>,
         initial_calibration_offset_ms: Option<f64>,
+        coach_mode: CoachMode,
         on_feedback: F,
         on_segment_end: G,
         on_calibration_converged: H,
@@ -371,6 +380,7 @@ impl TimingAnalyzer {
                 instrument_id,
                 preset_id,
                 initial_calibration_offset_ms,
+                coach_mode,
                 on_feedback,
                 on_segment_end,
                 on_calibration_converged,
@@ -406,6 +416,7 @@ impl TimingAnalyzer {
         instrument_id: String,
         preset_id: Option<String>,
         initial_calibration_offset_ms: Option<f64>,
+        coach_mode: CoachMode,
         on_feedback: F,
         on_segment_end: G,
         on_calibration_converged: H,
@@ -1115,6 +1126,11 @@ impl TimingAnalyzer {
                             grid_alignment_numerator: 0.0,
                             grid_alignment_denominator: 0.0,
                             matched_confidence_sum: 0.0,
+                            coach_mode,
+                            time_sig: 4,
+                            subdivision: beat.subdivision_total,
+                            accent_buckets: std::collections::HashMap::new(),
+                            matched_amplitudes: Vec::new(),
                         });
                         // Anchor the first quarter-note boundary to this onset so the
                         // cap window starts from real play, not Unix epoch zero.
@@ -1192,6 +1208,20 @@ impl TimingAnalyzer {
                             }
                         }
                         seg.amplitudes.push(onset.amplitude);
+                        // Accent-bucket population. Gate on non-miss so only
+                        // genuine hits contribute to bar-position averages.
+                        if classification != "miss" {
+                            let bar_len = seg.time_sig as u32 * seg.subdivision as u32;
+                            if bar_len > 0 {
+                                let bar_pos = (beat.beat_index as u32 % seg.time_sig as u32)
+                                    * seg.subdivision as u32
+                                    + beat.subdivision_index as u32;
+                                let entry = seg.accent_buckets.entry(bar_pos).or_insert((0.0, 0));
+                                entry.0 += onset.amplitude;
+                                entry.1 += 1;
+                            }
+                            seg.matched_amplitudes.push(onset.amplitude);
+                        }
                     }
 
                     on_feedback(BeatFeedback {
@@ -1259,22 +1289,37 @@ impl TimingAnalyzer {
                                 }
                                 "skipped"
                             } else if consecutive_misses >= silence_to_rest {
-                                activity = Activity::Resting;
-                                // Burst-practice IC fix: clear the interval baseline
-                                // at rest entry so the first onset after a burst gap
-                                // doesn't compute a huge cross-gap interval error.
-                                prev_onset_ns = None;
-                                // D4c — log transition for diagnostics.
-                                {
-                                    let mut tel = telemetry.lock().unwrap();
-                                    tel.push_activity_transition(ActivityTransition {
-                                        timestamp_ms: ts_ns_to_wall_ms(
-                                            beat.ts_ns,
-                                            beat_base_wall_ms,
-                                            beat_base_ns,
-                                        ),
-                                        transition: "active→resting".to_string(),
-                                    });
+                                // Debounce: only commit to Resting once the wall-clock
+                                // silence since the last matched onset has exceeded
+                                // RESTING_DEBOUNCE_MS. This filters out guitar pick
+                                // decay and intra-phrase note gaps (200–400ms) that
+                                // would otherwise generate spurious active→resting
+                                // transitions every ~2s in a continuous playing session.
+                                let beat_wall_ms = ts_ns_to_wall_ms(
+                                    beat.ts_ns,
+                                    beat_base_wall_ms,
+                                    beat_base_ns,
+                                );
+                                let silence_ms = segment
+                                    .as_ref()
+                                    .map(|seg| {
+                                        beat_wall_ms.saturating_sub(seg.last_onset_wall_ms)
+                                    })
+                                    .unwrap_or(u64::MAX);
+                                if silence_ms >= RESTING_DEBOUNCE_MS {
+                                    activity = Activity::Resting;
+                                    // Burst-practice IC fix: clear the interval baseline
+                                    // at rest entry so the first onset after a burst gap
+                                    // doesn't compute a huge cross-gap interval error.
+                                    prev_onset_ns = None;
+                                    // D4c — log transition for diagnostics.
+                                    {
+                                        let mut tel = telemetry.lock().unwrap();
+                                        tel.push_activity_transition(ActivityTransition {
+                                            timestamp_ms: beat_wall_ms,
+                                            transition: "active→resting".to_string(),
+                                        });
+                                    }
                                 }
                                 "skipped"
                             } else {
@@ -1314,12 +1359,13 @@ impl TimingAnalyzer {
                             seg.miss = seg.miss.saturating_add(1);
                             seg.beat_count = seg.beat_count.saturating_add(1);
                             seg.deviations.push(0.0);
-                            // D3c — misses contribute 0 × confidence
-                            // to grid_alignment. We assume confidence
-                            // 1.0 for misses (we're certain no onset
-                            // arrived inside the window).
-                            seg.grid_alignment_numerator += 0.0;
-                            seg.grid_alignment_denominator += 1.0;
+                            // D3c — misses do NOT contribute to grid_alignment.
+                            // GA measures the precision of notes the player
+                            // actually plays. HC already captures coverage
+                            // (how many expected positions were filled), so
+                            // including misses in the GA denominator silently
+                            // double-penalises phrase-playing instruments
+                            // (especially guitar where HC weight = 0).
                             // Active-state miss: counts toward HC denominator
                             // (player attempted but missed — not a rest).
                             seg.active_expected_beats =
@@ -1361,8 +1407,12 @@ impl TimingAnalyzer {
                             if silence_ms >= SIGNAL_B_MIN_SILENCE_MS
                                 && play_ms >= SIGNAL_B_MIN_PLAY_MS
                             {
-                                let seg_weights =
-                                    Instrument::from_id(&instrument_id).profile().score_weights;
+                                let instr_profile = Instrument::from_id(&instrument_id).profile();
+                                let seg_weights = if seg.coach_mode == CoachMode::Default {
+                                    instr_profile.default_score_weights
+                                } else {
+                                    instr_profile.score_weights
+                                };
                                 let (score, components) = score_segment(seg, &seg_weights);
                                 // D3b — onset_efficiency = matched / total.
                                 // Floor the denominator at 1 to avoid
@@ -1491,8 +1541,12 @@ impl TimingAnalyzer {
                                 // don't surface a "drifted" report
                                 // for a 5-second warmup blip.
                                 if play_ms >= SIGNAL_B_MIN_PLAY_MS {
-                                    let seg_weights =
-                                        Instrument::from_id(&instrument_id).profile().score_weights;
+                                    let instr_profile = Instrument::from_id(&instrument_id).profile();
+                                    let seg_weights = if seg.coach_mode == CoachMode::Default {
+                                        instr_profile.default_score_weights
+                                    } else {
+                                        instr_profile.score_weights
+                                    };
                                     let (score, components) = score_segment(seg, &seg_weights);
                                     let onset_efficiency = if seg.total_onsets > 0 {
                                         (seg.onset_count as f32 / seg.total_onsets as f32)
@@ -1607,8 +1661,12 @@ impl TimingAnalyzer {
         if let Some(seg) = segment.take() {
             let play_ms = seg.last_onset_wall_ms.saturating_sub(seg.start_wall_ms);
             if play_ms >= SIGNAL_B_MIN_PLAY_MS {
-                let seg_weights =
-                    Instrument::from_id(&instrument_id).profile().score_weights;
+                let instr_profile = Instrument::from_id(&instrument_id).profile();
+                let seg_weights = if seg.coach_mode == CoachMode::Default {
+                    instr_profile.default_score_weights
+                } else {
+                    instr_profile.score_weights
+                };
                 let (score, components) = score_segment(&seg, &seg_weights);
                 let onset_efficiency = if seg.total_onsets > 0 {
                     (seg.onset_count as f32 / seg.total_onsets as f32)
@@ -2121,6 +2179,10 @@ fn std_dev_f32(xs: &[f32]) -> f32 {
 ///   delta = +9.2 to +9.7 pts; no session exceeded 90 with k=0.5.
 ///   All cargo tests passed unchanged with the new value.
 const IC_K_FACTOR: f64 = 0.5;
+/// Wider IC Gaussian tolerance for Default (learner) mode.
+/// 0.8 → at 120 BPM (window=80ms): k=64ms, σ=64ms → IC≈0.61.
+/// Compared to Pro mode k=40ms, this grants ~60% more timing slack.
+const IC_K_FACTOR_DEFAULT: f64 = 0.8;
 
 /// D3c — distill a segment's accumulators into an overall 0–100 score
 /// plus the four-component breakdown from the plan.
@@ -2158,7 +2220,12 @@ fn score_segment(seg: &SegmentState, weights: &ScoreWeights) -> (f32, ComponentS
         500.0
     };
     let window_ms = tempo_aware_window_ms(interval_ms);
-    let k = (window_ms * IC_K_FACTOR).max(1.0);
+    let k_factor = if seg.coach_mode == CoachMode::Default {
+        IC_K_FACTOR_DEFAULT
+    } else {
+        IC_K_FACTOR
+    };
+    let k = (window_ms * k_factor).max(1.0);
 
     // Per-burst IC — compute consistency within each gap-separated phrase,
     // then aggregate length-weighted. Cross-burst tempo drift inflates pooled
@@ -2216,9 +2283,10 @@ fn score_segment(seg: &SegmentState, weights: &ScoreWeights) -> (f32, ComponentS
     // ── grid_alignment ──────────────────────────────────────────────
     //
     // Confidence-weighted average of per-beat classification scores:
-    // perfect=100, good=80, ok=50, miss=0. Misses use confidence 1.0
-    // (we're certain the miss happened) so they pull the average
-    // down. Skipped beats are not in the accumulator at all.
+    // perfect=100, good=80, ok=50. Misses are excluded from both
+    // numerator and denominator — GA measures precision of notes
+    // played, not coverage (HC handles that). Skipped beats (no-activity)
+    // are also not in the accumulator. If no hits at all, GA = 0.0.
     let grid_alignment = if seg.grid_alignment_denominator > 0.0 {
         ((seg.grid_alignment_numerator / seg.grid_alignment_denominator) / 100.0)
             .clamp(0.0, 1.0) as f32
@@ -2333,11 +2401,72 @@ fn score_segment(seg: &SegmentState, weights: &ScoreWeights) -> (f32, ComponentS
         + onset_efficiency * weights.oe)
         * 100.0;
 
+    // ── Accent analysis ──────────────────────────────────────────────
+    //
+    // Derive per-position amplitude averages from the accent_buckets
+    // collected during the segment. Positions are defined as absolute
+    // subdivision slots within one bar (0 .. time_sig * subdivision - 1).
+    // We require ≥ 2 samples per group before reporting a meaningful avg;
+    // all four fields are Option<f32> so an empty or very short segment
+    // simply propagates None without panicking.
+    let time_sig = seg.time_sig as u32;
+    let subdiv = seg.subdivision as u32;
+
+    let avg_for_positions = |positions: &[u32]| -> Option<f32> {
+        let (sum, n) = positions
+            .iter()
+            .filter_map(|&p| seg.accent_buckets.get(&p))
+            .fold((0.0f32, 0u32), |(s, c), &(amp, cnt)| (s + amp, c + cnt));
+        if n >= 2 {
+            Some(sum / n as f32)
+        } else {
+            None
+        }
+    };
+
+    // Downbeats: positions 0 and (2 × subdiv) — beats 1 and 3 of a 4/4 bar.
+    let downbeat_positions: Vec<u32> = vec![0, 2 * subdiv];
+    // Upbeats: positions subdiv and (3 × subdiv) — beats 2 and 4.
+    let upbeat_positions: Vec<u32> = vec![subdiv, 3 * subdiv];
+    let downbeat_amp_avg = avg_for_positions(&downbeat_positions);
+    let upbeat_amp_avg = avg_for_positions(&upbeat_positions);
+
+    // Subdivision positions: everything inside the bar that is NOT a
+    // downbeat or upbeat quarter-note position.
+    let non_subdiv: std::collections::HashSet<u32> = downbeat_positions
+        .iter()
+        .chain(upbeat_positions.iter())
+        .copied()
+        .collect();
+    let subdiv_positions: Vec<u32> = (0..(time_sig * subdiv))
+        .filter(|p| !non_subdiv.contains(p))
+        .collect();
+    let subdivision_amp_avg = avg_for_positions(&subdiv_positions);
+
+    // Population std-dev over all matched (non-miss) amplitudes.
+    let amp_std_dev = if seg.matched_amplitudes.len() >= 4 {
+        let n = seg.matched_amplitudes.len() as f32;
+        let mean = seg.matched_amplitudes.iter().sum::<f32>() / n;
+        let variance = seg
+            .matched_amplitudes
+            .iter()
+            .map(|a| (a - mean).powi(2))
+            .sum::<f32>()
+            / n;
+        Some(variance.sqrt())
+    } else {
+        None
+    };
+
     let components = ComponentScores {
         interval_consistency,
         grid_alignment,
         hit_completeness,
         onset_efficiency,
+        downbeat_amp_avg,
+        upbeat_amp_avg,
+        subdivision_amp_avg,
+        amp_std_dev,
     };
     (score, components)
 }
@@ -2440,6 +2569,23 @@ struct SegmentState {
     /// Falls back to `onset_count` when zero (e.g. test fixtures that
     /// set `onset_count` directly without per-onset confidences).
     matched_confidence_sum: f32,
+    /// Coach mode snapshot at segment open. Determines which scoring
+    /// constants `score_segment` applies (k-factor, weight set).
+    coach_mode: CoachMode,
+    /// Number of quarter-note beats per bar, snapshotted at segment open.
+    /// Defaults to 4 (4/4 time). Used by accent-bucket derivation in
+    /// `score_segment`.
+    time_sig: u8,
+    /// Subdivision total (1 = quarters, 2 = 8ths, 4 = 16ths, etc.),
+    /// snapshotted at segment open from `beat.subdivision_total`.
+    subdivision: u8,
+    /// Per-bar-position amplitude accumulator for accent analysis.
+    /// Key = absolute subdivision position within the bar
+    /// (0 .. time_sig * subdivision - 1). Value = (amplitude_sum, count).
+    accent_buckets: std::collections::HashMap<u32, (f32, u32)>,
+    /// Amplitudes of every matched onset (excluding misses), for
+    /// population std-dev computation in `score_segment`.
+    matched_amplitudes: Vec<f32>,
 }
 
 /// Compute the median of a VecDeque<f64>.
@@ -2700,6 +2846,15 @@ mod tests {
             // through the `onset_count` fallback path. New tests that
             // exercise low-confidence behavior populate this directly.
             matched_confidence_sum: 0.0,
+            // Test fixtures default to Pro mode so existing scenario
+            // bounds remain valid (Pro uses the original constants).
+            coach_mode: CoachMode::Pro,
+            // Accent fields default to empty — test fixtures don't
+            // exercise accent analysis unless they populate these directly.
+            time_sig: 4,
+            subdivision: 1,
+            accent_buckets: std::collections::HashMap::new(),
+            matched_amplitudes: Vec::new(),
         }
     }
 
@@ -3725,6 +3880,7 @@ mod tests {
             "other".to_string(),
             None,
             None,
+            CoachMode::Default,
             move |fb| {
                 feedbacks_writer.lock().unwrap().push(fb);
             },
@@ -3843,6 +3999,7 @@ mod tests {
             "other".to_string(),
             None,
             None,
+            CoachMode::Default,
             move |fb| {
                 feedbacks_writer.lock().unwrap().push(fb);
             },
@@ -3940,6 +4097,7 @@ mod tests {
             "other".to_string(),
             None,
             None,
+            CoachMode::Default,
             |_| {},
             move |pse| {
                 seg_ends_writer.lock().unwrap().push(pse.end_reason);

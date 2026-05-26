@@ -2,6 +2,7 @@ import type { Dispatch, SetStateAction } from "react";
 import type {
   AudioOutputDevice,
   BrainTier,
+  CoachMode,
   ModelTier,
   Verbosity,
   VoiceMode,
@@ -76,6 +77,8 @@ interface SettingsViewProps {
   setCoachVoiceName: Dispatch<SetStateAction<string>>;
   coachVerbosity: Verbosity;
   setCoachVerbosity: Dispatch<SetStateAction<Verbosity>>;
+  coachMode: CoachMode;
+  setCoachMode: Dispatch<SetStateAction<CoachMode>>;
   modelStatus: ModelStatus | null;
   setModelStatus: Dispatch<SetStateAction<ModelStatus | null>>;
   modelDownloading: boolean;
@@ -154,6 +157,8 @@ export function SettingsView({
   setCoachVoiceName,
   coachVerbosity,
   setCoachVerbosity,
+  coachMode,
+  setCoachMode,
   modelStatus,
   setModelStatus,
   modelDownloading,
@@ -235,6 +240,8 @@ export function SettingsView({
         setCoachVoiceName={setCoachVoiceName}
         coachVerbosity={coachVerbosity}
         setCoachVerbosity={setCoachVerbosity}
+        coachMode={coachMode}
+        setCoachMode={setCoachMode}
         modelStatus={modelStatus}
         setModelStatus={setModelStatus}
         modelDownloading={modelDownloading}

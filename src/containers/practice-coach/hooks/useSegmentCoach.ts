@@ -16,7 +16,7 @@ import {
 } from "../../../coach/reportStats";
 import { createSessionToken } from "../../../coach/sessionGuard";
 import { coachDebug } from "../../../coach/debug";
-import { TEMPLATE_CATALOG } from "../../../coach/templateCatalog";
+import { DEFAULT_MODE_CATALOG, PRO_MODE_CATALOG, TEMPLATE_CATALOG } from "../../../coach/templateCatalog";
 import { pickTemplate, createShuffleState } from "../../../coach/templates";
 import {
   buildChipsForMiniReport,
@@ -36,6 +36,7 @@ export function useSegmentCoach(params: {
   timeSignature: number;
   instrumentLabel: string;
   coachVerbosity: "less" | "default" | "more";
+  coachMode: "default" | "pro";
   // Refs shared with endSession / startSession (owned by useSession)
   segmentReportsRef: MutableRefObject<SessionSegment[]>;
   segmentStartRef: MutableRefObject<number>;
@@ -56,6 +57,7 @@ export function useSegmentCoach(params: {
     timeSignature,
     instrumentLabel,
     coachVerbosity,
+    coachMode,
     segmentReportsRef,
     segmentStartRef,
     prevSessionBestRef,
@@ -83,6 +85,11 @@ export function useSegmentCoach(params: {
   const icGaTipFiredRef = useRef<boolean>(false);
   // Isolated shuffle-bag for IC/GA scenario variant dedup.
   const icGaShuffleRef = useRef(createShuffleState());
+  // Gates the accent coaching tip to once per session (not per segment).
+  // Reset only in reset() — NOT on the rising edge.
+  const accentTipFiredRef = useRef<boolean>(false);
+  // Isolated shuffle-bag for accent scenario variant dedup.
+  const accentShuffleRef = useRef(createShuffleState());
 
   // ── Rising edge: capture segment start time ───────────────────────────
   // Runs when isPlaying transitions false→true. Sets segmentStartRef and
@@ -108,7 +115,7 @@ export function useSegmentCoach(params: {
   // same Rust accumulator and wipe out those beats when clearSession fires
   // post-rephrase — the "2 exercises, only 1 mini-report" bug (2026-05-16).
   useEffect(() => {
-    if (wasPlayingRef.current && !isPlaying && active) {
+    if (wasPlayingRef.current && !isPlaying && activeRef.current) {
       const segmentBpm = playBpmRef.current;
       const segmentDurationMs = Date.now() - segmentStartRef.current;
       // Under 10 s → Signal A (BPM change) or accidental stop.
@@ -182,7 +189,7 @@ export function useSegmentCoach(params: {
               vocab: instrumentLabel as any,
               scenario: "muddy_hits",
               severity: "neutral",
-            });
+            }, coachMode === "default" ? DEFAULT_MODE_CATALOG : PRO_MODE_CATALOG);
             if (tipText) {
               const tipMsg: FeedMessage = {
                 id: crypto.randomUUID(),
@@ -221,7 +228,83 @@ export function useSegmentCoach(params: {
                 vocab: instrumentLabel as any,
                 scenario: icGaScenario,
                 severity: "neutral",
-              });
+              }, coachMode === "default" ? DEFAULT_MODE_CATALOG : PRO_MODE_CATALOG);
+              if (tipText) {
+                const tipMsg: FeedMessage = {
+                  id: crypto.randomUUID(),
+                  type: "coach-tip",
+                  timestamp: Date.now(),
+                  content: tipText,
+                };
+                setMessages((prev) => [...prev, tipMsg]);
+                if (narrativeRef.current) {
+                  narrativeRef.current = appendCoachUtterance(narrativeRef.current, tipText);
+                }
+              }
+            }
+          }
+
+          // Accent coaching tip — fires at most once per session.
+          // Requires ACCENT_2: downbeatAmpAvg, upbeatAmpAvg, subdivisionAmpAvg, ampStdDev present.
+          if (
+            !accentTipFiredRef.current &&
+            coachVerbosity !== "less" &&
+            report.playMode !== "noodling"
+          ) {
+            // Determine negative scenario with priority: weak_downbeats > flat_dynamics > subdivisions_too_loud
+            let accentNegScenario: string | null = null;
+            if (
+              report.downbeatAmpAvg !== undefined &&
+              report.upbeatAmpAvg !== undefined &&
+              report.downbeatAmpAvg < report.upbeatAmpAvg * 0.9
+            ) {
+              accentNegScenario = "weak_downbeats";
+            } else if (
+              report.ampStdDev !== undefined &&
+              report.ampStdDev < 0.03
+            ) {
+              accentNegScenario = "flat_dynamics";
+            } else if (
+              report.subdivisionAmpAvg !== undefined &&
+              report.downbeatAmpAvg !== undefined &&
+              report.subdivisionAmpAvg > report.downbeatAmpAvg * 0.9
+            ) {
+              accentNegScenario = "subdivisions_too_loud";
+            }
+
+            // Check good_accents independently (positive reinforcement)
+            const accentGoodFires =
+              report.downbeatAmpAvg !== undefined &&
+              report.upbeatAmpAvg !== undefined &&
+              report.downbeatAmpAvg > report.upbeatAmpAvg * 1.2;
+
+            if (accentNegScenario) {
+              accentTipFiredRef.current = true;
+              const tipText = pickTemplate(TEMPLATE_CATALOG, accentShuffleRef.current, {
+                vocab: instrumentLabel as any,
+                scenario: accentNegScenario,
+                severity: "neutral",
+              }, coachMode === "default" ? DEFAULT_MODE_CATALOG : PRO_MODE_CATALOG);
+              if (tipText) {
+                const tipMsg: FeedMessage = {
+                  id: crypto.randomUUID(),
+                  type: "coach-tip",
+                  timestamp: Date.now(),
+                  content: tipText,
+                };
+                setMessages((prev) => [...prev, tipMsg]);
+                if (narrativeRef.current) {
+                  narrativeRef.current = appendCoachUtterance(narrativeRef.current, tipText);
+                }
+              }
+            }
+
+            if (accentGoodFires) {
+              const tipText = pickTemplate(TEMPLATE_CATALOG, accentShuffleRef.current, {
+                vocab: instrumentLabel as any,
+                scenario: "good_accents",
+                severity: "neutral",
+              }, coachMode === "default" ? DEFAULT_MODE_CATALOG : PRO_MODE_CATALOG);
               if (tipText) {
                 const tipMsg: FeedMessage = {
                   id: crypto.randomUUID(),
@@ -282,6 +365,7 @@ export function useSegmentCoach(params: {
                 instrumentLabel,
                 narrativeRef.current ? formatForLLM(narrativeRef.current) : undefined,
                 derivedPlayMode,
+                coachMode,
               );
               comment = await coachGenerate(context);
             } catch (err) {
@@ -379,6 +463,7 @@ export function useSegmentCoach(params: {
     wasPlayingRef.current = false;
     muddy_hitsFiredRef.current = false;
     icGaTipFiredRef.current = false;
+    accentTipFiredRef.current = false;
   }, []);
 
   return { reset };

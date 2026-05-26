@@ -200,6 +200,21 @@ export type SessionReport = {
    *  Absent when no segments were recorded. Falls back to JS derivation when
    *  absent (e.g. old saved sessions, short warmup bursts). */
   playMode?: 'structured' | 'noodling';
+  /** Coach scoring mode active when this session was recorded.
+   *  Optional for backward compatibility with old session logs. */
+  coachMode?: "default" | "pro";
+  /** Mean amplitude of downbeat onsets averaged across segments.
+   *  Absent when no segment had enough downbeat data points. */
+  downbeatAmpAvg?: number;
+  /** Mean amplitude of upbeat onsets averaged across segments.
+   *  Absent when no segment had enough upbeat data points. */
+  upbeatAmpAvg?: number;
+  /** Mean amplitude of subdivision onsets averaged across segments.
+   *  Absent when no segment had enough subdivision data points. */
+  subdivisionAmpAvg?: number;
+  /** Population std dev of all matched onset amplitudes averaged across segments.
+   *  Absent when no segment had enough matched onsets. */
+  ampStdDev?: number;
 };
 
 export type SavedSession = {
@@ -478,3 +493,13 @@ export type VoiceMode = "silent" | "voice";
  * orthogonal from verbosity-level keeps the UI affordances cleaner.
  */
 export type Verbosity = "less" | "default" | "more";
+
+/**
+ * Scoring mode for the practice coach.
+ *   - "default" → Focuses on steady time and musical feel. Forgiving on
+ *                 precision — great for warming up and general practice.
+ *   - "pro"     → Counts every subdivision and grades against the full beat
+ *                 grid. More demanding — built for players pushing their
+ *                 accuracy.
+ */
+export type CoachMode = "default" | "pro";
