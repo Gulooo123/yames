@@ -156,16 +156,17 @@ fn run(input: &Path, override_stem: Option<&str>) -> Result<PathBuf, String> {
     let log = load_log(input).map_err(|e| format!("load session log: {e}"))?;
 
     if log.matches.is_empty() {
-        return Err(
-            "session log has zero MatchDecisions — nothing to convert. \
+        return Err("session log has zero MatchDecisions — nothing to convert. \
              Was the session ended before any onsets were scored?"
-                .into(),
-        );
+            .into());
     }
     if matches!(
         log.matches.first().map(|m| &m.classification),
         Some(Classification::Skipped),
-    ) && log.matches.iter().all(|m| matches!(m.classification, Classification::Skipped))
+    ) && log
+        .matches
+        .iter()
+        .all(|m| matches!(m.classification, Classification::Skipped))
     {
         // Refuse all-skipped logs — they'd produce a trivial fixture
         // that doesn't exercise the score formula and would just sit in
@@ -200,8 +201,8 @@ fn run(input: &Path, override_stem: Option<&str>) -> Result<PathBuf, String> {
     // hand-authored fixtures; the only nit is that arrays of structs
     // each get their own line, which is exactly what we want for diff
     // legibility on subsequent updates.
-    let json = serde_json::to_string_pretty(&payload)
-        .map_err(|e| format!("serialize fixture: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(&payload).map_err(|e| format!("serialize fixture: {e}"))?;
     fs::write(&dest, format!("{json}\n")).map_err(|e| format!("write fixture: {e}"))?;
 
     Ok(dest)

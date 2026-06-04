@@ -101,7 +101,8 @@ fn assert_reports_equivalent(actual: &SessionReport, golden: &SessionReport, fix
     macro_rules! check_eq {
         ($field:ident) => {
             assert_eq!(
-                actual.$field, golden.$field,
+                actual.$field,
+                golden.$field,
                 "fixture {fixture_name}: field `{}` drifted (actual={:?}, golden={:?})",
                 stringify!($field),
                 actual.$field,
@@ -186,8 +187,7 @@ fn all_fixtures_replay_stably() {
         let golden_file = golden_path(input_path);
 
         if update_mode {
-            let pretty = serde_json::to_string_pretty(&actual)
-                .expect("serialize SessionReport");
+            let pretty = serde_json::to_string_pretty(&actual).expect("serialize SessionReport");
             fs::write(&golden_file, format!("{pretty}\n"))
                 .unwrap_or_else(|e| panic!("write {}: {e}", golden_file.display()));
             eprintln!(
@@ -226,7 +226,11 @@ fn all_fixtures_replay_stably() {
             let msg = payload
                 .downcast_ref::<String>()
                 .cloned()
-                .or_else(|| payload.downcast_ref::<&'static str>().map(|s| s.to_string()))
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&'static str>()
+                        .map(|s| s.to_string())
+                })
                 .unwrap_or_else(|| "<non-string panic>".to_string());
             failures.push(format!("[{}] {}", fixture.name, msg));
         }

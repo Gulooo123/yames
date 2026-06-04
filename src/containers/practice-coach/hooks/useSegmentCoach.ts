@@ -7,7 +7,7 @@ import {
   formatForLLM,
   type Narrative,
 } from "../../../coach/narrative";
-import { coachGenerate, getSessionReport, clearSession } from "../../../ipc";
+import { coachGenerate, getSessionReport, clearSession, closeOpenSegment } from "../../../ipc";
 import {
   accuracyPct,
   accuracyRatio,
@@ -125,15 +125,20 @@ export function useSegmentCoach(params: {
         clearSession();
       } else {
       const token = createSessionToken(sessionIdRef, activeRef);
-      getSessionReport().then(async (raw) => {
-        // Re-score the backend report through the same legacy formula
-        // every displayed score uses (`computeLegacyScore`). The
-        // segment-aware Rust score depends on DSP plumbing
-        // (idle gaps, spurious onsets) that produces inconsistent
-        // mini-report scores while the DSP doubling bug is open — see
-        // `rescoreReport`'s docstring. Wrapping here ensures the
-        // narrative, coach generation, and the aggregate built from
-        // these mini-reports all see the same score.
+      // Force-close the open segment before fetching the report so the
+      // IC/GA formula is used (not the legacy fallback that fires when
+      // no closed segment exists). `closeOpenSegment()` sets an AtomicBool
+      // that the Rust loop picks up within 5ms; 100ms gives generous margin
+      // before we read. Safe if no session is running (no-op).
+      closeOpenSegment()
+        .catch(() => {})
+        .then(() => new Promise<void>((resolve) => setTimeout(resolve, 100)))
+        .then(() => getSessionReport())
+        .then(async (raw) => {
+        // `rescoreReport` uses the Rust IC/GA score when `onsetEfficiency`
+        // is present (set for closed segments) and falls back to the legacy
+        // formula otherwise. After closeOpenSegment() the segment is always
+        // closed, so the Rust score is always used here.
         const report = raw ? rescoreReport(raw) : raw;
         // Discard if a new session started OR the session ended while
         // `getSessionReport` was in-flight — would otherwise land a
@@ -322,6 +327,9 @@ export function useSegmentCoach(params: {
 
           const now = Date.now();
           segmentReportsRef.current.push({ report, bpm: segmentBpm, timeSignature, startTime: segmentStartRef.current, endTime: now });
+          // Reset the segment-start clock so the NEXT segment's startTime
+          // in the timeline is measured from NOW, not from the session origin.
+          segmentStartRef.current = now;
 
           // Clear the Rust accumulator IMMEDIATELY — before the
           // potentially multi-second LLM rephrase. If we wait until

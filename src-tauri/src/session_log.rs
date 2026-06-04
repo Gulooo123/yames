@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::instrument::{Instrument, InstrumentProfile, INSTRUMENT_PROFILE_VERSION};
 use crate::session::SessionReport;
-use crate::timing::BeatFeedback;
+use crate::timing::{tempo_aware_window_ms, window_thresholds, BeatFeedback};
 
 /// Maximum number of session logs to retain on disk. ~30-min sessions
 /// average 1–2 MB so 50 logs ≈ 50–100 MB. This is dev/debug data, not
@@ -305,14 +305,26 @@ pub struct ComponentScores {
     /// of a 4/4 bar at the active subdivision). `None` when fewer than 2
     /// data points were collected (segment too short, or no hits on those
     /// positions).
-    #[serde(rename = "downbeatAmpAvg", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "downbeatAmpAvg",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub downbeat_amp_avg: Option<f32>,
     /// Mean amplitude of onsets that fell on upbeat positions (beats 2, 4).
-    #[serde(rename = "upbeatAmpAvg", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "upbeatAmpAvg",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub upbeat_amp_avg: Option<f32>,
     /// Mean amplitude of onsets that fell on subdivision positions (all
     /// positions that are neither downbeat nor upbeat).
-    #[serde(rename = "subdivisionAmpAvg", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "subdivisionAmpAvg",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub subdivision_amp_avg: Option<f32>,
     /// Population standard deviation of all matched onset amplitudes.
     /// `None` when fewer than 4 matched onsets were recorded.
@@ -361,8 +373,8 @@ pub fn save_log(app_data_dir: &Path, log: &SessionLog) -> Result<PathBuf, String
     fs::create_dir_all(&dir).map_err(|e| format!("create session_logs dir: {e}"))?;
 
     let path = dir.join(build_filename(log));
-    let json = serde_json::to_string_pretty(log)
-        .map_err(|e| format!("serialize session log: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(log).map_err(|e| format!("serialize session log: {e}"))?;
     fs::write(&path, json).map_err(|e| format!("write session log: {e}"))?;
 
     // Prune oldest if we exceed the cap.
@@ -425,8 +437,7 @@ pub fn export_logs(app_data_dir: &Path, dest: &Path) -> Result<usize, String> {
             all.push(log);
         }
     }
-    let json = serde_json::to_string_pretty(&all)
-        .map_err(|e| format!("serialize export: {e}"))?;
+    let json = serde_json::to_string_pretty(&all).map_err(|e| format!("serialize export: {e}"))?;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create export parent dir: {e}"))?;
     }
@@ -512,6 +523,26 @@ pub fn score_feedbacks(feedbacks: &[BeatFeedback]) -> SessionReport {
     let mut acc = crate::session::SessionAccumulator::new();
     for fb in feedbacks {
         acc.push(fb.clone());
+    }
+    acc.report()
+}
+
+/// Score feedbacks together with pre-computed practice segments → SessionReport.
+/// This is the production path used by `build_log_from_session`: segments carry
+/// IC / GA / OE component scores so the persisted JSON `report` field includes
+/// `onsetEfficiency`, `intervalConsistency`, and `gridAlignment`.  Without
+/// segments the accumulator falls back to the legacy formula and those fields
+/// stay `None`, causing a KeyError in the SCORE_WIRE_1 JS check.
+pub fn score_feedbacks_with_segments(
+    feedbacks: &[BeatFeedback],
+    segments: &[PracticeSegment],
+) -> SessionReport {
+    let mut acc = crate::session::SessionAccumulator::new();
+    for fb in feedbacks {
+        acc.push(fb.clone());
+    }
+    for seg in segments {
+        acc.push_segment(seg.clone());
     }
     acc.report()
 }
@@ -683,8 +714,7 @@ pub fn generate_raw_onsets_random(
     seed: u64,
 ) -> Vec<DetectedOnset> {
     let mut rng = Xorshift64::new(seed);
-    let expected_count =
-        ((duration_ms as f32 / 1000.0) * onset_rate_per_sec).round() as u32;
+    let expected_count = ((duration_ms as f32 / 1000.0) * onset_rate_per_sec).round() as u32;
     let mut onsets: Vec<DetectedOnset> = (0..expected_count)
         .map(|_| DetectedOnset {
             timestamp_ms: (rng.next_f32() * duration_ms as f32) as u64,
@@ -712,8 +742,7 @@ pub fn match_and_score(
     expected: &[ExpectedBeat],
     _profile: &InstrumentProfile,
 ) -> (Vec<MatchDecision>, Vec<u32>, SessionReport) {
-    let mut matched_onset_ids: std::collections::HashSet<u32> =
-        std::collections::HashSet::new();
+    let mut matched_onset_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut decisions: Vec<MatchDecision> = Vec::with_capacity(expected.len());
     let mut feedbacks: Vec<BeatFeedback> = Vec::with_capacity(expected.len());
 
@@ -944,6 +973,192 @@ impl SessionTelemetry {
     }
 }
 
+/// POSTMATCH_1 — Post-session best-candidate matching.
+///
+/// For each expected beat, find the closest unassigned detected onset
+/// within the tempo-aware match window and assign it as the winner.
+/// This replaces the real-time first-come-first-served greedy matcher
+/// for scoring purposes, eliminating ghost-cascade misses.
+///
+/// Algorithm:
+/// - Sort order: expected_beats and onsets are assumed time-sorted
+///   (they are produced in order by the timing analyzer).
+/// - Window per beat: derived from the interval to the next expected
+///   beat so drill-ramp tempos are handled correctly.
+/// - Greedy: once an onset is assigned to a beat, it cannot be reused.
+/// - Miss: beat slots with no candidate onset within the window get
+///   Classification::Miss / MatchReason::OutsideWindow.
+pub fn recompute_matches(
+    onsets: &[DetectedOnset],
+    expected_beats: &[ExpectedBeat],
+) -> Vec<MatchDecision> {
+    if expected_beats.is_empty() {
+        return Vec::new();
+    }
+
+    let mut assigned = vec![false; onsets.len()];
+    let mut results = Vec::with_capacity(expected_beats.len());
+
+    // Pre-compute per-beat interval from consecutive beat timestamps.
+    // For the last beat, reuse the previous interval.
+    let n = expected_beats.len();
+    let intervals_ms: Vec<f64> = (0..n)
+        .map(|i| {
+            if i + 1 < n {
+                expected_beats[i + 1].timestamp_ms as f64 - expected_beats[i].timestamp_ms as f64
+            } else if n >= 2 {
+                expected_beats[n - 1].timestamp_ms as f64
+                    - expected_beats[n - 2].timestamp_ms as f64
+            } else {
+                // Single beat — fall back to quarter-note at expected BPM.
+                60_000.0 / expected_beats[0].expected_bpm.max(1) as f64
+            }
+        })
+        .collect();
+
+    for (beat_idx, beat) in expected_beats.iter().enumerate() {
+        let beat_ms = beat.timestamp_ms as f64;
+        let window_ms = tempo_aware_window_ms(intervals_ms[beat_idx]);
+        let thresholds = window_thresholds(window_ms);
+        let window_lo = beat_ms - window_ms;
+        let window_hi = beat_ms + window_ms;
+
+        // Find unassigned onset with minimum |deviation| within window.
+        let mut best_onset_idx: Option<usize> = None;
+        let mut best_dist = f64::INFINITY;
+
+        for (oi, onset) in onsets.iter().enumerate() {
+            if assigned[oi] {
+                continue;
+            }
+            let t = onset.timestamp_ms as f64;
+            if t < window_lo || t > window_hi {
+                continue;
+            }
+            let dist = (t - beat_ms).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best_onset_idx = Some(oi);
+            }
+        }
+
+        let (onset_indices, deviation_ms, classification, reason) = if let Some(oi) = best_onset_idx
+        {
+            assigned[oi] = true;
+            let dev = onsets[oi].timestamp_ms as i64 - beat.timestamp_ms as i64;
+            let abs_dev = dev.unsigned_abs() as f64;
+            let class = if abs_dev <= thresholds.perfect {
+                Classification::Perfect
+            } else if abs_dev <= thresholds.good {
+                Classification::Good
+            } else {
+                Classification::Ok // abs_dev ≤ window_ms (ok = full window)
+            };
+            (
+                vec![oi as u32],
+                dev as i32,
+                class,
+                MatchReason::InsideWindow,
+            )
+        } else {
+            (vec![], 0, Classification::Miss, MatchReason::OutsideWindow)
+        };
+
+        results.push(MatchDecision {
+            beat_index: beat.index,
+            onset_indices,
+            deviation_ms,
+            classification,
+            reason,
+        });
+    }
+
+    results
+}
+
+/// Convert `Vec<MatchDecision>` → `Vec<BeatFeedback>` for use with
+/// `score_feedbacks` / `SessionAccumulator::report()`.
+///
+/// `interval_error_ms` is computed from consecutive matched onsets so
+/// tempo stability metrics remain meaningful. Calibration and
+/// grid-correlation fields are set to neutral defaults — they are not
+/// persisted in the session log and are not needed for post-session
+/// scoring.
+pub fn matches_to_feedbacks(
+    matches: &[MatchDecision],
+    onsets: &[DetectedOnset],
+) -> Vec<BeatFeedback> {
+    let mut feedbacks = Vec::with_capacity(matches.len());
+    let mut prev_matched_onset_ms: Option<u64> = None;
+    let mut prev_beat_ms: Option<u64> = None;
+
+    // Build a quick index: beat_index → expected beat timestamp_ms.
+    // We don't have ExpectedBeat here, but we can derive the expected
+    // interval from consecutive beat deviations (beat timestamps come
+    // from MatchDecision.beat_index ordering only). Instead, compute
+    // interval_error from consecutive *actual* onset timestamps vs.
+    // consecutive *expected* beat timestamps — approximated as:
+    //   interval_error = |actual_interval - expected_interval|
+    // where expected_interval = difference between consecutive beat_index
+    // times (derived from beat ordering at ~constant BPM).
+    //
+    // For simplicity, store the expected onset timestamp as
+    // (onset.timestamp_ms - deviation_ms) and derive intervals from there.
+    for m in matches {
+        let amplitude = m
+            .onset_indices
+            .first()
+            .and_then(|&idx| onsets.get(idx as usize))
+            .map(|o| o.amplitude)
+            .unwrap_or(0.0);
+
+        // Expected beat timestamp (ms) = matched_onset_ms - deviation_ms
+        let matched_onset_ms = m
+            .onset_indices
+            .first()
+            .and_then(|&idx| onsets.get(idx as usize))
+            .map(|o| o.timestamp_ms);
+
+        let expected_beat_ms =
+            matched_onset_ms.map(|ms| (ms as i64 - m.deviation_ms as i64).max(0) as u64);
+
+        // interval_error: |actual inter-onset gap - expected inter-beat gap|
+        let interval_error_ms = match (
+            matched_onset_ms,
+            prev_matched_onset_ms,
+            expected_beat_ms,
+            prev_beat_ms,
+        ) {
+            (Some(cur_onset), Some(prev_onset), Some(cur_beat), Some(prev_beat)) => {
+                let actual_interval = cur_onset as i64 - prev_onset as i64;
+                let expected_interval = cur_beat as i64 - prev_beat as i64;
+                (actual_interval - expected_interval).unsigned_abs() as f64
+            }
+            _ => 0.0,
+        };
+
+        if matched_onset_ms.is_some() {
+            prev_matched_onset_ms = matched_onset_ms;
+        }
+        if expected_beat_ms.is_some() {
+            prev_beat_ms = expected_beat_ms;
+        }
+
+        feedbacks.push(BeatFeedback {
+            beat_index: m.beat_index,
+            deviation_ms: m.deviation_ms as f64,
+            interval_error_ms,
+            classification: m.classification.as_str().to_string(),
+            amplitude,
+            calibration_offset_ms: 0.0,
+            calibration_confidence: 1.0,
+            grid_correlation: 1.0,
+        });
+    }
+
+    feedbacks
+}
+
 /// Build a `SessionLog` from accumulator state (final report + any
 /// Signal-B segments) plus the AppState snapshot taken at stop time.
 ///
@@ -951,6 +1166,12 @@ impl SessionTelemetry {
 /// live timing analyzer (see `SessionTelemetry`). Pass
 /// `SessionTelemetry::default()` for code paths that don't run the
 /// live analyzer (synthetic tests, fixture sessions).
+///
+/// When telemetry contains raw onset and beat streams, POSTMATCH_1
+/// post-session best-candidate matching is applied: `recompute_matches`
+/// replaces the real-time match decisions so `report.hitsCount` and
+/// related fields reflect best-candidate assignment rather than the
+/// first-come-first-served streaming matches.
 pub fn build_log_from_session(
     bpm: u16,
     time_signature: u8,
@@ -962,7 +1183,50 @@ pub fn build_log_from_session(
     segments: Vec<PracticeSegment>,
     telemetry: SessionTelemetry,
 ) -> SessionLog {
-    let report = score_feedbacks(feedbacks);
+    // Unpack telemetry before any move/borrow issues.
+    let SessionTelemetry {
+        expected_beats,
+        detected_onsets,
+        matches: rt_matches,
+        spurious_onset_indices,
+        audio_levels,
+        activity_transitions,
+    } = telemetry;
+
+    // POSTMATCH_1: run post-session best-candidate matching when raw
+    // streams are available. Fall back to real-time feedbacks when
+    // telemetry is absent (synthetic tests, fixture sessions).
+    // COMP_WIRE_FIX: pass `segments` so the report carries IC/GA/OE
+    // component scores (prevents legacy-formula fallback in persisted JSON).
+    let (final_matches, mut report) = if !expected_beats.is_empty() && !detected_onsets.is_empty() {
+        let m = recompute_matches(&detected_onsets, &expected_beats);
+        let fbs = matches_to_feedbacks(&m, &detected_onsets);
+        (m, score_feedbacks_with_segments(&fbs, &segments))
+    } else {
+        (rt_matches, score_feedbacks_with_segments(feedbacks, &segments))
+    };
+
+    // Populate accent counts and subdivision in the saved log report so
+    // the history view can compute Default-mode accuracy correctly.
+    report.subdivision = subdivision;
+    if !expected_beats.is_empty() {
+        let accent_beat_indices: std::collections::HashSet<u32> = expected_beats
+            .iter()
+            .filter(|b| b.is_accent)
+            .map(|b| b.index)
+            .collect();
+        for m in &final_matches {
+            if accent_beat_indices.contains(&m.beat_index)
+                && m.reason != MatchReason::NoActivity
+            {
+                report.accent_beats_count += 1;
+                if m.classification != Classification::Miss {
+                    report.accent_hits_count += 1;
+                }
+            }
+        }
+    }
+
     SessionLog {
         bpm,
         time_signature,
@@ -972,13 +1236,13 @@ pub fn build_log_from_session(
         duration_ms,
         instrument,
         instrument_profile_version: INSTRUMENT_PROFILE_VERSION,
-        expected_beats: telemetry.expected_beats,
-        detected_onsets: telemetry.detected_onsets,
-        matches: telemetry.matches,
-        spurious_onsets: telemetry.spurious_onset_indices,
-        activity_transitions: telemetry.activity_transitions,
+        expected_beats,
+        detected_onsets,
+        matches: final_matches,
+        spurious_onsets: spurious_onset_indices,
+        activity_transitions,
         segments,
-        audio_levels: telemetry.audio_levels,
+        audio_levels,
         report,
     }
 }
@@ -989,13 +1253,21 @@ pub fn build_log_from_session(
 /// distributions.
 #[allow(dead_code)]
 fn profile_centroid_hint(profile: &InstrumentProfile) -> f32 {
-    let (band_idx, _) = profile
-        .spectral_weights
-        .iter()
-        .enumerate()
-        .fold((0usize, 0.0_f32), |(bi, bw), (i, &w)| {
-            if w > bw { (i, w) } else { (bi, bw) }
-        });
+    let (band_idx, _) =
+        profile
+            .spectral_weights
+            .iter()
+            .enumerate()
+            .fold(
+                (0usize, 0.0_f32),
+                |(bi, bw), (i, &w)| {
+                    if w > bw {
+                        (i, w)
+                    } else {
+                        (bi, bw)
+                    }
+                },
+            );
     // 16 bands across the audible spectrum (assume 22 kHz Nyquist).
     let band_hz = 22_000.0 / 16.0;
     (band_idx as f32 + 0.5) * band_hz
@@ -1341,6 +1613,10 @@ mod tests {
                 grid_alignment: 0.92,
                 hit_completeness: 0.90,
                 onset_efficiency: 0.88,
+                downbeat_amp_avg: None,
+                upbeat_amp_avg: None,
+                subdivision_amp_avg: None,
+                amp_std_dev: None,
             },
             end_reason: SegmentEndReason::ActivityGap,
             // Path B — fixture data, divisor inference not exercised
@@ -1371,9 +1647,15 @@ mod tests {
         assert_eq!(log.instrument, Instrument::ElectricGuitar);
         assert_eq!(log.instrument_profile_version, INSTRUMENT_PROFILE_VERSION);
 
-        // Report is built from feedbacks — perfect hits → S grade.
+        // COMP_WIRE_FIX: report now uses duration-weighted segment score (92.0)
+        // instead of the legacy formula.  92 → grade "A" (85–94 band).
+        // The hits_count is still derived from beat feedbacks.
         assert_eq!(log.report.hits_count, 8);
-        assert_eq!(log.report.grade, "S");
+        assert_eq!(log.report.grade, "A");
+        // Component scores should now be present (not None) since segments are wired in.
+        assert!(log.report.onset_efficiency.is_some());
+        assert!(log.report.interval_consistency.is_some());
+        assert!(log.report.grid_alignment.is_some());
 
         // Segments roundtripped without mutation.
         assert_eq!(log.segments.len(), 1);

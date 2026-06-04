@@ -1,7 +1,7 @@
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Play mode derived from `onset_efficiency`. ≥ 0.65 → Structured
@@ -81,7 +81,11 @@ pub fn check_model_status(app: &AppHandle) -> Result<ModelStatus, String> {
         .map(|m| m.len() >= crate::tts::MIN_ONNX_BYTES)
         .unwrap_or(false);
     let voice_ready = piper_ready && onnx_ready;
-    let voice_size_bytes = if voice_dir.exists() { dir_size(&voice_dir) } else { 0 };
+    let voice_size_bytes = if voice_dir.exists() {
+        dir_size(&voice_dir)
+    } else {
+        0
+    };
 
     Ok(ModelStatus {
         brain_ready,
@@ -177,7 +181,10 @@ pub fn start_download(
         let models_dir = match app.path().app_data_dir() {
             Ok(d) => d.join("models"),
             Err(e) => {
-                let _ = app.emit("model-download-complete", serde_json::json!({ "success": false, "error": format!("{e}") }));
+                let _ = app.emit(
+                    "model-download-complete",
+                    serde_json::json!({ "success": false, "error": format!("{e}") }),
+                );
                 return;
             }
         };
@@ -234,32 +241,38 @@ pub fn start_download(
         // install would silently pass a `.exists()` check and then
         // crash at speak time.
         if crate::tts::piper_smoke_test(&piper_dir).is_err() {
-            let _ = app.emit("model-download-progress", DownloadProgress {
-                component: "Piper TTS engine".to_string(),
-                downloaded_bytes: 0, total_bytes: 0, fraction: 0.0, done: false,
-            });
-            // Clear any partial install. `tar xzf` extracts side-by-side
-            // and won't remove orphan files, so a stale `piper/piper`
-            // from a broken prior run would survive into the new
-            // install if we didn't wipe first.
-            if piper_dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&piper_dir) {
-                    eprintln!("[yames] Failed to remove stale piper/: {e}");
-                }
-            }
+            let _ = app.emit(
+                "model-download-progress",
+                DownloadProgress {
+                    component: "Piper TTS engine".to_string(),
+                    downloaded_bytes: 0,
+                    total_bytes: 0,
+                    fraction: 0.0,
+                    done: false,
+                },
+            );
             let piper_url = crate::tts::piper_binary_url();
             let tar_path = models_dir.join("piper.tar.gz");
             if let Err(e) = curl_download(&app, piper_url, &tar_path, &cancel, "Piper TTS engine") {
                 if e == "cancelled" {
-                    let _ = app.emit("model-download-complete", serde_json::json!({ "success": false, "cancelled": true }));
+                    let _ = app.emit(
+                        "model-download-complete",
+                        serde_json::json!({ "success": false, "cancelled": true }),
+                    );
                     return;
                 }
                 eprintln!("[yames] Failed to download Piper binary: {e}");
                 piper_error = Some(e.clone());
-                let _ = app.emit("model-download-progress", DownloadProgress {
-                    component: format!("Piper TTS engine (failed: {e})"),
-                    downloaded_bytes: 0, total_bytes: 0, fraction: 0.0, done: true,
-                });
+                let _ = app.emit(
+                    "model-download-progress",
+                    DownloadProgress {
+                        component: format!("Piper TTS engine (failed: {e})"),
+                        downloaded_bytes: 0,
+                        total_bytes: 0,
+                        fraction: 0.0,
+                        done: true,
+                    },
+                );
             } else {
                 // Sanity-check the tarball size before handing it to
                 // tar. HuggingFace (or a corporate proxy / VPN with TLS
@@ -270,9 +283,7 @@ pub fn start_download(
                 // future minor release-size shifts but still catches
                 // the common "served a wrong/truncated payload" mode.
                 const MIN_PIPER_TARBALL_BYTES: u64 = 15 * 1024 * 1024;
-                let tar_size = std::fs::metadata(&tar_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let tar_size = std::fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0);
                 if tar_size < MIN_PIPER_TARBALL_BYTES {
                     eprintln!(
                         "[yames] Piper tarball is only {tar_size} bytes (expected >= {MIN_PIPER_TARBALL_BYTES}) \u{2014} likely corrupted or intercepted",
@@ -283,6 +294,15 @@ pub fn start_download(
                         MIN_PIPER_TARBALL_BYTES / (1024 * 1024),
                     ));
                 } else {
+                    // Wipe stale piper/ only after download succeeds and tarball
+                    // size is verified — so a failed download never destroys a
+                    // working install. `tar xzf` extracts side-by-side and won't
+                    // remove orphan files, so we still need to clear before extract.
+                    if piper_dir.exists() {
+                        if let Err(e) = std::fs::remove_dir_all(&piper_dir) {
+                            eprintln!("[yames] Failed to remove stale piper/: {e}");
+                        }
+                    }
                     // Extract tar.gz
                     let _ = std::fs::create_dir_all(&models_dir);
                     let extract = std::process::Command::new("tar")
@@ -299,8 +319,7 @@ pub fn start_download(
                                 "[yames] tar exited {} extracting Piper: {stderr}",
                                 out.status,
                             );
-                            piper_error =
-                                Some(format!("tar failed extracting Piper: {stderr}"));
+                            piper_error = Some(format!("tar failed extracting Piper: {stderr}"));
                         }
                         Err(e) => {
                             eprintln!("[yames] Failed to extract Piper: {e}");
@@ -325,6 +344,25 @@ pub fn start_download(
                         .arg("com.apple.quarantine")
                         .arg(&piper_dir)
                         .output();
+                    // Add the piper directory as rpath so @rpath/lib*.dylib resolves.
+                    // The binary ships with @rpath references but no LC_RPATH entry —
+                    // without this dyld can never locate libespeak-ng, libonnxruntime, etc.
+                    for bin in ["piper", "piper_phonemize"] {
+                        let bin_path = piper_dir.join(bin);
+                        if bin_path.exists() {
+                            let _ = std::process::Command::new("install_name_tool")
+                                .arg("-add_rpath")
+                                .arg(&piper_dir)
+                                .arg(&bin_path)
+                                .output();
+                        }
+                    }
+                    // Log any still-missing dylibs after extraction for future debugging.
+                    for dylib in ["libespeak-ng.1.dylib", "libpiper_phonemize.1.dylib", "libonnxruntime.1.14.1.dylib"] {
+                        if !piper_dir.join(dylib).exists() {
+                            eprintln!("[yames] WARNING: piper dylib missing after extract: {dylib}");
+                        }
+                    }
                     // Post-extract smoke test. Only set piper_error
                     // here if no upstream step already failed —
                     // otherwise we'd clobber a more specific error
@@ -338,9 +376,7 @@ pub fn start_download(
                     // runs cleanly the install is considered healthy.
                     if piper_error.is_none() {
                         if let Err(e) = crate::tts::piper_smoke_test(&piper_dir) {
-                            eprintln!(
-                                "[yames] Piper smoke test failed after extract: {e}",
-                            );
+                            eprintln!("[yames] Piper smoke test failed after extract: {e}",);
                             piper_error = Some(e);
                         }
                     }
@@ -371,13 +407,23 @@ pub fn start_download(
             let _ = std::fs::remove_file(&onnx_path);
             let _ = std::fs::remove_file(&json_path);
             if cancel.load(Ordering::Relaxed) {
-                let _ = app.emit("model-download-complete", serde_json::json!({ "success": false, "cancelled": true }));
+                let _ = app.emit(
+                    "model-download-complete",
+                    serde_json::json!({ "success": false, "cancelled": true }),
+                );
                 return;
             }
             let label = format!("Voice: {voice_id}");
-            let _ = app.emit("model-download-progress", DownloadProgress {
-                component: label.clone(), downloaded_bytes: 0, total_bytes: 0, fraction: 0.0, done: false,
-            });
+            let _ = app.emit(
+                "model-download-progress",
+                DownloadProgress {
+                    component: label.clone(),
+                    downloaded_bytes: 0,
+                    total_bytes: 0,
+                    fraction: 0.0,
+                    done: false,
+                },
+            );
             // Download .onnx + validate. The size check after curl
             // catches the case where the server returned a 200 + tiny
             // HTML body (CDN error, captive portal, proxy block) which
@@ -386,24 +432,39 @@ pub fn start_download(
             // would hit silence-then-`say`-fallback at first speak.
             if let Err(e) = curl_download(&app, onnx_url, &onnx_path, &cancel, &label) {
                 if e == "cancelled" {
-                    let _ = app.emit("model-download-complete", serde_json::json!({ "success": false, "cancelled": true }));
+                    let _ = app.emit(
+                        "model-download-complete",
+                        serde_json::json!({ "success": false, "cancelled": true }),
+                    );
                     return;
                 }
                 eprintln!("[yames] Failed to download voice {voice_id}: {e}");
-                let _ = app.emit("model-download-progress", DownloadProgress {
-                    component: format!("Voice: {voice_id} (failed: {e})"),
-                    downloaded_bytes: 0, total_bytes: 0, fraction: 0.0, done: true,
-                });
+                let _ = app.emit(
+                    "model-download-progress",
+                    DownloadProgress {
+                        component: format!("Voice: {voice_id} (failed: {e})"),
+                        downloaded_bytes: 0,
+                        total_bytes: 0,
+                        fraction: 0.0,
+                        done: true,
+                    },
+                );
                 voice_errors.push((voice_id.to_string(), e.clone()));
                 continue;
             }
             if let Err(e) = verify_voice_onnx(&onnx_path) {
                 eprintln!("[yames] Voice {voice_id} .onnx failed validation: {e}");
                 let _ = std::fs::remove_file(&onnx_path);
-                let _ = app.emit("model-download-progress", DownloadProgress {
-                    component: format!("Voice: {voice_id} (invalid: {e})"),
-                    downloaded_bytes: 0, total_bytes: 0, fraction: 0.0, done: true,
-                });
+                let _ = app.emit(
+                    "model-download-progress",
+                    DownloadProgress {
+                        component: format!("Voice: {voice_id} (invalid: {e})"),
+                        downloaded_bytes: 0,
+                        total_bytes: 0,
+                        fraction: 0.0,
+                        done: true,
+                    },
+                );
                 voice_errors.push((voice_id.to_string(), e));
                 continue;
             }
@@ -412,7 +473,10 @@ pub fn start_download(
             // the most common failure; size check still catches it.
             if let Err(e) = curl_download(&app, json_url, &json_path, &cancel, &label) {
                 if e == "cancelled" {
-                    let _ = app.emit("model-download-complete", serde_json::json!({ "success": false, "cancelled": true }));
+                    let _ = app.emit(
+                        "model-download-complete",
+                        serde_json::json!({ "success": false, "cancelled": true }),
+                    );
                     return;
                 }
                 eprintln!("[yames] Failed to download voice {voice_id} sidecar: {e}");
@@ -489,7 +553,10 @@ pub fn start_download(
             );
             return;
         }
-        let _ = app.emit("model-download-complete", serde_json::json!({ "success": true, "tier": tier }));
+        let _ = app.emit(
+            "model-download-complete",
+            serde_json::json!({ "success": true, "tier": tier }),
+        );
     });
 }
 
@@ -508,12 +575,17 @@ fn curl_download(
 
     let mut cmd = Command::new("curl");
     cmd.arg("-L")
-        .arg("--retry").arg("3")
-        .arg("--retry-delay").arg("2")
-        .arg("--connect-timeout").arg("15")
-        .arg("--max-time").arg("600")
+        .arg("--retry")
+        .arg("3")
+        .arg("--retry-delay")
+        .arg("2")
+        .arg("--connect-timeout")
+        .arg("15")
+        .arg("--max-time")
+        .arg("600")
         .arg("--progress-bar")
-        .arg("-o").arg(&part_path)
+        .arg("-o")
+        .arg(&part_path)
         .arg(url)
         .stderr(Stdio::piped())
         .stdout(Stdio::null());
@@ -531,7 +603,9 @@ fn curl_download(
         }
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to start curl: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start curl: {e}"))?;
     let stderr = child.stderr.take().unwrap();
 
     // curl --progress-bar uses \r (carriage return) not \n, so read byte-by-byte
@@ -553,13 +627,16 @@ fn curl_download(
                         }
                         if let Some(pct) = parse_curl_progress(&line_buf) {
                             if last_emit.elapsed().as_millis() > 200 {
-                                let _ = app.emit("model-download-progress", DownloadProgress {
-                                    component: label.to_string(),
-                                    downloaded_bytes: 0,
-                                    total_bytes: 0,
-                                    fraction: pct / 100.0,
-                                    done: false,
-                                });
+                                let _ = app.emit(
+                                    "model-download-progress",
+                                    DownloadProgress {
+                                        component: label.to_string(),
+                                        downloaded_bytes: 0,
+                                        total_bytes: 0,
+                                        fraction: pct / 100.0,
+                                        done: false,
+                                    },
+                                );
                                 last_emit = std::time::Instant::now();
                             }
                         }
@@ -613,13 +690,16 @@ fn do_download(
     std::fs::write(&tier_path, tier).map_err(|e| format!("Failed to write tier: {e}"))?;
 
     // Final progress event
-    let _ = app.emit("model-download-progress", DownloadProgress {
-        component: label.to_string(),
-        downloaded_bytes: 0,
-        total_bytes: 0,
-        fraction: 1.0,
-        done: true,
-    });
+    let _ = app.emit(
+        "model-download-progress",
+        DownloadProgress {
+            component: label.to_string(),
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            fraction: 1.0,
+            done: true,
+        },
+    );
 
     Ok(())
 }
@@ -668,10 +748,16 @@ pub fn start_voice_repair(app: AppHandle, voice_id: String, cancel: DownloadCanc
         // `piper` binary on disk, all three dylibs missing).
         let piper_dir = models_dir.join("piper");
         if crate::tts::piper_smoke_test(&piper_dir).is_err() {
-            let _ = app.emit("model-download-progress", DownloadProgress {
-                component: "Piper TTS engine".to_string(),
-                downloaded_bytes: 0, total_bytes: 0, fraction: 0.0, done: false,
-            });
+            let _ = app.emit(
+                "model-download-progress",
+                DownloadProgress {
+                    component: "Piper TTS engine".to_string(),
+                    downloaded_bytes: 0,
+                    total_bytes: 0,
+                    fraction: 0.0,
+                    done: false,
+                },
+            );
             if piper_dir.exists() {
                 if let Err(e) = std::fs::remove_dir_all(&piper_dir) {
                     eprintln!("[yames] start_voice_repair: failed to remove stale piper/: {e}");
@@ -681,7 +767,10 @@ pub fn start_voice_repair(app: AppHandle, voice_id: String, cancel: DownloadCanc
             let tar_path = models_dir.join("piper.tar.gz");
             if let Err(e) = curl_download(&app, piper_url, &tar_path, &cancel, "Piper TTS engine") {
                 if e == "cancelled" {
-                    let _ = app.emit("model-download-complete", serde_json::json!({ "success": false, "cancelled": true }));
+                    let _ = app.emit(
+                        "model-download-complete",
+                        serde_json::json!({ "success": false, "cancelled": true }),
+                    );
                     return;
                 }
                 let _ = app.emit(
@@ -695,9 +784,7 @@ pub fn start_voice_repair(app: AppHandle, voice_id: String, cancel: DownloadCanc
             // serve a tiny error page in place of the real ~24 MB
             // tarball). 15 MB floor catches everything spurious.
             const MIN_PIPER_TARBALL_BYTES: u64 = 15 * 1024 * 1024;
-            let tar_size = std::fs::metadata(&tar_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let tar_size = std::fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0);
             if tar_size < MIN_PIPER_TARBALL_BYTES {
                 let _ = std::fs::remove_file(&tar_path);
                 let _ = app.emit(
@@ -760,6 +847,25 @@ pub fn start_voice_repair(app: AppHandle, voice_id: String, cancel: DownloadCanc
                 .arg("com.apple.quarantine")
                 .arg(&piper_dir)
                 .output();
+            // Add the piper directory as rpath so @rpath/lib*.dylib resolves.
+            // The binary ships with @rpath references but no LC_RPATH entry —
+            // without this dyld can never locate libespeak-ng, libonnxruntime, etc.
+            for bin in ["piper", "piper_phonemize"] {
+                let bin_path = piper_dir.join(bin);
+                if bin_path.exists() {
+                    let _ = std::process::Command::new("install_name_tool")
+                        .arg("-add_rpath")
+                        .arg(&piper_dir)
+                        .arg(&bin_path)
+                        .output();
+                }
+            }
+            // Log any still-missing dylibs after extraction for future debugging.
+            for dylib in ["libespeak-ng.1.dylib", "libpiper_phonemize.1.dylib", "libonnxruntime.1.14.1.dylib"] {
+                if !piper_dir.join(dylib).exists() {
+                    eprintln!("[yames] WARNING: piper dylib missing after extract: {dylib}");
+                }
+            }
             if let Err(e) = crate::tts::piper_smoke_test(&piper_dir) {
                 let _ = app.emit(
                     "model-download-complete",
@@ -817,12 +923,22 @@ pub fn start_voice_repair(app: AppHandle, voice_id: String, cancel: DownloadCanc
         let _ = std::fs::remove_file(&json_path);
 
         let label = format!("Voice: {id_str}");
-        let _ = app.emit("model-download-progress", DownloadProgress {
-            component: label.clone(), downloaded_bytes: 0, total_bytes: 0, fraction: 0.0, done: false,
-        });
+        let _ = app.emit(
+            "model-download-progress",
+            DownloadProgress {
+                component: label.clone(),
+                downloaded_bytes: 0,
+                total_bytes: 0,
+                fraction: 0.0,
+                done: false,
+            },
+        );
         if let Err(e) = curl_download(&app, &onnx_url, &onnx_path, &cancel, &label) {
             if e == "cancelled" {
-                let _ = app.emit("model-download-complete", serde_json::json!({ "success": false, "cancelled": true }));
+                let _ = app.emit(
+                    "model-download-complete",
+                    serde_json::json!({ "success": false, "cancelled": true }),
+                );
                 return;
             }
             let _ = app.emit(
@@ -847,7 +963,10 @@ pub fn start_voice_repair(app: AppHandle, voice_id: String, cancel: DownloadCanc
         }
         if let Err(e) = curl_download(&app, &json_url, &json_path, &cancel, &label) {
             if e == "cancelled" {
-                let _ = app.emit("model-download-complete", serde_json::json!({ "success": false, "cancelled": true }));
+                let _ = app.emit(
+                    "model-download-complete",
+                    serde_json::json!({ "success": false, "cancelled": true }),
+                );
                 return;
             }
             // Sidecar failure is unusual — the file is ~5 KB — but
@@ -876,7 +995,10 @@ pub fn start_voice_repair(app: AppHandle, voice_id: String, cancel: DownloadCanc
 
         // Done. Omit `tier` so the JS layer's "tier completed" branch
         // doesn't fire and clobber the active brain selection.
-        let _ = app.emit("model-download-complete", serde_json::json!({ "success": true }));
+        let _ = app.emit(
+            "model-download-complete",
+            serde_json::json!({ "success": true }),
+        );
     });
 }
 
@@ -948,7 +1070,10 @@ fn parse_curl_progress(line: &str) -> Option<f64> {
     if let Some(pos) = trimmed.rfind('%') {
         // Walk backwards to find the start of the number
         let before = &trimmed[..pos];
-        let num_start = before.rfind(|c: char| !c.is_ascii_digit() && c != '.').map(|i| i + 1).unwrap_or(0);
+        let num_start = before
+            .rfind(|c: char| !c.is_ascii_digit() && c != '.')
+            .map(|i| i + 1)
+            .unwrap_or(0);
         before[num_start..].parse::<f64>().ok()
     } else {
         None

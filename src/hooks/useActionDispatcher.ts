@@ -26,6 +26,7 @@ interface ActionDispatcherArgs {
   setIsFullscreen: (v: boolean) => void;
   setIsOsFullscreen: (v: boolean) => void;
   setSidebarOpen: (updater: boolean | ((prev: boolean) => boolean)) => void;
+  toggleCard: () => void;
   forceWebviewFocus: () => Promise<void>;
 }
 
@@ -51,6 +52,7 @@ export function useActionDispatcher({
   setIsFullscreen,
   setIsOsFullscreen,
   setSidebarOpen,
+  toggleCard,
   forceWebviewFocus,
 }: ActionDispatcherArgs) {
   const handleBpmChange = useCallback((value: number) => {
@@ -67,7 +69,8 @@ export function useActionDispatcher({
         actionId === "tab-3" ||
         actionId === "settings" ||
         actionId === "toggle-widget" ||
-        actionId === "toggle-sidebar"
+        actionId === "toggle-sidebar" ||
+        actionId === "toggle-coach"
       ) {
         switch (actionId) {
           case "tab-1":
@@ -91,6 +94,9 @@ export function useActionDispatcher({
             break;
           case "toggle-sidebar":
             if (view === "beat" || view === "drill") setSidebarOpen((o) => !o);
+            break;
+          case "toggle-coach":
+            if (view === "beat" || view === "drill") toggleCard();
             break;
         }
         return;
@@ -200,6 +206,7 @@ export function useActionDispatcher({
       setIsFullscreen,
       setIsOsFullscreen,
       setSidebarOpen,
+      toggleCard,
       prevTab,
       handleBpmChange,
       forceWebviewFocus,

@@ -30,6 +30,7 @@ export type HotkeyAction =
   | "os-fullscreen"
   | "toggle-widget"
   | "toggle-sidebar"
+  | "toggle-coach"
   | "tab-1"
   | "tab-2"
   | "tab-3"
@@ -251,6 +252,13 @@ export const HOTKEYS: HotkeyEntry[] = [
     action: "Toggle Presets",
     key: "B",
     desc: "Open or close the presets sidebar",
+    group: "navigation",
+  },
+  {
+    id: "toggle-coach",
+    action: "Toggle Coach",
+    key: "C",
+    desc: "Open or close the practice coach panel",
     group: "navigation",
   },
 ];

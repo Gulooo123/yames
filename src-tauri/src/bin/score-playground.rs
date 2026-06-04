@@ -40,8 +40,7 @@ use std::process::ExitCode;
 
 use yames_lib::session_log::score_feedbacks;
 use yames_lib::timing::{
-    BeatFeedback, W_GRID_ALIGNMENT, W_HIT_COMPLETENESS, W_INTERVAL_CONSISTENCY,
-    W_ONSET_EFFICIENCY,
+    BeatFeedback, W_GRID_ALIGNMENT, W_HIT_COMPLETENESS, W_INTERVAL_CONSISTENCY, W_ONSET_EFFICIENCY,
 };
 
 // ── Fixture input schema ─────────────────────────────────────────────────────
@@ -131,7 +130,10 @@ fn parse_args() -> Result<Args, ExitCode> {
         None
     };
 
-    Ok(Args { input, custom_weights })
+    Ok(Args {
+        input,
+        custom_weights,
+    })
 }
 
 // ── Component proxy computation ──────────────────────────────────────────────
@@ -156,8 +158,7 @@ fn compute_components(feedbacks: &[BeatFeedback]) -> Components {
     let scored_beats = report.hits_count + report.miss_count;
 
     // interval_consistency — mirrors `consistency_score` in `session.rs`
-    let interval_consistency =
-        (1.0 - report.std_deviation_ms / 50.0).clamp(0.0, 1.0);
+    let interval_consistency = (1.0 - report.std_deviation_ms / 50.0).clamp(0.0, 1.0);
 
     // grid_alignment — mean grid correlation across hit beats
     let grid_alignment = report.grid_correlation;
@@ -217,10 +218,8 @@ fn run(args: &Args) -> Result<(), String> {
     // Read + parse input
     let raw = fs::read_to_string(&args.input)
         .map_err(|e| format!("cannot read '{}': {e}", args.input.display()))?;
-    let fixture: FixtureInput =
-        serde_json::from_str(&raw).map_err(|e| {
-            format!("cannot parse '{}': {e}", args.input.display())
-        })?;
+    let fixture: FixtureInput = serde_json::from_str(&raw)
+        .map_err(|e| format!("cannot parse '{}': {e}", args.input.display()))?;
 
     if fixture.feedbacks.is_empty() {
         return Err(format!(
@@ -266,9 +265,7 @@ fn run(args: &Args) -> Result<(), String> {
     println!("Input: {file_name} ({n} feedbacks)");
     println!();
 
-    println!(
-        "Components (weights {w1:.2} / {w2:.2} / {w3:.2} / {w4:.2}):"
-    );
+    println!("Components (weights {w1:.2} / {w2:.2} / {w3:.2} / {w4:.2}):");
     println!(
         "  interval_consistency:  {:5.1}   (std_dev={:.2}ms)",
         c.interval_consistency * 100.0,
@@ -304,9 +301,7 @@ fn run(args: &Args) -> Result<(), String> {
         let delta = custom_total - baseline;
         let sign = if delta >= 0.0 { "+" } else { "" };
         println!();
-        println!(
-            "With weights {cw1:.2} / {cw2:.2} / {cw3:.2} / {cw4:.2}:"
-        );
+        println!("With weights {cw1:.2} / {cw2:.2} / {cw3:.2} / {cw4:.2}:");
         println!(
             "  Total:                 {:5.1}  ({sign}{delta:.1})",
             custom_total,

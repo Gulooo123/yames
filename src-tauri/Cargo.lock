@@ -5998,6 +5998,7 @@ dependencies = [
  "cpal",
  "llama-cpp-2",
  "midir",
+ "png",
  "rodio",
  "serde",
  "serde_json",

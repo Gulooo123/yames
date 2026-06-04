@@ -5,9 +5,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::instrument::{Instrument, InstrumentProfile, ScoreWeights};
-use crate::session::CoachMode;
 use crate::models::PlayMode;
 use crate::onset::Onset;
+use crate::session::CoachMode;
 use crate::session_log::{
     ActivityTransition, Classification, ComponentScores, DetectedOnset, ExpectedBeat,
     MatchDecision, MatchReason, SegmentEndReason, SessionTelemetry,
@@ -265,6 +265,13 @@ pub struct TimingAnalyzer {
     /// SettingsChange goes via Signal A"). The analysis loop polls
     /// this once per iteration and clears it on close.
     settings_changed: Arc<AtomicBool>,
+    /// Falling-edge close flag. The JS layer sets this via
+    /// `close_open_segment()` just before calling `getSessionReport()`
+    /// so the open segment is scored and emitted (`UserStopped`) before
+    /// the report is fetched. The analysis loop polls this once per
+    /// iteration; when set it fires the full Signal-B path (score +
+    /// emit + push_segment) without resetting activity state.
+    close_segment_now: Arc<AtomicBool>,
     /// Per-session raw telemetry — populated by the analysis loop,
     /// drained by `drain_telemetry()` at session end. See
     /// `SessionTelemetry` for the schema and why it exists.
@@ -279,6 +286,7 @@ impl TimingAnalyzer {
             onset_log: Arc::new(Mutex::new(VecDeque::with_capacity(64))),
             beat_log,
             settings_changed: Arc::new(AtomicBool::new(false)),
+            close_segment_now: Arc::new(AtomicBool::new(false)),
             telemetry: Arc::new(Mutex::new(SessionTelemetry::default())),
         }
     }
@@ -311,6 +319,20 @@ impl TimingAnalyzer {
     /// directly via the `boundary_signal_a` scenario in the gatekeeper.
     pub fn notify_settings_change(&self) {
         self.settings_changed.store(true, Ordering::SeqCst);
+    }
+
+    /// Force-close the open practice segment. The analysis loop picks
+    /// this up within 5ms, scores the segment, and emits
+    /// `practice-segment-ended` with `UserStopped` — calling
+    /// `push_segment()` via the `on_segment_end` callback. After this,
+    /// `getSessionReport()` returns the IC/GA score rather than the
+    /// legacy-formula fallback.
+    ///
+    /// Called by the JS falling-edge handler before fetching the mini-
+    /// report score so the score is correct from first display. Activity
+    /// state is NOT reset — the player can resume after the fetch.
+    pub fn close_open_segment(&self) {
+        self.close_segment_now.store(true, Ordering::SeqCst);
     }
 
     /// Start the analysis thread.
@@ -354,9 +376,10 @@ impl TimingAnalyzer {
         I: Fn(InferredGridChanged) + Send + 'static,
     {
         self.stop();
-        // Clear any stale Signal A flag from a prior session so a
+        // Clear any stale Signal A / close flags from a prior session so a
         // brand-new segment isn't immediately closed by leftover state.
         self.settings_changed.store(false, Ordering::SeqCst);
+        self.close_segment_now.store(false, Ordering::SeqCst);
         // Reset telemetry buffer so the new session starts fresh.
         // `stop()` deliberately preserves it so `drain_telemetry()` can
         // still extract the prior session's data; the responsibility
@@ -367,6 +390,7 @@ impl TimingAnalyzer {
         let onset_log = self.onset_log.clone();
         let beat_log = self.beat_log.clone();
         let settings_changed = self.settings_changed.clone();
+        let close_segment_now = self.close_segment_now.clone();
         let telemetry = self.telemetry.clone();
 
         self.thread_handle = Some(thread::spawn(move || {
@@ -375,6 +399,7 @@ impl TimingAnalyzer {
                 beat_log,
                 onset_log,
                 settings_changed,
+                close_segment_now,
                 telemetry,
                 profile,
                 instrument_id,
@@ -397,8 +422,9 @@ impl TimingAnalyzer {
         // Clear logs for next session
         self.onset_log.lock().unwrap().clear();
         self.beat_log.lock().unwrap().clear();
-        // Reset Signal A flag so the next session starts clean.
+        // Reset Signal A and close flags so the next session starts clean.
         self.settings_changed.store(false, Ordering::SeqCst);
+        self.close_segment_now.store(false, Ordering::SeqCst);
     }
 
     #[allow(dead_code)]
@@ -411,6 +437,7 @@ impl TimingAnalyzer {
         beat_log: BeatLog,
         onset_log: Arc<Mutex<VecDeque<Onset>>>,
         settings_changed: Arc<AtomicBool>,
+        close_segment_now: Arc<AtomicBool>,
         telemetry: Arc<Mutex<SessionTelemetry>>,
         profile: InstrumentProfile,
         instrument_id: String,
@@ -581,14 +608,22 @@ impl TimingAnalyzer {
         // `Locked` precondition we'd fire on every session-start
         // warmup where correlation is naturally low.
         #[derive(PartialEq, Clone, Copy)]
-        enum GridState { Pre, Locked, Lost }
+        enum GridState {
+            Pre,
+            Locked,
+            Lost,
+        }
         let mut grid_state = GridState::Pre;
         let mut grid_low_streak: u32 = 0;
 
         // ─── Activity state machine ─────────────────────────────────
         // Prevents unfair misses when user isn't playing yet or is resting
         #[derive(PartialEq)]
-        enum Activity { Idle, Active, Resting }
+        enum Activity {
+            Idle,
+            Active,
+            Resting,
+        }
         let mut activity = Activity::Idle;
         let mut consecutive_misses: u32 = 0;
         let mut grace_beats_remaining: u32 = 4; // warmup — never scored
@@ -598,15 +633,18 @@ impl TimingAnalyzer {
         let mut onsets_this_quarter: u32 = 0;
         let mut quarter_start_ns: u64 = 0;
 
-        while alive.load(Ordering::SeqCst) {
+        // `loop` instead of `while alive.load()` so that when stop() sets
+        // alive=false, the loop body always executes one final time with
+        // `stopping=true`. This guarantees every beat in beat_log and
+        // held_beats is force-flushed before the thread exits. The old
+        // `while alive.load()` pattern had a race: if alive flipped to
+        // false between two while-checks (i.e. the thread was mid-body
+        // on the previous iteration), the next while-check would exit
+        // immediately and skip the force-flush — causing the last 1–2
+        // beats to silently drop. The `if stopping { break; }` at the
+        // bottom of the body is what actually terminates the thread.
+        loop {
             thread::sleep(Duration::from_millis(5));
-            // On stop, fall through and complete one final iteration
-            // instead of breaking immediately. This lets us flush any
-            // beats still parked in `held_beats` (their deadline may
-            // not have passed yet, but no more onsets can arrive once
-            // the audio input is being torn down). The loop exits on
-            // the next while-check; the duplicate alive-check at the
-            // bottom is what actually terminates after the flush.
             let stopping = !alive.load(Ordering::SeqCst);
 
             // D4 — Signal A poll. If the JS layer called
@@ -629,6 +667,53 @@ impl TimingAnalyzer {
                     // an open segment; reset so the next segment open
                     // sets it fresh.
                     signal_b_silence_baseline_ms = 0;
+                }
+            }
+
+            // Falling-edge close poll — JS called `close_open_segment()`
+            // before fetching the session report. Scores and emits the open
+            // segment with `UserStopped` so `push_segment()` runs and
+            // `getSessionReport()` returns the IC/GA formula score instead
+            // of the legacy-formula fallback. Activity state is preserved
+            // (player can resume after the report is shown).
+            if close_segment_now.swap(false, Ordering::SeqCst) {
+                if let Some(seg) = segment.take() {
+                    let instr_profile = Instrument::from_id(&instrument_id).profile();
+                    let seg_weights = if seg.coach_mode == CoachMode::Default {
+                        instr_profile.default_score_weights
+                    } else {
+                        instr_profile.score_weights
+                    };
+                    let (score, components) = score_segment(&seg, &seg_weights);
+                    let onset_efficiency = if seg.total_onsets > 0 {
+                        (seg.onset_count as f32 / seg.total_onsets as f32).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let spurious_onsets = seg.total_onsets.saturating_sub(seg.onset_count);
+                    on_segment_end(PracticeSegmentEnded {
+                        start_ms: seg.start_wall_ms,
+                        end_ms: seg.last_onset_wall_ms,
+                        score,
+                        component_scores: components,
+                        bpm: seg.start_bpm,
+                        instrument: instrument_id.clone(),
+                        preset_id: preset_id.clone(),
+                        end_reason: SegmentEndReason::UserStopped,
+                        onset_count: seg.onset_count,
+                        beat_count: seg.beat_count,
+                        total_onsets: seg.total_onsets,
+                        spurious_onsets,
+                        onset_efficiency,
+                        inferred_divisor: rhythm_inference.current_divisor(),
+                        inferred_divisor_confidence: rhythm_inference.confidence(),
+                        play_mode: if onset_efficiency >= 0.45 {
+                            PlayMode::Structured
+                        } else {
+                            PlayMode::Noodling
+                        },
+                        interval_errors: seg.interval_errors.clone(),
+                    });
                 }
             }
 
@@ -698,8 +783,10 @@ impl TimingAnalyzer {
             held_beats.retain(|b| {
                 let window_ns =
                     (tempo_aware_window_ms(b.expected_interval_ms) * 1_000_000.0) as u64;
-                let deadline_ns =
-                    b.ts_ns.saturating_add(window_ns).saturating_add(ONSET_PIPELINE_LATENCY_NS);
+                let deadline_ns = b
+                    .ts_ns
+                    .saturating_add(window_ns)
+                    .saturating_add(ONSET_PIPELINE_LATENCY_NS);
                 // On stop, force-flush every remaining beat so the
                 // last 1–2 beats of a session aren't silently dropped
                 // (their deadline may sit a few tens of ms in the
@@ -713,6 +800,13 @@ impl TimingAnalyzer {
             });
 
             if beats.is_empty() {
+                // When stopping with nothing left to flush, exit cleanly.
+                // Without this, stop() called on an empty session hangs:
+                // the outer `loop` never reaches the `if stopping { break; }`
+                // at the bottom because `continue` restarts from the top.
+                if stopping {
+                    break;
+                }
                 continue;
             }
 
@@ -779,8 +873,7 @@ impl TimingAnalyzer {
                     // was too conservative: a 3 s stop at 80 BPM was
                     // below the threshold and wasn't detected.
                     let pause_threshold_ns = {
-                        let two_beats =
-                            (beat.expected_interval_ms * 2.0 * 1_000_000.0) as u64;
+                        let two_beats = (beat.expected_interval_ms * 2.0 * 1_000_000.0) as u64;
                         two_beats.clamp(1_500_000_000, 3_000_000_000)
                     };
                     if beat.ts_ns.saturating_sub(last_ts_ns) > pause_threshold_ns {
@@ -820,11 +913,7 @@ impl TimingAnalyzer {
                     let mut tel = telemetry.lock().unwrap();
                     tel.push_beat(ExpectedBeat {
                         index: beat.beat_index,
-                        timestamp_ms: ts_ns_to_wall_ms(
-                            beat.ts_ns,
-                            beat_base_wall_ms,
-                            beat_base_ns,
-                        ),
+                        timestamp_ms: ts_ns_to_wall_ms(beat.ts_ns, beat_base_wall_ms, beat_base_ns),
                         is_accent: beat.is_downbeat,
                         expected_bpm: beat_bpm,
                     });
@@ -869,9 +958,11 @@ impl TimingAnalyzer {
 
                 // The calibrated beat time: shift by the learned offset
                 let calibrated_beat_ns = if calibration_offset_ms >= 0.0 {
-                    beat.ts_ns.saturating_add((calibration_offset_ms * 1_000_000.0) as u64)
+                    beat.ts_ns
+                        .saturating_add((calibration_offset_ms * 1_000_000.0) as u64)
                 } else {
-                    beat.ts_ns.saturating_sub((-calibration_offset_ms * 1_000_000.0) as u64)
+                    beat.ts_ns
+                        .saturating_sub((-calibration_offset_ms * 1_000_000.0) as u64)
                 };
 
                 // Path B — matching window uses the EFFECTIVE interval
@@ -934,9 +1025,9 @@ impl TimingAnalyzer {
                     // D4c — emit activity transition on state change.
                     if prev_activity != Activity::Active {
                         let label = match prev_activity {
-                            Activity::Idle    => "idle→active",
+                            Activity::Idle => "idle→active",
                             Activity::Resting => "resting→active",
-                            Activity::Active  => unreachable!(),
+                            Activity::Active => unreachable!(),
                         };
                         let mut tel = telemetry.lock().unwrap();
                         tel.push_activity_transition(ActivityTransition {
@@ -952,14 +1043,12 @@ impl TimingAnalyzer {
                     // Reset per-quarter counter when a new quarter-note period starts.
                     // Use ts_ns to detect the boundary; beat.expected_interval_ms is
                     // the raw quarter-note interval from the clock.
-                    let quarter_interval_ns =
-                        (beat.expected_interval_ms * 1_000_000.0) as u64;
+                    let quarter_interval_ns = (beat.expected_interval_ms * 1_000_000.0) as u64;
                     if quarter_interval_ns > 0
                         && beat.ts_ns >= quarter_start_ns.saturating_add(quarter_interval_ns)
                     {
                         onsets_this_quarter = 0;
-                        let periods_elapsed =
-                            (beat.ts_ns - quarter_start_ns) / quarter_interval_ns;
+                        let periods_elapsed = (beat.ts_ns - quarter_start_ns) / quarter_interval_ns;
                         quarter_start_ns = quarter_start_ns
                             .saturating_add(periods_elapsed.saturating_mul(quarter_interval_ns));
                     }
@@ -981,8 +1070,7 @@ impl TimingAnalyzer {
                     }
 
                     // Raw offset (before calibration) for calibration update
-                    let raw_offset_ms =
-                        (onset.ts_ns as f64 - beat.ts_ns as f64) / 1_000_000.0;
+                    let raw_offset_ms = (onset.ts_ns as f64 - beat.ts_ns as f64) / 1_000_000.0;
 
                     // Update calibration with raw offset
                     calibration_offsets.push_back(raw_offset_ms);
@@ -1053,9 +1141,8 @@ impl TimingAnalyzer {
 
                     // Classify
                     let abs_dev = deviation_ms.abs();
-                    let confidence = (calibration_offsets.len() as f64
-                        / calibration_window as f64)
-                        .min(1.0);
+                    let confidence =
+                        (calibration_offsets.len() as f64 / calibration_window as f64).min(1.0);
 
                     // D3a — tempo-aware thresholds. At 120 BPM quarters
                     // the perfect bar lands at 16ms; at 200 BPM 16ths it
@@ -1100,9 +1187,7 @@ impl TimingAnalyzer {
                             // tolerance `k` proportional to the grid
                             // the player is actually playing.
                             start_interval_ms: effective_interval_ms,
-                            onset_floor_per_beat: *profile
-                                .expected_onsets_per_beat
-                                .start(),
+                            onset_floor_per_beat: *profile.expected_onsets_per_beat.start(),
                             onset_count: 0,
                             // D3b — this onset is about to be counted as
                             // matched below; seed the total counter so
@@ -1152,10 +1237,8 @@ impl TimingAnalyzer {
                         seg.onset_count = seg.onset_count.saturating_add(1);
                         onsets_this_quarter = onsets_this_quarter.saturating_add(1);
                         seg.beat_count = seg.beat_count.saturating_add(1);
-                        seg.total_expected_beats =
-                            seg.total_expected_beats.saturating_add(1);
-                        seg.active_expected_beats =
-                            seg.active_expected_beats.saturating_add(1);
+                        seg.total_expected_beats = seg.total_expected_beats.saturating_add(1);
+                        seg.active_expected_beats = seg.active_expected_beats.saturating_add(1);
                         let class_score: f64 = match classification {
                             "perfect" => {
                                 seg.perfect += 1;
@@ -1201,9 +1284,14 @@ impl TimingAnalyzer {
                             if had_gap {
                                 // New burst: record split point at current
                                 // error count (cross-burst interval excluded).
-                                seg.burst_start_indices
-                                    .push(seg.interval_errors.len());
+                                seg.burst_start_indices.push(seg.interval_errors.len());
                             } else if prev_onset_ns.is_some() {
+                                // IC uses matched-onset intervals only. `interval_error_ms`
+                                // was computed from `prev_onset_ns`, which is only updated
+                                // inside this `if let Some(idx) = best_idx` block — spurious
+                                // onsets (ghost-window emissions, over-density-cap notes, or
+                                // genuine between-beat notes) never update `prev_onset_ns`
+                                // and therefore cannot contaminate the IC input set.
                                 seg.interval_errors.push(interval_error_ms);
                             }
                         }
@@ -1245,9 +1333,7 @@ impl TimingAnalyzer {
                         let mut tel = telemetry.lock().unwrap();
                         tel.push_match(MatchDecision {
                             beat_index: beat.beat_index,
-                            onset_indices: onset_tel_idx
-                                .map(|i| vec![i])
-                                .unwrap_or_default(),
+                            onset_indices: onset_tel_idx.map(|i| vec![i]).unwrap_or_default(),
                             deviation_ms: deviation_ms.round() as i32,
                             classification: Classification::from_str(classification),
                             reason: MatchReason::InsideWindow,
@@ -1260,8 +1346,7 @@ impl TimingAnalyzer {
                     let confidence = if calibration_offsets.is_empty() {
                         0.0
                     } else {
-                        (calibration_offsets.len() as f64 / calibration_window as f64)
-                            .min(1.0)
+                        (calibration_offsets.len() as f64 / calibration_window as f64).min(1.0)
                     };
 
                     // D4 — profile-driven activity state machine. Active
@@ -1295,16 +1380,11 @@ impl TimingAnalyzer {
                                 // decay and intra-phrase note gaps (200–400ms) that
                                 // would otherwise generate spurious active→resting
                                 // transitions every ~2s in a continuous playing session.
-                                let beat_wall_ms = ts_ns_to_wall_ms(
-                                    beat.ts_ns,
-                                    beat_base_wall_ms,
-                                    beat_base_ns,
-                                );
+                                let beat_wall_ms =
+                                    ts_ns_to_wall_ms(beat.ts_ns, beat_base_wall_ms, beat_base_ns);
                                 let silence_ms = segment
                                     .as_ref()
-                                    .map(|seg| {
-                                        beat_wall_ms.saturating_sub(seg.last_onset_wall_ms)
-                                    })
+                                    .map(|seg| beat_wall_ms.saturating_sub(seg.last_onset_wall_ms))
                                     .unwrap_or(u64::MAX);
                                 if silence_ms >= RESTING_DEBOUNCE_MS {
                                     activity = Activity::Resting;
@@ -1368,8 +1448,7 @@ impl TimingAnalyzer {
                             // (especially guitar where HC weight = 0).
                             // Active-state miss: counts toward HC denominator
                             // (player attempted but missed — not a rest).
-                            seg.active_expected_beats =
-                                seg.active_expected_beats.saturating_add(1);
+                            seg.active_expected_beats = seg.active_expected_beats.saturating_add(1);
                         }
                     }
 
@@ -1382,8 +1461,7 @@ impl TimingAnalyzer {
                     // those beats counted in the denominator of
                     // `hit_completeness`.
                     if let Some(seg) = segment.as_mut() {
-                        seg.total_expected_beats =
-                            seg.total_expected_beats.saturating_add(1);
+                        seg.total_expected_beats = seg.total_expected_beats.saturating_add(1);
                     }
 
                     // D4 — Signal-B emission: ≥30s of sustained play
@@ -1400,10 +1478,8 @@ impl TimingAnalyzer {
                             // ts_ns gap > METRONOME_PAUSE_THRESHOLD_NS), preventing
                             // the stop duration from being counted as player silence
                             // and firing Signal B the instant the player resumes.
-                            let silence_ms = now_wall
-                                .saturating_sub(signal_b_silence_baseline_ms);
-                            let play_ms =
-                                seg.last_onset_wall_ms.saturating_sub(seg.start_wall_ms);
+                            let silence_ms = now_wall.saturating_sub(signal_b_silence_baseline_ms);
+                            let play_ms = seg.last_onset_wall_ms.saturating_sub(seg.start_wall_ms);
                             if silence_ms >= SIGNAL_B_MIN_SILENCE_MS
                                 && play_ms >= SIGNAL_B_MIN_PLAY_MS
                             {
@@ -1423,9 +1499,8 @@ impl TimingAnalyzer {
                                 } else {
                                     0.0
                                 };
-                                let spurious_onsets = seg
-                                    .total_onsets
-                                    .saturating_sub(seg.onset_count);
+                                let spurious_onsets =
+                                    seg.total_onsets.saturating_sub(seg.onset_count);
                                 on_segment_end(PracticeSegmentEnded {
                                     start_ms: seg.start_wall_ms,
                                     end_ms: seg.last_onset_wall_ms,
@@ -1440,10 +1515,8 @@ impl TimingAnalyzer {
                                     total_onsets: seg.total_onsets,
                                     spurious_onsets,
                                     onset_efficiency,
-                                    inferred_divisor: rhythm_inference
-                                        .current_divisor(),
-                                    inferred_divisor_confidence:
-                                        rhythm_inference.confidence(),
+                                    inferred_divisor: rhythm_inference.current_divisor(),
+                                    inferred_divisor_confidence: rhythm_inference.confidence(),
                                     play_mode: if onset_efficiency >= 0.45 {
                                         PlayMode::Structured
                                     } else {
@@ -1533,15 +1606,15 @@ impl TimingAnalyzer {
                         if grid_low_streak >= GRID_LOSS_SUSTAIN_BEATS {
                             if let Some(seg) = segment.as_ref() {
                                 let now_wall = now_wall_ms();
-                                let play_ms = seg
-                                    .last_onset_wall_ms
-                                    .saturating_sub(seg.start_wall_ms);
+                                let play_ms =
+                                    seg.last_onset_wall_ms.saturating_sub(seg.start_wall_ms);
                                 // Only emit if the segment had real
                                 // play — same gate as Signal-B so we
                                 // don't surface a "drifted" report
                                 // for a 5-second warmup blip.
                                 if play_ms >= SIGNAL_B_MIN_PLAY_MS {
-                                    let instr_profile = Instrument::from_id(&instrument_id).profile();
+                                    let instr_profile =
+                                        Instrument::from_id(&instrument_id).profile();
                                     let seg_weights = if seg.coach_mode == CoachMode::Default {
                                         instr_profile.default_score_weights
                                     } else {
@@ -1554,9 +1627,8 @@ impl TimingAnalyzer {
                                     } else {
                                         0.0
                                     };
-                                    let spurious_onsets = seg
-                                        .total_onsets
-                                        .saturating_sub(seg.onset_count);
+                                    let spurious_onsets =
+                                        seg.total_onsets.saturating_sub(seg.onset_count);
                                     on_segment_end(PracticeSegmentEnded {
                                         start_ms: seg.start_wall_ms,
                                         end_ms: now_wall,
@@ -1571,10 +1643,8 @@ impl TimingAnalyzer {
                                         total_onsets: seg.total_onsets,
                                         spurious_onsets,
                                         onset_efficiency,
-                                        inferred_divisor: rhythm_inference
-                                            .current_divisor(),
-                                        inferred_divisor_confidence:
-                                            rhythm_inference.confidence(),
+                                        inferred_divisor: rhythm_inference.current_divisor(),
+                                        inferred_divisor_confidence: rhythm_inference.confidence(),
                                         play_mode: if onset_efficiency >= 0.45 {
                                             PlayMode::Structured
                                         } else {
@@ -1646,6 +1716,10 @@ impl TimingAnalyzer {
                 }
                 pending_onsets.retain(|(o, _)| o.ts_ns >= cutoff);
             }
+            // Exit the loop after the final flush iteration.
+            if stopping {
+                break;
+            }
         }
 
         // ─── Session-end segment close ───────────────────────────────
@@ -1669,8 +1743,7 @@ impl TimingAnalyzer {
                 };
                 let (score, components) = score_segment(&seg, &seg_weights);
                 let onset_efficiency = if seg.total_onsets > 0 {
-                    (seg.onset_count as f32 / seg.total_onsets as f32)
-                        .clamp(0.0, 1.0)
+                    (seg.onset_count as f32 / seg.total_onsets as f32).clamp(0.0, 1.0)
                 } else {
                     0.0
                 };
@@ -1843,20 +1916,14 @@ impl RhythmInference {
         if self.last_beat_interval_ms <= 0.0 {
             return;
         }
-        let beat_interval_ns =
-            (self.last_beat_interval_ms * 1_000_000.0) as u64;
+        let beat_interval_ns = (self.last_beat_interval_ms * 1_000_000.0) as u64;
         let candidates = candidate_divisors(self.subdivision_total);
 
         // "Smallest divisor that fits" — iterate ascending and pick the
         // first whose fit clears the threshold.
         let mut picked: Option<(u8, f64)> = None;
         for &d in &candidates {
-            let fit = compute_divisor_fit(
-                &self.onset_history,
-                reference_ns,
-                beat_interval_ns,
-                d,
-            );
+            let fit = compute_divisor_fit(&self.onset_history, reference_ns, beat_interval_ns, d);
             if fit >= MIN_LOCK_FIT {
                 picked = Some((d, fit));
                 break;
@@ -1888,14 +1955,12 @@ impl RhythmInference {
                 // `HYSTERESIS_STREAK_REQUIRED` consecutive refits.
                 if best_fit >= self.locked_fit + HYSTERESIS_MARGIN {
                     if self.hysteresis_candidate == Some(best_d) {
-                        self.hysteresis_streak =
-                            self.hysteresis_streak.saturating_add(1);
+                        self.hysteresis_streak = self.hysteresis_streak.saturating_add(1);
                     } else {
                         self.hysteresis_candidate = Some(best_d);
                         self.hysteresis_streak = 1;
                     }
-                    if self.hysteresis_streak >= HYSTERESIS_STREAK_REQUIRED
-                    {
+                    if self.hysteresis_streak >= HYSTERESIS_STREAK_REQUIRED {
                         self.locked_divisor = Some(best_d);
                         self.locked_fit = best_fit;
                         self.hysteresis_candidate = None;
@@ -2015,8 +2080,7 @@ fn compute_divisor_fit(
     // jitter), capped at 40ms (so divisor 1 at 60 BPM doesn't claim
     // every onset is "on grid"). The 20% / 10ms / 40ms triplet matches
     // the empirical window we tuned for `compute_grid_correlation`.
-    let tol_ns =
-        ((grid_step_ns * 20) / 100).max(10_000_000).min(40_000_000);
+    let tol_ns = ((grid_step_ns * 20) / 100).max(10_000_000).min(40_000_000);
     let interval = beat_interval_ns as i64;
     let mut on_grid: usize = 0;
     for &onset_ns in onset_history.iter() {
@@ -2196,10 +2260,12 @@ const IC_K_FACTOR_DEFAULT: f64 = 0.8;
 /// deviations. A player with perfectly even spacing but a fixed offset
 /// scores 1.0 on this component — that's the core insight from D3c.
 ///
-/// **Under-play loophole guard:** `hit_completeness` divides by
-/// `total_expected_beats`, which includes every beat tick during the
-/// segment's lifespan (Active + Resting + Idle), not just active
-/// attempts. Sparse play patterns no longer score like clean runs.
+/// **Under-play loophole guard:** `hit_completeness` uses
+/// `active_expected_beats` (Active-state hits + genuine misses only) as its
+/// denominator so burst-practice rest periods don't count against coverage.
+/// `total_expected_beats` (all beat ticks, including Resting/Idle skips) is
+/// still used as the `onset_efficiency` floor to prevent the "ratio of
+/// nothing" exploit where sparse play would otherwise inflate that score.
 fn score_segment(seg: &SegmentState, weights: &ScoreWeights) -> (f32, ComponentScores) {
     // ── interval_consistency ────────────────────────────────────────
     //
@@ -2214,12 +2280,35 @@ fn score_segment(seg: &SegmentState, weights: &ScoreWeights) -> (f32, ComponentS
     // typically not graded anyway (the < 8 beats gate in D3d).
     // Tempo-aware Gaussian width. Weber's law: timing tolerance scales
     // with interval. k = window × 0.4 (σ=k → IC≈0.61, σ=2k → IC≈0.14).
+    //
+    // Spurious-onset isolation guarantee: `seg.interval_errors` contains
+    // only intervals between consecutive *matched* onsets. The push site
+    // is inside the `if let Some(idx) = best_idx` block and `prev_onset_ns`
+    // is updated only for matched beats — spurious onsets (ghost-window
+    // emissions, density-cap rejections, genuine between-beat notes) never
+    // contribute to this Vec. A session with many spurious onsets therefore
+    // does NOT contaminate IC; low IC reflects real player timing variance
+    // (burst structure, gap penalties) rather than ghost-onset bleed.
     let interval_ms = if seg.start_interval_ms > 0.0 {
         seg.start_interval_ms
     } else {
         500.0
     };
-    let window_ms = tempo_aware_window_ms(interval_ms);
+    // DEFAULT_EVAL: when the user is in Default mode and the metronome is
+    // subdivided (e.g. 16ths over a 120 BPM quarter grid), base the IC
+    // Gaussian window on the *quarter-note* interval rather than the tick
+    // interval.  Without this, playing 16ths is penalised ~3× more harshly
+    // than playing quarters at the same BPM — the window shrinks from 80ms
+    // (quarters at 120) to 50ms (16ths at 120).  Default mode should judge
+    // rhythmic regularity at the beat level, not at the subdivision level.
+    // Pro mode keeps the stricter per-tick window to reward subdivision
+    // accuracy.
+    let ic_interval_ms = if seg.coach_mode == CoachMode::Default && seg.subdivision > 1 {
+        (interval_ms * seg.subdivision as f64).min(500.0) // quarter interval, capped at ~120 BPM
+    } else {
+        interval_ms
+    };
+    let window_ms = tempo_aware_window_ms(ic_interval_ms);
     let k_factor = if seg.coach_mode == CoachMode::Default {
         IC_K_FACTOR_DEFAULT
     } else {
@@ -2257,8 +2346,7 @@ fn score_segment(seg: &SegmentState, weights: &ScoreWeights) -> (f32, ComponentS
             let mut sorted: Vec<f64> = slice.to_vec();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let med = median_f64(&sorted);
-            let mut abs_devs: Vec<f64> =
-                sorted.iter().map(|d| (d - med).abs()).collect();
+            let mut abs_devs: Vec<f64> = sorted.iter().map(|d| (d - med).abs()).collect();
             abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let mad = median_f64(&abs_devs);
             let sigma = mad * 1.4826;
@@ -2288,23 +2376,23 @@ fn score_segment(seg: &SegmentState, weights: &ScoreWeights) -> (f32, ComponentS
     // played, not coverage (HC handles that). Skipped beats (no-activity)
     // are also not in the accumulator. If no hits at all, GA = 0.0.
     let grid_alignment = if seg.grid_alignment_denominator > 0.0 {
-        ((seg.grid_alignment_numerator / seg.grid_alignment_denominator) / 100.0)
-            .clamp(0.0, 1.0) as f32
+        ((seg.grid_alignment_numerator / seg.grid_alignment_denominator) / 100.0).clamp(0.0, 1.0)
+            as f32
     } else {
         0.0
     };
 
     // ── hit_completeness ────────────────────────────────────────────
     //
-    // Confidence-weighted Σ(match.confidence) / total_expected_beats.
+    // Confidence-weighted Σ(match.confidence) / active_expected_beats.
     // A perfect-confidence session still scores 1.0; a session where
     // every beat matched at 0.5 confidence scores 0.5 — "muddy" playing
     // that lands on the beat but with a soft, ambiguous transient now
     // appears in the score rather than being masked by raw beat count.
     //
-    // CRITICAL: denominator is every beat tick that fired while the
-    // segment was open, not just active beats. See the comment on
-    // `total_expected_beats`.
+    // NOTE: denominator is `active_expected_beats` (Active-state hits +
+    // genuine misses only). Resting/Idle skips are intentional pauses and
+    // must NOT count against coverage. See `active_expected_beats`.
     //
     // Fallback: test fixtures that leave `matched_confidence_sum = 0`
     // (the pre-confidence-matrix path) fall back to the raw beat count
@@ -2360,8 +2448,8 @@ fn score_segment(seg: &SegmentState, weights: &ScoreWeights) -> (f32, ComponentS
     // behavior so the scenario matrix stays stable.
     let raw_spurious = seg.total_onsets.saturating_sub(seg.onset_count) as f32;
     let weighted_spurious: f32 = if !seg.spurious_amplitudes.is_empty() {
-        let sum: f32 = seg.amplitudes.iter().sum::<f32>()
-            + seg.spurious_amplitudes.iter().sum::<f32>();
+        let sum: f32 =
+            seg.amplitudes.iter().sum::<f32>() + seg.spurious_amplitudes.iter().sum::<f32>();
         let n = (seg.amplitudes.len() + seg.spurious_amplitudes.len()) as f32;
         let mean_amp: f32 = if n > 0.0 { sum / n } else { 0.0 };
         if mean_amp > 0.0 {
@@ -2652,9 +2740,9 @@ fn compute_grid_correlation(
             let grid_phase = ((phase + grid_step / 2) / grid_step) * grid_step;
             let dist = (phase - grid_phase).abs();
             // Also check wrapping around beat boundary
-            let dist_wrap = (phase - (grid_phase - interval)).abs().min(
-                (phase - (grid_phase + interval)).abs(),
-            );
+            let dist_wrap = (phase - (grid_phase - interval))
+                .abs()
+                .min((phase - (grid_phase + interval)).abs());
             let min_dist = dist.min(dist_wrap);
             if min_dist < best_distance {
                 best_distance = min_dist;
@@ -2866,10 +2954,14 @@ mod tests {
             0,
             0,
             0,
-            vec![-3.0, 2.0, -1.5, 0.5, -2.0, 1.0, -3.0, 2.5, -1.0, 0.5,
-                 -2.5, 1.5, -1.0, 0.0, -2.0, 1.0, -3.0, 0.5, -1.5, 2.0],
-            vec![0.3, 0.5, 0.7, 0.4, 0.6, 0.8, 0.5, 0.3, 0.7, 0.6,
-                 0.4, 0.5, 0.8, 0.3, 0.6, 0.7, 0.5, 0.4, 0.8, 0.6],
+            vec![
+                -3.0, 2.0, -1.5, 0.5, -2.0, 1.0, -3.0, 2.5, -1.0, 0.5, -2.5, 1.5, -1.0, 0.0, -2.0,
+                1.0, -3.0, 0.5, -1.5, 2.0,
+            ],
+            vec![
+                0.3, 0.5, 0.7, 0.4, 0.6, 0.8, 0.5, 0.3, 0.7, 0.6, 0.4, 0.5, 0.8, 0.3, 0.6, 0.7,
+                0.5, 0.4, 0.8, 0.6,
+            ],
         );
         let (score, comp) = score_segment(&seg, &ScoreWeights::default());
         // All-perfect run: hit_completeness=1.0, grid_alignment=1.0,
@@ -2891,7 +2983,11 @@ mod tests {
         // matched onsets). Score should be well under 30.
         assert_eq!(comp.grid_alignment, 0.0);
         assert_eq!(comp.hit_completeness, 0.0);
-        assert!(score < 30.0, "all-miss run should score < 30, got {}", score);
+        assert!(
+            score < 30.0,
+            "all-miss run should score < 30, got {}",
+            score
+        );
     }
 
     #[test]
@@ -2920,11 +3016,7 @@ mod tests {
         // Weighted total for LOUD: 10 + (5 × 2.0) = 20 → oe = 10/20 = 0.5
         // Weighted total for QUIET: 10 + (5 × 0.3) = 11.5 → oe = 10/11.5 ≈ 0.87
         fn seg_with_spurious(matched_amp: f32, spurious_amp: f32) -> SegmentState {
-            let mut seg = make_seg(
-                10, 0, 0, 0,
-                vec![1.0; 10],
-                vec![matched_amp; 10],
-            );
+            let mut seg = make_seg(10, 0, 0, 0, vec![1.0; 10], vec![matched_amp; 10]);
             // Append spurious WITH amplitudes so the new weighted path
             // activates. total_onsets includes them.
             seg.spurious_amplitudes = vec![spurious_amp; 5];
@@ -2933,7 +3025,8 @@ mod tests {
         }
 
         let (_, loud_comp) = score_segment(&seg_with_spurious(0.5, 1.5), &ScoreWeights::default());
-        let (_, quiet_comp) = score_segment(&seg_with_spurious(0.5, 0.05), &ScoreWeights::default());
+        let (_, quiet_comp) =
+            score_segment(&seg_with_spurious(0.5, 0.05), &ScoreWeights::default());
 
         // Quiet spurious should leave onset_efficiency higher than loud.
         assert!(
@@ -2963,11 +3056,7 @@ mod tests {
         // each spurious must weigh 1.0 so the formula matches the old
         // matched/total. This is the back-compat guarantee for the D3d
         // scenario matrix.
-        let mut seg = make_seg(
-            10, 0, 0, 0,
-            vec![1.0; 10],
-            vec![0.5; 10],
-        );
+        let mut seg = make_seg(10, 0, 0, 0, vec![1.0; 10], vec![0.5; 10]);
         // Set total_onsets directly (simulating the old fixture path).
         seg.spurious_amplitudes = vec![]; // intentionally empty
         seg.total_onsets = 15;
@@ -2993,12 +3082,15 @@ mod tests {
         // denominator collapses to `matched_weight`.
         fn seg_with_match_conf(conf: f32) -> SegmentState {
             let mut seg = make_seg_full(
-                10, 0, 0, 0,
+                10,
+                0,
+                0,
+                0,
                 vec![1.0; 10],
                 vec![],
                 vec![0.5; 10],
                 500.0,
-                1.0,   // onset_floor_per_beat — tighter than default 0.5
+                1.0, // onset_floor_per_beat — tighter than default 0.5
                 1.0,
             );
             seg.matched_confidence_sum = (conf * 10.0).max(0.05);
@@ -3030,11 +3122,7 @@ mod tests {
         // pre-confidence matrix path) must still see the old
         // `matched / max(weighted_total, floor)` behavior. This is
         // the back-compat guarantee for the existing D3d scenarios.
-        let mut seg = make_seg(
-            10, 0, 0, 0,
-            vec![1.0; 10],
-            vec![0.5; 10],
-        );
+        let mut seg = make_seg(10, 0, 0, 0, vec![1.0; 10], vec![0.5; 10]);
         seg.spurious_amplitudes = vec![];
         seg.total_onsets = 15;
         // matched_confidence_sum left at 0.0 (default).
@@ -3173,8 +3261,10 @@ mod tests {
         // a transition table over these three values.
         assert!((GRID_LOCK_THRESHOLD - 0.7).abs() < 1e-9);
         assert!((GRID_LOSS_THRESHOLD - 0.3).abs() < 1e-9);
-        assert!(GRID_LOCK_THRESHOLD > GRID_LOSS_THRESHOLD,
-            "gap between lock and loss is what makes Signal-D anti-flap");
+        assert!(
+            GRID_LOCK_THRESHOLD > GRID_LOSS_THRESHOLD,
+            "gap between lock and loss is what makes Signal-D anti-flap"
+        );
         assert_eq!(GRID_LOSS_SUSTAIN_BEATS, 4);
     }
 
@@ -3303,11 +3393,10 @@ mod tests {
     #[test]
     fn d3d_scenario_01_perfect_run() {
         let seg = seg_scenario(
-            32, 0, 0, 0,
-            0.5,    // ~0 σ
-            32,     // matched-only onset stream
-            500.0,  // 120 BPM
-            1.0,    // drums floor
+            32, 0, 0, 0, 0.5,   // ~0 σ
+            32,    // matched-only onset stream
+            500.0, // 120 BPM
+            1.0,   // drums floor
             0xD3D_01,
         );
         let (score, _) = score_segment(&seg, &ScoreWeights::default());
@@ -3327,19 +3416,13 @@ mod tests {
     // is acceptable in practice.
     #[test]
     fn d3d_scenario_02_under_play() {
-        let seg = seg_scenario(
-            16, 0, 0, 16,
-            0.5,
-            16,
-            500.0,
-            0.5,
-            0xD3D_02,
-        );
+        let seg = seg_scenario(16, 0, 0, 16, 0.5, 16, 500.0, 0.5, 0xD3D_02);
         let (score, comp) = score_segment(&seg, &ScoreWeights::default());
         // Verify hit_completeness caught the under-play loophole.
         assert!(
             (comp.hit_completeness - 0.5).abs() < 0.01,
-            "hit_completeness should ≈0.5, got {}", comp.hit_completeness
+            "hit_completeness should ≈0.5, got {}",
+            comp.hit_completeness
         );
         // Adjusted target band documenting weight trade-off.
         assert_in_band("scenario 2 (under-play)", score, 60.0, 80.0);
@@ -3350,12 +3433,9 @@ mod tests {
     #[test]
     fn d3d_scenario_03_random_noodling() {
         let seg = seg_scenario(
-            2, 4, 8, 18,
-            100.0,  // very erratic intervals
-            96,     // 3× total_expected (32 beats × 3)
-            500.0,
-            0.5,
-            0xD3D_03,
+            2, 4, 8, 18, 100.0, // very erratic intervals
+            96,    // 3× total_expected (32 beats × 3)
+            500.0, 0.5, 0xD3D_03,
         );
         let (score, _) = score_segment(&seg, &ScoreWeights::default());
         // k=0.6× widens IC tolerance; random noodling scores slightly higher
@@ -3369,12 +3449,9 @@ mod tests {
     #[test]
     fn d3d_scenario_04_beat_one_accent_only() {
         let seg = seg_scenario(
-            8, 4, 4, 16,
-            70.0,   // intervals erratic — random noodling between accents
-            60,     // ~2× total_expected
-            500.0,
-            0.5,
-            0xD3D_04,
+            8, 4, 4, 16, 70.0, // intervals erratic — random noodling between accents
+            60,   // ~2× total_expected
+            500.0, 0.5, 0xD3D_04,
         );
         let (score, _) = score_segment(&seg, &ScoreWeights::default());
         // k=0.6× raises the IC tolerance; beat-1-only noodling scores
@@ -3396,14 +3473,7 @@ mod tests {
     // via classification scores and the diagnostic chips.
     #[test]
     fn d3d_scenario_05_constant_late() {
-        let seg = seg_scenario(
-            0, 32, 0, 0,
-            0.5,
-            32,
-            500.0,
-            0.5,
-            0xD3D_05,
-        );
+        let seg = seg_scenario(0, 32, 0, 0, 0.5, 32, 500.0, 0.5, 0xD3D_05);
         let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 5 (constant late)", score, 85.0, 100.0);
     }
@@ -3494,7 +3564,12 @@ mod tests {
         seg.spurious_amplitudes = vec![0.95_f32; 4];
         seg.total_onsets += 4;
         let (score, _) = score_segment(&seg, &ScoreWeights::default());
-        assert_in_band("scenario 9a (fast perfect + loud spurious)", score, 93.0, 99.0);
+        assert_in_band(
+            "scenario 9a (fast perfect + loud spurious)",
+            score,
+            93.0,
+            99.0,
+        );
     }
 
     // ── Scenario 09b — Fast perfect + quiet spurious ─────────────────
@@ -3519,7 +3594,12 @@ mod tests {
         seg.spurious_amplitudes = vec![0.15_f32; 4];
         seg.total_onsets += 4;
         let (score, _) = score_segment(&seg, &ScoreWeights::default());
-        assert_in_band("scenario 9b (fast perfect + quiet spurious)", score, 96.0, 100.0);
+        assert_in_band(
+            "scenario 9b (fast perfect + quiet spurious)",
+            score,
+            96.0,
+            100.0,
+        );
     }
 
     // ── Scenario 10 — Random 16ths at 180 BPM ───────────────────────
@@ -3529,12 +3609,9 @@ mod tests {
     fn d3d_scenario_10_fast_random() {
         let interval = 60_000.0 / 180.0 / 4.0;
         let seg = seg_scenario(
-            3, 5, 10, 46,
-            40.0,   // σ huge relative to k = 13ms at 180BPM 16ths
-            192,    // 3× expected
-            interval,
-            0.5,
-            0xD3D_10,
+            3, 5, 10, 46, 40.0, // σ huge relative to k = 13ms at 180BPM 16ths
+            192,  // 3× expected
+            interval, 0.5, 0xD3D_10,
         );
         let (score, _) = score_segment(&seg, &ScoreWeights::default());
         assert_in_band("scenario 10 (fast random)", score, 0.0, 25.0);
@@ -3744,9 +3821,8 @@ mod tests {
         let grid_den = 16.0 * 0.9 + 16.0 * 0.2 + (miss as f64) * 1.0;
 
         let mut seg = make_seg_full(
-            perfect, good, ok, miss,
-            devs, intervals, amps,
-            500.0, 0.5, 1.0, // make_seg_full will be overridden below
+            perfect, good, ok, miss, devs, intervals, amps, 500.0, 0.5,
+            1.0, // make_seg_full will be overridden below
         );
         // Override the accumulator fields to reflect mixed-confidence reality.
         seg.grid_alignment_numerator = grid_num;
@@ -3771,7 +3847,12 @@ mod tests {
         // the pre-confidence-weight era (was 93-100, now 83-92).
         // This is correct — the calibration confidence collapse is now
         // visible in the score, not just in onset_efficiency alone.
-        assert_in_band("scenario 20 (calibration collapse mid-session)", score, 83.0, 92.0);
+        assert_in_band(
+            "scenario 20 (calibration collapse mid-session)",
+            score,
+            83.0,
+            92.0,
+        );
     }
 
     // ── Scenario 21 — Calibration disabled, linear drift +0.5ms/beat ─
@@ -3804,7 +3885,12 @@ mod tests {
             "scenario 21: interval_consistency should stay > 0.9 under low drift, got {}",
             comp.interval_consistency
         );
-        assert_in_band("scenario 21 (calibration disabled drift)", score, 95.0, 100.0);
+        assert_in_band(
+            "scenario 21 (calibration disabled drift)",
+            score,
+            95.0,
+            100.0,
+        );
     }
 
     // ── Weight invariants ───────────────────────────────────────────
@@ -3871,8 +3957,7 @@ mod tests {
         let beat_log = create_beat_log();
         let mut analyzer = TimingAnalyzer::new(beat_log.clone());
 
-        let feedbacks: Arc<Mutex<Vec<BeatFeedback>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let feedbacks: Arc<Mutex<Vec<BeatFeedback>>> = Arc::new(Mutex::new(Vec::new()));
         let feedbacks_writer = feedbacks.clone();
 
         analyzer.start(
@@ -3911,10 +3996,7 @@ mod tests {
         // for the dedup test — only ordering does — so we keep them
         // tight to stay safely inside the analyzer's already-elapsed
         // deadline window.
-        let make_ticks = |count: u32,
-                          base_ts_ns: u64,
-                          first_beat_index: u32|
-         -> Vec<BeatTick> {
+        let make_ticks = |count: u32, base_ts_ns: u64, first_beat_index: u32| -> Vec<BeatTick> {
             (0..count)
                 .map(|i| BeatTick {
                     ts_ns: base_ts_ns + i as u64,
@@ -3990,8 +4072,7 @@ mod tests {
         let beat_log = create_beat_log();
         let mut analyzer = TimingAnalyzer::new(beat_log.clone());
 
-        let feedbacks: Arc<Mutex<Vec<BeatFeedback>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let feedbacks: Arc<Mutex<Vec<BeatFeedback>>> = Arc::new(Mutex::new(Vec::new()));
         let feedbacks_writer = feedbacks.clone();
 
         analyzer.start(
@@ -4088,8 +4169,7 @@ mod tests {
         let beat_log = create_beat_log();
         let mut analyzer = TimingAnalyzer::new(beat_log.clone());
 
-        let segment_ends: Arc<Mutex<Vec<SegmentEndReason>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let segment_ends: Arc<Mutex<Vec<SegmentEndReason>>> = Arc::new(Mutex::new(Vec::new()));
         let seg_ends_writer = segment_ends.clone();
 
         analyzer.start(
@@ -4124,4 +4204,3 @@ mod tests {
         );
     }
 }
-

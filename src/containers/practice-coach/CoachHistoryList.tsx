@@ -30,8 +30,40 @@ export function CoachHistoryList({
 
   const grouped = groupByDay(sessions);
 
+  const icValues = [...sessions]
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .map(s => s.report.intervalConsistency)
+    .filter((v): v is number => v !== undefined)
+    .slice(-8);
+
   return (
     <div className="coach-history-list">
+      {icValues.length >= 3 && (
+        <div className="coach-history-ic-trend">
+          <span className="coach-history-ic-label">Note spacing trend</span>
+          <svg width="80" height="20" viewBox="0 0 80 20" aria-hidden="true">
+            {icValues.slice(1).map((v, i) => {
+              const prev = icValues[i];
+              const x1 = (i / (icValues.length - 1)) * 76 + 2;
+              const y1 = 18 - prev * 16;
+              const x2 = ((i + 1) / (icValues.length - 1)) * 76 + 2;
+              const y2 = 18 - v * 16;
+              return (
+                <line
+                  key={i}
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  stroke="var(--accent, #7c6af7)"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                />
+              );
+            })}
+          </svg>
+        </div>
+      )}
       {grouped.map((group) => (
         <div key={group.label}>
           <div className="coach-history-heading">{group.label}</div>

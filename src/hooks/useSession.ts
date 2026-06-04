@@ -68,6 +68,9 @@ const REALTIME_WINDOW_BEATS = 32;
 // this floor we'd evaluate too aggressively and burn the cooldown
 // budget. In 4/4 this is one evaluation per ~2 bars at 120 BPM.
 const MIN_BEATS_PER_EVAL_CHECK = 8;
+// Suppress all reactive tips (gatekeeper + realtime) for the first N ms
+// of each session so the player has time to warm up before feedback lands.
+const COACH_WARMUP_MS = 20_000;
 
 type Evaluation = ReturnType<typeof useEvaluation>;
 
@@ -508,13 +511,15 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       if (beatsSinceLastCheckRef.current < Math.max(MIN_BEATS_PER_EVAL_CHECK, barsWorth)) return;
       beatsSinceLastCheckRef.current = 0;
 
+      // Warmup guard: no reactive tips until the player has had time to settle.
+      const now = Date.now();
+      if (startedAt != null && now - startedAt < COACH_WARMUP_MS) return;
+
       const gk = gatekeeperRef.current;
       if (!gk) {
         coachDebug("gatekeeper.skip", "no-gatekeeper-yet");
         return; // session not fully started yet
       }
-
-      const now = Date.now();
       coachDebug("gatekeeper.evaluate", {
         bpm: playBpmRef.current,
         winLen: window.length,
@@ -1280,7 +1285,14 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     // React state; calling stop_evaluation twice is idempotent — the
     // Rust command returns early if the analyzer is already stopped.
     if (evaluation.enabled) {
-      await stopEvaluation();
+      try {
+        await stopEvaluation();
+      } catch (e) {
+        // stopEvaluation failing should never strand the session in active
+        // state. Log the error for diagnosis (e.g. "Lock failed: poisoned"
+        // from a timing-thread panic cascade) and continue the end flow.
+        console.error("[endSession] stopEvaluation failed:", e);
+      }
     }
 
     // Same rescoring rationale as the mini-report path above — see
@@ -1307,39 +1319,81 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     } else {
       coachDebug("endSession.no-last-report");
     }
+    const now = Date.now();
     if (lastReport && isSegmentReportable(lastReport)) {
-      const endTime = Date.now();
-      segmentReportsRef.current.push({ report: lastReport, bpm, timeSignature, startTime: segmentStartRef.current, endTime });
       if (narrativeRef.current) {
         narrativeRef.current = appendSegmentEnd(
           narrativeRef.current,
           { score: lastReport.score, bpm, note: shortPocketNote(lastReport) },
-          endTime,
+          now,
         );
       }
     }
 
-    const now = Date.now();
-    const segments = [...segmentReportsRef.current];
-    const aggregated = segments.length > 0 ? aggregateReports(segments.map(s => s.report)) : null;
+    // Mini-reports accumulated by useSegmentCoach during the session.
+    // Used for the per-exercise timeline display ONLY — NOT for scoring.
+    // lastReport (getFinalSessionReport) is the authoritative score:
+    // it covers all_segments and all recomputed feedbacks for the full
+    // session without any double-counting. Aggregating mini-reports WITH
+    // lastReport would double-count every beat that clearSession() already
+    // covered in an earlier window (e.g. 515 beats instead of 263,
+    // and wrong score because allHaveD4 fails on no-segment mini-reports).
+    const miniReportSegments = [...segmentReportsRef.current];
+    // sessionReport: Rust final answer — always prefer over aggregateReports.
+    // Falls back to aggregating mini-reports only if getFinalSessionReport
+    // returned null (edge case: very short session, no segments emitted).
+    const sessionReport = lastReport
+      ?? (miniReportSegments.length > 0 ? aggregateReports(miniReportSegments.map(s => s.report)) : null);
+
+    // SCORE_SYNC_FIX: for single-segment sessions the timeline mini-report
+    // score is computed mid-session (when the metronome stops) before any
+    // segment data exists → falls back to legacy formula → e.g. 65.
+    // The final session score uses the authoritative segment IC/GA formula
+    // → e.g. 71. Sync the one timeline entry's score/grade to the final
+    // answer so the user never sees two different numbers for the same session.
+    if (lastReport && miniReportSegments.length === 1) {
+      miniReportSegments[0] = {
+        ...miniReportSegments[0],
+        report: {
+          ...miniReportSegments[0].report,
+          score: lastReport.score,
+          grade: lastReport.grade,
+        },
+      };
+
+      // SCORE_SYNC_FIX Part 2: patch the mini-report feed card(s) that were
+      // already pushed to the feed during the session. Without this the score
+      // bubble that appeared mid-session (legacy formula → e.g. 64) disagrees
+      // with the authoritative final score (segment IC/GA → e.g. 80) even
+      // though the timeline badge now shows the correct number.
+      // Scoped to single-segment sessions to avoid cross-segment confusion.
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.type === "mini-report" && msg.report
+            ? { ...msg, report: { ...msg.report, score: lastReport.score, grade: lastReport.grade } }
+            : msg,
+        ),
+      );
+    }
 
     // End session immediately — no freeze
     const endMsgId = crypto.randomUUID();
-    const placeholderComment = aggregated ? "Session complete." : "Session ended — no data recorded.";
+    const placeholderComment = sessionReport ? "Session complete." : "Session ended — no data recorded.";
     // Only mark pending when we know an LLM summary will be generated
     // AND voice mode is on — otherwise the placeholder text is the
     // final text and there's no spinner-to-text swap to do. The actual
     // LLM rephrase path below converts the message to its final form
     // and calls speakAndReveal in the same tick.
-    const willSpeakSummary = !!aggregated && coachLoadedRef.current && voiceMode === "voice";
+    const willSpeakSummary = !!sessionReport && coachLoadedRef.current && voiceMode === "voice";
     const endMsg: FeedMessage = {
       id: endMsgId,
       type: "session-end",
       timestamp: now,
       content: placeholderComment,
-      report: aggregated ?? undefined,
+      report: sessionReport ?? undefined,
       meta: { bpm, timeSignature },
-      segments: segments.length > 1 ? segments : undefined,
+      // Show timeline whenever there are mini-report exercises to display.
+      segments: miniReportSegments.length > 0 ? miniReportSegments : undefined,
       pending: willSpeakSummary,
     };
     setMessages((prev) => [...prev, endMsg]);
@@ -1354,20 +1408,20 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
     // Save session — same gate as segment reportability. A session
     // that aggregates to 0 real hits is noise (mic dropouts, accidental
     // session start, etc.) and shouldn't pollute history.
-    if (aggregated && isSegmentReportable(aggregated)) {
+    if (sessionReport && isSegmentReportable(sessionReport)) {
       saveSession({
         id: crypto.randomUUID(),
         timestamp: startedAt ?? now,
         bpm,
         timeSignature,
-        report: aggregated,
+        report: sessionReport,
         presetId: presetId,
         presetName: presetName,
       }).catch(() => {});
     }
 
     // Generate coach summary in the background, then patch the message
-    if (aggregated && coachLoadedRef.current) {
+    if (sessionReport && coachLoadedRef.current) {
       // Capture a token so we can drop the result if the user starts
       // a NEW session before the LLM call resolves. Without this guard,
       // the old session's spoken summary leaks into the next session
@@ -1383,18 +1437,18 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
       // end accumulate "skipped" beats that deflate accuracy into
       // nonsense if `totalBeats` is the denominator. Matches the Rust
       // score and every other display surface — see `reportStats.ts`.
-      const accuracy = accuracyPct(aggregated);
+      const accuracy = accuracyPct(sessionReport);
       const narrativeBlock = narrativeRef.current
         ? formatForLLM(narrativeRef.current)
         : undefined;
       const context = formatSessionContext(
         durationSecs,
-        segments.length,
-        aggregated.score,
-        aggregated.totalBeats,
+        miniReportSegments.length,
+        sessionReport.score,
+        sessionReport.totalBeats,
         accuracy,
-        aggregated.meanDeviationMs,
-        aggregated.longestStreak,
+        sessionReport.meanDeviationMs,
+        sessionReport.longestStreak,
         instrumentLabel,
         narrativeBlock,
       );

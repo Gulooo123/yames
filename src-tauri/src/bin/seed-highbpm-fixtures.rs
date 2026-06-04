@@ -141,8 +141,7 @@ fn make_onsets_and_expected(
             seed,
         } => generate_raw_onsets_jittered(spec.beats, spec.bpm, *jitter_std_ms, *seed, profile),
         FixtureKind::ChordStrum => {
-            let (mut onsets, expected) =
-                generate_raw_onsets_perfect(spec.beats, spec.bpm, profile);
+            let (mut onsets, expected) = generate_raw_onsets_perfect(spec.beats, spec.bpm, profile);
             // Duplicate each onset at +15ms to simulate a two-string strum.
             let strums: Vec<DetectedOnset> = onsets
                 .iter()
@@ -176,16 +175,14 @@ fn write_fixture(dir: &Path, spec: &FixtureSpec) -> Result<PathBuf, String> {
     let dest = dir.join(format!("{}.input.json", spec.name));
     let json = serde_json::to_string_pretty(&payload)
         .map_err(|e| format!("serialize {}: {e}", spec.name))?;
-    fs::write(&dest, format!("{json}\n"))
-        .map_err(|e| format!("write {}: {e}", dest.display()))?;
+    fs::write(&dest, format!("{json}\n")).map_err(|e| format!("write {}: {e}", dest.display()))?;
 
     Ok(dest)
 }
 
 fn main() -> ExitCode {
     let dir = fixtures_dir();
-    fs::create_dir_all(&dir)
-        .unwrap_or_else(|e| panic!("create fixtures dir: {e}"));
+    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create fixtures dir: {e}"));
 
     let specs = build_fixtures();
     let mut ok = 0usize;

@@ -592,7 +592,7 @@ body {
 .widget-overlay {
   position: absolute;
   bottom: 10px;
-  left: -16px;
+  left: 20px;
   width: 280px;
   filter: drop-shadow(0 12px 30px rgba(0, 0, 0, 0.7))
     drop-shadow(0 4px 12px rgba(0, 0, 0, 0.5));
@@ -829,9 +829,9 @@ body {
   }
 
   .widget-overlay {
-    bottom: 30px;
-    left: -56px;
-    width: 400px;
+    bottom: 10px;
+    left: -6px;
+    width: 350px;
   }
 
   .preview-frame {
@@ -886,7 +886,9 @@ body {
   -webkit-backdrop-filter: blur(8px);
   opacity: 0;
   visibility: hidden;
-  transition: opacity 0.2s ease, visibility 0.2s ease;
+  transition:
+    opacity 0.2s ease,
+    visibility 0.2s ease;
   overscroll-behavior: contain;
 }
 
@@ -989,11 +991,13 @@ body {
   border-radius: 1px;
   background: color-mix(in srgb, var(--text) 18%, transparent);
   cursor: pointer;
-  transition: width 0.15s ease, background 0.15s ease;
+  transition:
+    width 0.15s ease,
+    background 0.15s ease;
 }
 
 .tl-tick::before {
-  content: '';
+  content: "";
   position: absolute;
   inset: -5px -6px;
 }
@@ -1152,7 +1156,8 @@ body {
 
   .changelog-body {
     scrollbar-width: thin;
-    scrollbar-color: color-mix(in srgb, var(--text) 15%, transparent) transparent;
+    scrollbar-color: color-mix(in srgb, var(--text) 15%, transparent)
+      transparent;
   }
 
   .platforms {

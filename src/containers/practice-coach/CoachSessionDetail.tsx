@@ -19,10 +19,23 @@ export function CoachSessionDetail({
   onDelete: () => void;
 }) {
   const report = session.report;
-  // `hitRate` and `scored` use the SCORED-beat denominator (hits + miss)
-  // so the displayed accuracy matches the Rust score and the breakdown
-  // bars below. See `src/coach/reportStats.ts`.
-  const hitRate = accuracyPct(report);
+  // In Default mode with subdivision > 1, show accent (downbeat) accuracy
+  // so the number reflects what the scoring formula actually measures.
+  // Fall back to hit/(hit+miss) for Pro mode, old sessions, or short warmups
+  // where accent counts are unavailable. See `src/coach/reportStats.ts`.
+  const hitRate =
+    report.coachMode === "default" &&
+    report.accentBeatsCount != null &&
+    report.accentBeatsCount > 0
+      ? Math.round((report.accentHitsCount! / report.accentBeatsCount) * 100)
+      : accuracyPct(report);
+
+  // Convert longestStreak (subdivision units) to quarter-note beats for display.
+  const streakBeats =
+    report.subdivision && report.subdivision > 1
+      ? Math.floor(report.longestStreak / report.subdivision)
+      : report.longestStreak;
+
   const scored = scoredBeats(report);
 
   return (
@@ -104,7 +117,7 @@ export function CoachSessionDetail({
           </div>
           <div className="coach-detail-stat">
             <span className="coach-detail-stat-label">Longest streak</span>
-            <span className="coach-detail-stat-value">{report.longestStreak}</span>
+            <span className="coach-detail-stat-value">{streakBeats}</span>
           </div>
           <div className="coach-detail-stat">
             <span className="coach-detail-stat-label">Scored beats</span>
@@ -114,6 +127,18 @@ export function CoachSessionDetail({
             <div className="coach-detail-stat">
               <span className="coach-detail-stat-label">Skipped</span>
               <span className="coach-detail-stat-value">{report.skippedBeats}</span>
+            </div>
+          )}
+          {report.intervalConsistency !== undefined && (
+            <div className="coach-detail-stat">
+              <span className="coach-detail-stat-label">Note spacing</span>
+              <span className="coach-detail-stat-value">{report.intervalConsistency.toFixed(2)}</span>
+            </div>
+          )}
+          {report.gridAlignment !== undefined && (
+            <div className="coach-detail-stat">
+              <span className="coach-detail-stat-label">Beat placement</span>
+              <span className="coach-detail-stat-value">{report.gridAlignment.toFixed(2)}</span>
             </div>
           )}
         </div>

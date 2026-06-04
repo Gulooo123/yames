@@ -133,6 +133,28 @@ pub type SharedTempoContext = Arc<TempoContext>;
 /// specifically to protect fast articulations.
 pub const REFRACTORY_SUBDIVISION_FACTOR: f32 = 0.75;
 
+/// Relative amplitude threshold for ghost-onset suppression (inactive).
+///
+/// WAV forensic analysis (2026-05 session logs) showed that guitar pick
+/// decay creates a secondary "ghost" onset ~140–175 ms after the real
+/// attack. At 80 BPM 16th notes the sub_interval is 187.5 ms and the
+/// adaptive refractory is 140.6 ms, so ghosts in [140.6, 187.5) ms leak
+/// past the refractory gate and reset `last_onset_ns` — blocking the real
+/// next 16th note (due at 187.5 ms) until ~281 ms.
+///
+/// GHOST_1 used this ratio as an amplitude discriminator, but forensic
+/// analysis of session_1779823064 showed ghost B/A median = 1.12 — ghosts
+/// are often LOUDER than real notes, so amplitude alone cannot distinguish
+/// them. Only 11/70 ghost pairs (16%) were caught at the 0.70 threshold.
+///
+/// POSTMATCH_1 supersedes this gate: all onsets in [refractory, sub_interval)
+/// are now EMITTED (hard ghost window) so both the ghost and the subsequent
+/// real note reach the post-session best-candidate matcher. The matcher then
+/// assigns the closer-to-center onset to each beat slot. This constant is
+/// retained for reference and potential future use.
+#[allow(dead_code)]
+pub const GHOST_AMPLITUDE_RATIO: f32 = 0.70;
+
 /// Onset detector using spectral flux with adaptive threshold.
 ///
 /// Runs on a dedicated analyzer thread, consuming samples from the audio input
@@ -271,6 +293,13 @@ impl OnsetDetector {
         // grid is quarter notes — see plan's "DO NOT key refractory off
         // the grid subdivision alone."
         let mut last_onset_ns: u64 = 0;
+        // GHOST_1: amplitude of the last accepted (non-ghost) onset.
+        // Used to detect pick-decay resonances that land in the ghost
+        // window [refractory, sub_interval) and are significantly quieter
+        // than the original attack. No reset needed on playback stop:
+        // after the gap `since_last_ms` is huge, failing `< sub_interval_ms`
+        // so the ghost check never fires on the first real onset post-pause.
+        let mut last_onset_amplitude: f32 = 0.0;
 
         // Diagnostic logging — env-flag gated so logs don't ship in
         // production builds. Flip on by launching the dev shell with:
@@ -399,20 +428,48 @@ impl OnsetDetector {
 
                 // Refractory period check (skips spurious double-counts).
                 if now_ns.saturating_sub(last_onset_ns) >= refractory_ns {
-                    last_onset_ns = now_ns;
-                    if debug_enabled {
-                        eprintln!(
+                    // POSTMATCH_1: Hard ghost window — any onset in
+                    // [refractory, sub_interval) is emitted for telemetry
+                    // but does NOT reset `last_onset_ns`. This lets the
+                    // real next note also pass the refractory and reach the
+                    // post-session best-candidate matcher, which picks the
+                    // closest onset per slot.
+                    //
+                    // The amplitude condition is removed: median ghost B/A
+                    // is 1.12 so amplitude cannot reliably distinguish
+                    // pick-decay ghosts from real notes.
+                    let is_ghost =
+                        (since_last_ms as f32) < sub_interval_ms && last_onset_amplitude > 0.0; // first-onset guard stays
+                    if is_ghost {
+                        if debug_enabled {
+                            eprintln!(
+                                "[onset] GHOST-WINDOW emitting since_last={}ms sub_int={:.0}ms rms={:.4} (refractory NOT updated)",
+                                since_last_ms, sub_interval_ms, rms,
+                            );
+                        }
+                        // Do NOT update last_onset_ns or last_onset_amplitude —
+                        // refractory stays anchored to the genuine preceding onset.
+                    } else {
+                        // Real onset — update refractory anchor.
+                        last_onset_ns = now_ns;
+                        last_onset_amplitude = rms;
+                        if debug_enabled {
+                            eprintln!(
                             "[onset] FIRED rms={:.4} onset_val={:.3} desc={:.3} floor={:.4} since_last={}ms",
                             rms, onset_value, detector.get_descriptor(), noise_floor, since_last_ms,
                         );
+                        }
                     }
-
+                    // Emit onset for both ghost-window and real onsets.
+                    // Ghost onsets appear in detected_onsets telemetry so the
+                    // post-session best-candidate matcher can assign the
+                    // closer-to-slot-center one per expected beat.
+                    //
                     // D2 confidence — blend amplitude-to-noise ratio with
                     // aubio's thresholded descriptor, which acts as a proxy
                     // for peak sharpness (descriptor − threshold; clamped to
                     // [0, 1] since the raw value can exceed 1 for strong
-                    // onsets — those saturate to max confidence, which is
-                    // acceptable).
+                    // onsets — those saturate to max confidence).
                     let amp_ratio = if noise_floor > 0.0 {
                         (rms / noise_floor).min(8.0)
                     } else {
@@ -433,18 +490,19 @@ impl OnsetDetector {
                         confidence,
                     };
 
-                    // D2 chord/strum merging — if a pending onset is
-                    // still inside the cluster window, fold this one in
-                    // (keep the loudest's timestamp, sum amplitudes,
-                    // take the higher confidence). Drums opt out by
-                    // setting `cluster_window_ms = 0` in their profile.
-                    if cluster_window_ns == 0 {
+                    // Ghost onsets bypass chord clustering — emitted directly
+                    // so they appear as standalone telemetry entries. This
+                    // prevents the real next note (~37ms later) from being
+                    // merged into a ghost-started cluster at wider cluster
+                    // windows (cluster_window_ms > 37ms).
+                    if is_ghost || cluster_window_ns == 0 {
                         on_onset(onset);
                     } else {
-                        // Probe the in-flight cluster's window without
-                        // moving it out of `pending`. If it's still
-                        // open, merge in place. Otherwise flush the old
-                        // one and start a fresh cluster.
+                        // D2 chord/strum merging — if a pending onset is
+                        // still inside the cluster window, fold this one in
+                        // (keep the loudest's timestamp, sum amplitudes,
+                        // take the higher confidence). Drums opt out by
+                        // setting `cluster_window_ms = 0` in their profile.
                         let still_open = match pending.as_ref() {
                             Some(p) => {
                                 onset.ts_ns.saturating_sub(p.first_ts_ns) <= cluster_window_ns

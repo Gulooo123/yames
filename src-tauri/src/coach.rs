@@ -4,8 +4,8 @@
 //! runs text generation for coaching comments, mini-reports, session summaries,
 //! and chat Q&A. Without the feature, generates template-based responses.
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 static VARIANT_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -102,7 +102,8 @@ pub fn generate(engine: &CoachEngine, context: &str) -> Result<String, String> {
 /// Searches all lines for the first one containing `key`, then returns
 /// everything after the key text, left-trimmed of whitespace.
 fn extract_str<'a>(context: &'a str, key: &str) -> Option<&'a str> {
-    context.lines()
+    context
+        .lines()
         .find(|l| l.trim_start().starts_with(key))
         .map(|l| l[l.find(key).unwrap() + key.len()..].trim())
 }
@@ -153,8 +154,7 @@ fn generate_template(context: &str) -> Result<String, String> {
     // gatekeeper actually said. We treat the template-fallback path
     // for rephrases the same way as greetings: return the Original
     // verbatim (the JS template is fully shippable without LLM help).
-    let is_rephrase_observation =
-        context.contains("Rephrase this practice-coach observation");
+    let is_rephrase_observation = context.contains("Rephrase this practice-coach observation");
 
     if is_chat {
         // Extract the question
@@ -189,7 +189,14 @@ fn generate_template(context: &str) -> Result<String, String> {
     let comment = if is_noodling {
         pick(NOODLING).to_string()
     } else {
-        format_mini_report(score, hit_completeness, timing_pattern, coach_mode, accuracy, streak)
+        format_mini_report(
+            score,
+            hit_completeness,
+            timing_pattern,
+            coach_mode,
+            accuracy,
+            streak,
+        )
     };
     Ok(comment)
 }
@@ -380,24 +387,40 @@ fn format_mini_report(
     streak: u32,
 ) -> String {
     let _ = hit_completeness; // retained in signature for future use
-    let _ = streak;           // retained in signature for future use
+    let _ = streak; // retained in signature for future use
     let is_pro = coach_mode == "pro";
 
     let phrase = if accuracy < 60.0 {
         pick(LOW_COVERAGE)
     } else if timing_pattern == "oscillating" {
-        pick(if is_pro { OSCILLATING_PRO } else { OSCILLATING_DEFAULT })
+        pick(if is_pro {
+            OSCILLATING_PRO
+        } else {
+            OSCILLATING_DEFAULT
+        })
     } else if timing_pattern == "rushing" {
         pick(if is_pro { RUSHING_PRO } else { RUSHING_DEFAULT })
     } else if timing_pattern == "dragging" {
-        pick(if is_pro { DRAGGING_PRO } else { DRAGGING_DEFAULT })
+        pick(if is_pro {
+            DRAGGING_PRO
+        } else {
+            DRAGGING_DEFAULT
+        })
     } else if score >= 85 {
         pick(if is_pro { GREAT_PRO } else { GREAT_DEFAULT })
     } else if score >= 65 {
-        pick(if is_pro { GOOD_STEADY_PRO } else { GOOD_STEADY_DEFAULT })
+        pick(if is_pro {
+            GOOD_STEADY_PRO
+        } else {
+            GOOD_STEADY_DEFAULT
+        })
     } else {
         // solid timing, low score → coverage issue
-        pick(if is_pro { LOW_SCORE_SOLID_PRO } else { LOW_SCORE_SOLID_DEFAULT })
+        pick(if is_pro {
+            LOW_SCORE_SOLID_PRO
+        } else {
+            LOW_SCORE_SOLID_DEFAULT
+        })
     };
 
     phrase.to_string()
@@ -452,7 +475,8 @@ fn format_chat_response(question: &str, accuracy: f64, deviation: f64) -> String
         if deviation.abs() > 10.0 {
             "Focus on locking in with the click — your timing is drifting. Try a slower tempo and nail the pocket.".to_string()
         } else if accuracy < 80.0 {
-            "Work on clean hits at this tempo before pushing faster. Accuracy first, speed second.".to_string()
+            "Work on clean hits at this tempo before pushing faster. Accuracy first, speed second."
+                .to_string()
         } else {
             "You're in good shape. Try pushing the tempo up 5 BPM and see if you can maintain this accuracy.".to_string()
         }
@@ -462,24 +486,17 @@ fn format_chat_response(question: &str, accuracy: f64, deviation: f64) -> String
 }
 
 fn extract_metric(text: &str, prefix: &str) -> Option<f64> {
-    text.lines()
-        .find(|l| l.contains(prefix))
-        .and_then(|l| {
-            l.split_whitespace()
-                .find_map(|w| w.trim_end_matches('%').parse::<f64>().ok())
-        })
+    text.lines().find(|l| l.contains(prefix)).and_then(|l| {
+        l.split_whitespace()
+            .find_map(|w| w.trim_end_matches('%').parse::<f64>().ok())
+    })
 }
 
 fn extract_int(text: &str, prefix: &str) -> Option<u32> {
-    text.lines()
-        .find(|l| l.contains(prefix))
-        .and_then(|l| {
-            let after = l.split(prefix).nth(1)?;
-            after.split_whitespace()
-                .next()?
-                .parse::<u32>()
-                .ok()
-        })
+    text.lines().find(|l| l.contains(prefix)).and_then(|l| {
+        let after = l.split(prefix).nth(1)?;
+        after.split_whitespace().next()?.parse::<u32>().ok()
+    })
 }
 
 // NOTE: `format_mini_report_context`, `format_session_summary_context`,
@@ -515,8 +532,8 @@ mod llm {
 
     impl LlmModel {
         pub fn load(path: &std::path::Path) -> Result<Self, String> {
-            let backend = LlamaBackend::init()
-                .map_err(|e| format!("Failed to init llama backend: {e}"))?;
+            let backend =
+                LlamaBackend::init().map_err(|e| format!("Failed to init llama backend: {e}"))?;
             let params = LlamaModelParams::default();
             let model = LlamaModel::load_from_file(&backend, path, &params)
                 .map_err(|e| format!("Failed to load model: {e}"))?;
@@ -529,12 +546,15 @@ mod llm {
                 super::SYSTEM_PROMPT,
             );
 
-            let ctx_params = LlamaContextParams::default()
-                .with_n_ctx(std::num::NonZero::new(CONTEXT_SIZE));
-            let mut ctx = self.model.new_context(&self.backend, ctx_params)
+            let ctx_params =
+                LlamaContextParams::default().with_n_ctx(std::num::NonZero::new(CONTEXT_SIZE));
+            let mut ctx = self
+                .model
+                .new_context(&self.backend, ctx_params)
                 .map_err(|e| format!("Context creation failed: {e}"))?;
 
-            let tokens = self.model
+            let tokens = self
+                .model
                 .str_to_token(&prompt, llama_cpp_2::model::AddBos::Always)
                 .map_err(|e| format!("Tokenization failed: {e}"))?;
 
@@ -545,7 +565,8 @@ mod llm {
             let mut batch = LlamaBatch::new(CONTEXT_SIZE as usize, 1);
             for (i, &token) in tokens.iter().enumerate() {
                 let is_last = i == tokens.len() - 1;
-                batch.add(token, i as i32, &[0], is_last)
+                batch
+                    .add(token, i as i32, &[0], is_last)
                     .map_err(|e| format!("Batch add failed: {e}"))?;
             }
 
@@ -570,12 +591,14 @@ mod llm {
                 output_tokens.push(token);
 
                 batch.clear();
-                batch.add(
-                    token,
-                    tokens.len() as i32 + output_tokens.len() as i32 - 1,
-                    &[0],
-                    true,
-                ).map_err(|e| format!("Batch add failed: {e}"))?;
+                batch
+                    .add(
+                        token,
+                        tokens.len() as i32 + output_tokens.len() as i32 - 1,
+                        &[0],
+                        true,
+                    )
+                    .map_err(|e| format!("Batch add failed: {e}"))?;
 
                 ctx.decode(&mut batch)
                     .map_err(|e| format!("Decode failed: {e}"))?;
@@ -583,7 +606,8 @@ mod llm {
 
             let mut result = String::new();
             for token in &output_tokens {
-                let piece = self.model
+                let piece = self
+                    .model
                     .token_to_str(*token, llama_cpp_2::token::LlamaTokenAttr::all())
                     .map_err(|e| format!("Token decode failed: {e}"))?;
                 result.push_str(&piece);

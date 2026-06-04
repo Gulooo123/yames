@@ -84,9 +84,21 @@ impl Instrument {
                 activity_silence_beats: 8,
                 // Drums live or die by the click — raise grid_alignment,
                 // trim interval_consistency (fills break regularity by design).
-                score_weights: ScoreWeights { ic: 0.35, ga: 0.30, hc: 0.25, oe: 0.10 },
-                // Default mode: same as pro (no instrument-specific tuning for drums yet).
-                default_score_weights: ScoreWeights { ic: 0.35, ga: 0.30, hc: 0.25, oe: 0.10 },
+                // DEFAULT_EVAL: oe=0.0 everywhere so extra strokes (fills,
+                // ghost notes) are not penalised; freed weight goes to ga.
+                score_weights: ScoreWeights {
+                    ic: 0.35,
+                    ga: 0.40,
+                    hc: 0.25,
+                    oe: 0.00,
+                },
+                // Default mode: identical weight set — no separate tuning needed.
+                default_score_weights: ScoreWeights {
+                    ic: 0.35,
+                    ga: 0.40,
+                    hc: 0.25,
+                    oe: 0.00,
+                },
                 vocabulary: InstrumentVocabulary::Drums,
                 aubio_onset_method: "hfc",
             },
@@ -98,16 +110,26 @@ impl Instrument {
                 spectral_weights: spectral_weights_mid(),
                 activity_silence_beats: 4,
                 // Guitar-tuned weights: IC leads (timing regularity is the
-                // primary practice signal), GA second (beat placement), OE
-                // minimal (guitar resonance produces spurious onsets so high
-                // OE weight unfairly penalises the instrument).
+                // primary practice signal), GA second (beat placement).
                 // HC = 0.0: hit_completeness penalises intentional sparse
                 // patterns (riffs, rhythm playing) — structurally wrong for
                 // free-form practice without a score reference.
-                score_weights: ScoreWeights { ic: 0.60, ga: 0.35, hc: 0.00, oe: 0.05 },
-                // Default mode: shift weight toward GA so learners are rewarded
-                // for landing on the beat, not just for spacing evenness.
-                default_score_weights: ScoreWeights { ic: 0.55, ga: 0.40, hc: 0.00, oe: 0.05 },
+                // DEFAULT_EVAL: oe=0.0 so playing 16ths over a quarters
+                // config is not penalised; freed weight goes to ga.
+                score_weights: ScoreWeights {
+                    ic: 0.60,
+                    ga: 0.40,
+                    hc: 0.00,
+                    oe: 0.00,
+                },
+                // Default mode: identical weight set — judge only what the
+                // user configured, not note density.
+                default_score_weights: ScoreWeights {
+                    ic: 0.60,
+                    ga: 0.40,
+                    hc: 0.00,
+                    oe: 0.00,
+                },
                 vocabulary: InstrumentVocabulary::Guitar,
                 aubio_onset_method: "complex",
             },
@@ -119,9 +141,19 @@ impl Instrument {
                 spectral_weights: spectral_weights_mid_high(),
                 activity_silence_beats: 4,
                 // Same guitar-tuned weights as electric (see above).
-                score_weights: ScoreWeights { ic: 0.60, ga: 0.35, hc: 0.00, oe: 0.05 },
-                // Default mode: same shift as electric guitar.
-                default_score_weights: ScoreWeights { ic: 0.55, ga: 0.40, hc: 0.00, oe: 0.05 },
+                score_weights: ScoreWeights {
+                    ic: 0.60,
+                    ga: 0.40,
+                    hc: 0.00,
+                    oe: 0.00,
+                },
+                // Default mode: identical weight set.
+                default_score_weights: ScoreWeights {
+                    ic: 0.60,
+                    ga: 0.40,
+                    hc: 0.00,
+                    oe: 0.00,
+                },
                 vocabulary: InstrumentVocabulary::Guitar,
                 aubio_onset_method: "complex",
             },
@@ -132,12 +164,23 @@ impl Instrument {
                 expected_onsets_per_beat: 0.5..=1.5,
                 spectral_weights: spectral_weights_low(),
                 activity_silence_beats: 4,
-                // Bass is the rhythmic anchor — modest ga bump, trim oe
-                // (bass lines are intentionally sparse so efficiency is
-                // less diagnostic).
-                score_weights: ScoreWeights { ic: 0.35, ga: 0.25, hc: 0.25, oe: 0.15 },
-                // Default mode: same as pro (no instrument-specific tuning for bass yet).
-                default_score_weights: ScoreWeights { ic: 0.35, ga: 0.25, hc: 0.25, oe: 0.15 },
+                // Bass is the rhythmic anchor — ga bump, oe removed
+                // (bass lines are intentionally sparse; efficiency measure
+                // unfairly penalises fills and ghost notes).
+                // DEFAULT_EVAL: oe=0.0; freed weight goes to ga.
+                score_weights: ScoreWeights {
+                    ic: 0.35,
+                    ga: 0.40,
+                    hc: 0.25,
+                    oe: 0.00,
+                },
+                // Default mode: identical weight set.
+                default_score_weights: ScoreWeights {
+                    ic: 0.35,
+                    ga: 0.40,
+                    hc: 0.25,
+                    oe: 0.00,
+                },
                 vocabulary: InstrumentVocabulary::Bass,
                 aubio_onset_method: "complex",
             },
@@ -151,9 +194,20 @@ impl Instrument {
                 // Piano plays dense chords — raise hit_completeness so
                 // missed chord beats count more; trim ga slightly since
                 // rubato phrasing is stylistically common.
-                score_weights: ScoreWeights { ic: 0.38, ga: 0.18, hc: 0.30, oe: 0.14 },
-                // Default mode: same as pro (no instrument-specific tuning for piano yet).
-                default_score_weights: ScoreWeights { ic: 0.38, ga: 0.18, hc: 0.30, oe: 0.14 },
+                // DEFAULT_EVAL: oe=0.0; freed weight goes to ga.
+                score_weights: ScoreWeights {
+                    ic: 0.38,
+                    ga: 0.32,
+                    hc: 0.30,
+                    oe: 0.00,
+                },
+                // Default mode: identical weight set.
+                default_score_weights: ScoreWeights {
+                    ic: 0.38,
+                    ga: 0.32,
+                    hc: 0.30,
+                    oe: 0.00,
+                },
                 vocabulary: InstrumentVocabulary::Piano,
                 aubio_onset_method: "specflux",
             },
@@ -164,10 +218,21 @@ impl Instrument {
                 expected_onsets_per_beat: 0.5..=2.0,
                 spectral_weights: spectral_weights_moderate_broadband(),
                 activity_silence_beats: 5,
-                // Unknown instrument — use the default distribution.
-                score_weights: ScoreWeights::default(),
-                // Default mode: same as pro for unknown instrument.
-                default_score_weights: ScoreWeights::default(),
+                // Unknown instrument — use the default distribution,
+                // but oe=0.0 per DEFAULT_EVAL; freed weight goes to ga.
+                score_weights: ScoreWeights {
+                    ic: 0.40,
+                    ga: 0.35,
+                    hc: 0.25,
+                    oe: 0.00,
+                },
+                // Default mode: identical weight set.
+                default_score_weights: ScoreWeights {
+                    ic: 0.40,
+                    ga: 0.35,
+                    hc: 0.25,
+                    oe: 0.00,
+                },
                 vocabulary: InstrumentVocabulary::Other,
                 aubio_onset_method: "specflux",
             },
@@ -447,8 +512,7 @@ mod tests {
             );
             assert!(
                 *p.expected_onsets_per_beat.start() > 0.0
-                    && *p.expected_onsets_per_beat.end()
-                        >= *p.expected_onsets_per_beat.start(),
+                    && *p.expected_onsets_per_beat.end() >= *p.expected_onsets_per_beat.start(),
                 "{inst:?}: expected_onsets_per_beat invalid"
             );
             let sum: f32 = p.spectral_weights.iter().sum();

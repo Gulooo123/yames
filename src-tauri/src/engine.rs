@@ -3,7 +3,7 @@ use crate::timing::{BeatLog, BeatTick};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rodio::Source;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -28,17 +28,29 @@ fn find_coreaudio_device_by_name(target_name: &str) -> Option<u32> {
         };
         let mut size: u32 = 0;
         let status = AudioObjectGetPropertyDataSize(
-            kAudioObjectSystemObject, &prop, 0, ptr::null(), &mut size,
+            kAudioObjectSystemObject,
+            &prop,
+            0,
+            ptr::null(),
+            &mut size,
         );
-        if status != 0 { return None; }
+        if status != 0 {
+            return None;
+        }
 
         let count = size as usize / mem::size_of::<AudioDeviceID>();
         let mut device_ids = vec![0 as AudioDeviceID; count];
         let status = AudioObjectGetPropertyData(
-            kAudioObjectSystemObject, &prop, 0, ptr::null(),
-            &mut size, device_ids.as_mut_ptr() as *mut _,
+            kAudioObjectSystemObject,
+            &prop,
+            0,
+            ptr::null(),
+            &mut size,
+            device_ids.as_mut_ptr() as *mut _,
         );
-        if status != 0 { return None; }
+        if status != 0 {
+            return None;
+        }
 
         for &did in &device_ids {
             let name_prop = AudioObjectPropertyAddress {
@@ -49,22 +61,31 @@ fn find_coreaudio_device_by_name(target_name: &str) -> Option<u32> {
             let mut cf_name: core_foundation_sys::string::CFStringRef = ptr::null();
             let mut name_size = mem::size_of::<core_foundation_sys::string::CFStringRef>() as u32;
             let status = AudioObjectGetPropertyData(
-                did, &name_prop, 0, ptr::null(),
-                &mut name_size, &mut cf_name as *mut _ as *mut _,
+                did,
+                &name_prop,
+                0,
+                ptr::null(),
+                &mut name_size,
+                &mut cf_name as *mut _ as *mut _,
             );
-            if status != 0 || cf_name.is_null() { continue; }
+            if status != 0 || cf_name.is_null() {
+                continue;
+            }
 
             let len = core_foundation_sys::string::CFStringGetLength(cf_name);
             let mut buf = vec![0u8; (len * 4) as usize + 1];
             let ok = core_foundation_sys::string::CFStringGetCString(
-                cf_name, buf.as_mut_ptr() as *mut _, buf.len() as isize,
+                cf_name,
+                buf.as_mut_ptr() as *mut _,
+                buf.len() as isize,
                 core_foundation_sys::string::kCFStringEncodingUTF8,
             );
             core_foundation_sys::base::CFRelease(cf_name as *const _);
-            if ok == 0 { continue; }
+            if ok == 0 {
+                continue;
+            }
 
-            let rust_name = std::ffi::CStr::from_ptr(buf.as_ptr() as *const _)
-                .to_string_lossy();
+            let rust_name = std::ffi::CStr::from_ptr(buf.as_ptr() as *const _).to_string_lossy();
             if rust_name == target_name {
                 return Some(did);
             }
@@ -159,13 +180,8 @@ fn query_coreaudio_output_latency_frames(device_name: Option<&str>) -> Option<u3
             mElement: kAudioObjectPropertyElementMain,
         };
         let mut stream_size: u32 = 0;
-        let status = AudioObjectGetPropertyDataSize(
-            device_id,
-            &prop,
-            0,
-            ptr::null(),
-            &mut stream_size,
-        );
+        let status =
+            AudioObjectGetPropertyDataSize(device_id, &prop, 0, ptr::null(), &mut stream_size);
         if status == 0 && stream_size >= mem::size_of::<AudioStreamID>() as u32 {
             let count = stream_size as usize / mem::size_of::<AudioStreamID>();
             let mut streams = vec![0 as AudioStreamID; count];
@@ -457,7 +473,11 @@ pub const DECISION_HOLD: u8 = 2;
 pub const DECISION_DOWN: u8 = 3;
 
 /// Returns (up_threshold, down_threshold, step_up_bpm, step_down_bpm) for adaptive mode.
-fn adaptive_thresholds(aggressiveness: &str, increment: u16, decrement: u16) -> (u32, u32, u16, u16) {
+fn adaptive_thresholds(
+    aggressiveness: &str,
+    increment: u16,
+    decrement: u16,
+) -> (u32, u32, u16, u16) {
     match aggressiveness {
         "conservative" => (80, 40, increment.max(2).min(3), decrement.max(2).min(3)),
         "aggressive" => (60, 25, increment.max(5).min(10), decrement.max(3).min(5)),
@@ -532,10 +552,26 @@ pub struct BeatEvent {
 
 /// Bluetooth device name patterns (case-insensitive matching).
 const BLUETOOTH_PATTERNS: &[&str] = &[
-    "airpods", "bluetooth", "beats", "bose", "jabra", "jbl", "sony wh-",
-    "sony wf-", "sennheiser momentum", "galaxy buds", "pixel buds",
-    "powerbeats", "marshall", "skullcandy", "anker", "soundcore",
-    "marshall major", "marshall minor", "tozo", "nothing ear",
+    "airpods",
+    "bluetooth",
+    "beats",
+    "bose",
+    "jabra",
+    "jbl",
+    "sony wh-",
+    "sony wf-",
+    "sennheiser momentum",
+    "galaxy buds",
+    "pixel buds",
+    "powerbeats",
+    "marshall",
+    "skullcandy",
+    "anker",
+    "soundcore",
+    "marshall major",
+    "marshall minor",
+    "tozo",
+    "nothing ear",
 ];
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -592,7 +628,9 @@ fn poll_device_count() -> usize {
             std::ptr::null(),
             &mut size,
         );
-        if status != 0 { return 0; }
+        if status != 0 {
+            return 0;
+        }
         (size as usize) / mem::size_of::<AudioDeviceID>()
     }
 }
@@ -838,9 +876,14 @@ impl MetronomeEngine {
                 // Try to find the requested device by name
                 host.output_devices()
                     .ok()
-                    .and_then(|mut devs| devs.find(|d| d.name().ok().as_deref() == Some(name.as_str())))
+                    .and_then(|mut devs| {
+                        devs.find(|d| d.name().ok().as_deref() == Some(name.as_str()))
+                    })
                     .or_else(|| {
-                        eprintln!("[yames] Device '{}' not found, falling back to default", name);
+                        eprintln!(
+                            "[yames] Device '{}' not found, falling back to default",
+                            name
+                        );
                         host.default_output_device()
                     })
             } else {
@@ -848,7 +891,10 @@ impl MetronomeEngine {
             };
             let device = match device {
                 Some(d) => {
-                    eprintln!("[yames] Using audio output device: {:?}", d.name().unwrap_or_default());
+                    eprintln!(
+                        "[yames] Using audio output device: {:?}",
+                        d.name().unwrap_or_default()
+                    );
                     d
                 }
                 None => {
@@ -884,7 +930,8 @@ impl MetronomeEngine {
 
             // Query CoreAudio for the real output latency (device + safety + stream).
             // This auto-adapts to the user's selected device.
-            let device_latency_frames = query_coreaudio_output_latency_frames(device_name.as_deref()).unwrap_or(0);
+            let device_latency_frames =
+                query_coreaudio_output_latency_frames(device_name.as_deref()).unwrap_or(0);
             let device_latency_us = (device_latency_frames as u64 * 1_000_000) / sr as u64;
             eprintln!(
                 "[yames] CoreAudio output latency: {} frames ({:.1}ms) + buffer",
@@ -938,7 +985,11 @@ impl MetronomeEngine {
                             s.bpm
                         };
                         cached.bpm = eff_bpm;
-                        cached.subdivision = if s.speed_ramp.active { 1 } else { s.subdivision };
+                        cached.subdivision = if s.speed_ramp.active {
+                            1
+                        } else {
+                            s.subdivision
+                        };
                         cached.volume = s.volume;
                         cached.kit = SoundKit::from_str(&s.sound_type);
                         cached.time_signature = s.time_signature;
@@ -1007,8 +1058,8 @@ impl MetronomeEngine {
 
                             // Warmup transition detection
                             let is_warmup_beat = cached.ramp_warming_up && is_downbeat;
-                            let is_last_warmup = is_warmup_beat
-                                && cached.warmup_count + 1 >= cached.warmup_beats;
+                            let is_last_warmup =
+                                is_warmup_beat && cached.warmup_count + 1 >= cached.warmup_beats;
                             let mut is_warmup_transition = false;
 
                             if is_last_warmup {
@@ -1049,14 +1100,13 @@ impl MetronomeEngine {
                                 });
                             } else {
                                 // Regular / warmup / subdivision
-                                let (sid, amp) =
-                                    if cached.ramp_warming_up && !is_last_warmup {
-                                        (SoundId::BeepHigh, 0.6)
-                                    } else if is_downbeat {
-                                        (cached.kit.low_id(), 0.75)
-                                    } else {
-                                        (cached.kit.low_id(), 0.35)
-                                    };
+                                let (sid, amp) = if cached.ramp_warming_up && !is_last_warmup {
+                                    (SoundId::BeepHigh, 0.6)
+                                } else if is_downbeat {
+                                    (cached.kit.low_id(), 0.75)
+                                } else {
+                                    (cached.kit.low_id(), 0.35)
+                                };
                                 voices.push(Voice {
                                     sound_id: sid,
                                     position: 0,
@@ -1067,11 +1117,9 @@ impl MetronomeEngine {
 
                             // Capture current beat/sub for notification
                             // Compute delay: output latency + position within buffer
-                            let frame_delay_us =
-                                (frame_idx as u64 * 1_000_000) / sr as u64;
+                            let frame_delay_us = (frame_idx as u64 * 1_000_000) / sr as u64;
                             let total_delay_us = output_latency_us + frame_delay_us;
-                            let ts_ns = crate::clock::now_ns()
-                                + total_delay_us * 1000; // adjusted to play time
+                            let ts_ns = crate::clock::now_ns() + total_delay_us * 1000; // adjusted to play time
                             let notif_beat = beat_count;
                             let notif_sub = sub_count;
 
@@ -1084,10 +1132,18 @@ impl MetronomeEngine {
                                 measure_beat += 1;
                                 let beats_per_measure = if cached.ramp_active {
                                     let b = cached.ramp_beats_per_bar;
-                                    if b >= 2 { b as u32 } else { 4 }
+                                    if b >= 2 {
+                                        b as u32
+                                    } else {
+                                        4
+                                    }
                                 } else {
                                     let t = cached.time_signature;
-                                    if t >= 2 { t as u32 } else { 4 }
+                                    if t >= 2 {
+                                        t as u32
+                                    } else {
+                                        4
+                                    }
                                 };
                                 if measure_beat >= beats_per_measure {
                                     measure_beat = 0;
@@ -1279,10 +1335,15 @@ impl MetronomeEngine {
                             if s.speed_ramp.mode == "adaptive" {
                                 let score = adaptive_score.load(Ordering::Relaxed);
                                 let (up_thresh, down_thresh, step_up, step_down) =
-                                    adaptive_thresholds(&s.speed_ramp.aggressiveness, s.speed_ramp.increment, s.speed_ramp.decrement);
+                                    adaptive_thresholds(
+                                        &s.speed_ramp.aggressiveness,
+                                        s.speed_ramp.increment,
+                                        s.speed_ramp.decrement,
+                                    );
 
                                 // Check if the coach model provided a decision
-                                let model_decision = adaptive_model_decision.swap(DECISION_NONE, Ordering::Relaxed);
+                                let model_decision =
+                                    adaptive_model_decision.swap(DECISION_NONE, Ordering::Relaxed);
 
                                 // Determine direction: model decision overrides DSP thresholds
                                 let direction = match model_decision {
@@ -1291,9 +1352,13 @@ impl MetronomeEngine {
                                     DECISION_DOWN => "down",
                                     _ => {
                                         // No model decision — fall back to DSP thresholds
-                                        if score >= up_thresh { "up" }
-                                        else if score <= down_thresh { "down" }
-                                        else { "hold" }
+                                        if score >= up_thresh {
+                                            "up"
+                                        } else if score <= down_thresh {
+                                            "down"
+                                        } else {
+                                            "hold"
+                                        }
                                     }
                                 };
 
@@ -1303,7 +1368,8 @@ impl MetronomeEngine {
                                 let mut completed = false;
 
                                 if direction == "up" {
-                                    let new_bpm = s.speed_ramp.current_bpm.saturating_add(step_up).min(300);
+                                    let new_bpm =
+                                        s.speed_ramp.current_bpm.saturating_add(step_up).min(300);
                                     if !no_ceiling && new_bpm >= target {
                                         s.speed_ramp.current_bpm = target;
                                         s.speed_ramp.completed = true;
@@ -1318,7 +1384,11 @@ impl MetronomeEngine {
                                         *c = Some(SoundId::ChimeUp);
                                     }
                                 } else if direction == "down" && prev_bpm > s.speed_ramp.start_bpm {
-                                    let new_bpm = s.speed_ramp.current_bpm.saturating_sub(step_down).max(s.speed_ramp.start_bpm);
+                                    let new_bpm = s
+                                        .speed_ramp
+                                        .current_bpm
+                                        .saturating_sub(step_down)
+                                        .max(s.speed_ramp.start_bpm);
                                     s.speed_ramp.current_bpm = new_bpm;
                                     s.speed_ramp.current_step += 1;
                                     if new_bpm < prev_bpm {
@@ -1351,51 +1421,51 @@ impl MetronomeEngine {
                                     let _ = app_handle.emit("adaptive-eval", &eval_req);
                                 }
                             } else {
-                            let prev_bpm = s.speed_ramp.current_bpm;
-                            let (new_bpm, new_dir, done) = advance_ramp(
-                                s.speed_ramp.current_bpm,
-                                &s.speed_ramp.direction,
-                                s.speed_ramp.start_bpm,
-                                s.speed_ramp.target_bpm,
-                                s.speed_ramp.increment,
-                                s.speed_ramp.decrement,
-                                &s.speed_ramp.mode,
-                                s.speed_ramp.cyclic,
-                            );
+                                let prev_bpm = s.speed_ramp.current_bpm;
+                                let (new_bpm, new_dir, done) = advance_ramp(
+                                    s.speed_ramp.current_bpm,
+                                    &s.speed_ramp.direction,
+                                    s.speed_ramp.start_bpm,
+                                    s.speed_ramp.target_bpm,
+                                    s.speed_ramp.increment,
+                                    s.speed_ramp.decrement,
+                                    &s.speed_ramp.mode,
+                                    s.speed_ramp.cyclic,
+                                );
 
-                            if done && new_bpm == s.speed_ramp.current_bpm {
-                                // Already at target — truly done
-                                s.speed_ramp.completed = true;
-                                s.speed_ramp.active = false;
-                                s.is_playing = false;
-                                let sc = s.clone();
-                                let rc = s.speed_ramp.clone();
-                                drop(s);
-                                playing.store(false, Ordering::SeqCst);
-                                let _ = app_handle.emit("ramp-step", &rc);
-                                let _ = app_handle.emit("state-changed", &sc);
-                            } else {
-                                // Advance step (even if done — play target step first)
-                                s.speed_ramp.current_step += 1;
-                                s.speed_ramp.current_bpm = new_bpm;
-                                s.speed_ramp.direction = new_dir;
-                                let rc = s.speed_ramp.clone();
-                                let sc = s.clone();
-                                drop(s);
-
-                                // Queue directional chime
-                                let chime = if new_bpm < prev_bpm {
-                                    SoundId::ChimeDown
+                                if done && new_bpm == s.speed_ramp.current_bpm {
+                                    // Already at target — truly done
+                                    s.speed_ramp.completed = true;
+                                    s.speed_ramp.active = false;
+                                    s.is_playing = false;
+                                    let sc = s.clone();
+                                    let rc = s.speed_ramp.clone();
+                                    drop(s);
+                                    playing.store(false, Ordering::SeqCst);
+                                    let _ = app_handle.emit("ramp-step", &rc);
+                                    let _ = app_handle.emit("state-changed", &sc);
                                 } else {
-                                    SoundId::ChimeUp
-                                };
-                                if let Ok(mut c) = pending_chime.lock() {
-                                    *c = Some(chime);
-                                }
+                                    // Advance step (even if done — play target step first)
+                                    s.speed_ramp.current_step += 1;
+                                    s.speed_ramp.current_bpm = new_bpm;
+                                    s.speed_ramp.direction = new_dir;
+                                    let rc = s.speed_ramp.clone();
+                                    let sc = s.clone();
+                                    drop(s);
 
-                                let _ = app_handle.emit("ramp-step", &rc);
-                                let _ = app_handle.emit("state-changed", &sc);
-                            }
+                                    // Queue directional chime
+                                    let chime = if new_bpm < prev_bpm {
+                                        SoundId::ChimeDown
+                                    } else {
+                                        SoundId::ChimeUp
+                                    };
+                                    if let Ok(mut c) = pending_chime.lock() {
+                                        *c = Some(chime);
+                                    }
+
+                                    let _ = app_handle.emit("ramp-step", &rc);
+                                    let _ = app_handle.emit("state-changed", &sc);
+                                }
                             }
                         } else {
                             let sc = s.clone();
@@ -1477,7 +1547,10 @@ mod tests {
     fn adaptive_thresholds_moderate_is_default() {
         let (up_mod, _, _, _) = adaptive_thresholds("moderate", 5, 3);
         let (up_unknown, _, _, _) = adaptive_thresholds("not-a-mode", 5, 3);
-        assert_eq!(up_mod, up_unknown, "unknown mode should fall through to moderate");
+        assert_eq!(
+            up_mod, up_unknown,
+            "unknown mode should fall through to moderate"
+        );
     }
 
     #[test]
@@ -1537,4 +1610,3 @@ mod tests {
         assert_eq!(bpm, 20, "BPM should floor at 20");
     }
 }
-

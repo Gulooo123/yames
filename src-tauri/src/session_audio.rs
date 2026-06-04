@@ -175,9 +175,7 @@ impl SessionAudioRecorder {
         header[20..22].copy_from_slice(&WAVE_FORMAT_PCM.to_le_bytes());
         header[22..24].copy_from_slice(&NUM_CHANNELS.to_le_bytes());
         header[24..28].copy_from_slice(&self.sample_rate.to_le_bytes());
-        let byte_rate = self.sample_rate as u64
-            * NUM_CHANNELS as u64
-            * BYTES_PER_SAMPLE;
+        let byte_rate = self.sample_rate as u64 * NUM_CHANNELS as u64 * BYTES_PER_SAMPLE;
         header[28..32].copy_from_slice(&(byte_rate as u32).to_le_bytes());
         let block_align = NUM_CHANNELS * (BITS_PER_SAMPLE / 8);
         header[32..34].copy_from_slice(&block_align.to_le_bytes());
@@ -290,7 +288,8 @@ mod tests {
     fn samples_are_clamped_to_int16_range() {
         let dir = tmp_dir("clamp");
         let mut rec = SessionAudioRecorder::create(&dir, 48000).expect("create");
-        rec.push_samples(&[1.5, -1.5, 0.0, 1.0, -1.0]).expect("push");
+        rec.push_samples(&[1.5, -1.5, 0.0, 1.0, -1.0])
+            .expect("push");
         let path = rec.finish().expect("finish");
         let bytes = std::fs::read(&path).expect("read");
         // Read i16 samples from bytes[44..]

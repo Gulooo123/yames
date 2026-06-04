@@ -13,9 +13,9 @@ use serde::Serialize;
 
 /// Available voice identifiers — maps to downloaded .onnx files.
 pub const VOICES: &[(&str, &str)] = &[
-    ("lessac", "Lessac"),   // Clear, expressive (default)
-    ("amy", "Amy"),         // Female, warm
-    ("ryan", "Ryan"),       // Male, deeper
+    ("lessac", "Lessac"), // Clear, expressive (default)
+    ("amy", "Amy"),       // Female, warm
+    ("ryan", "Ryan"),     // Male, deeper
 ];
 
 /// Minimum size a Piper medium ONNX model file should have on disk to be
@@ -116,10 +116,7 @@ pub fn cancel_active_speech(active: &SharedTtsActive) {
         // `-9` is SIGKILL — the cleanest interruption signal. The
         // child can't ignore it (unlike SIGINT/SIGTERM) so we don't
         // risk a hung `afplay` waiting for the metronome dim restore.
-        let _ = Command::new("kill")
-            .arg("-9")
-            .arg(pid.to_string())
-            .status();
+        let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
     }
 }
 
@@ -211,7 +208,9 @@ impl TtsEngine {
     pub fn is_ready(&self) -> bool {
         if let Some(dir) = &self.models_dir {
             let piper = dir.join("piper").join("piper");
-            let model = dir.join("voice").join(format!("en_US-{}-medium.onnx", self.voice));
+            let model = dir
+                .join("voice")
+                .join(format!("en_US-{}-medium.onnx", self.voice));
             piper.exists() && model.exists()
         } else {
             false
@@ -463,15 +462,17 @@ pub fn piper_smoke_test(piper_dir: &Path) -> Result<(), String> {
     }
     let output = std::process::Command::new(&bin)
         .arg("--help")
+        .env("DYLD_LIBRARY_PATH", piper_dir)
         .output()
         .map_err(|e| format!("failed to launch piper: {e}"))?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     // Dyld errors print BEFORE main() runs. Match the macOS-typical
     // markers explicitly so the error string we surface points at
     // the actual broken library rather than a generic exit code.
-    if let Some(line) = stderr.lines().find(|l| {
-        l.contains("Library not loaded") || l.contains("dyld:") || l.contains("dyld[")
-    }) {
+    if let Some(line) = stderr
+        .lines()
+        .find(|l| l.contains("Library not loaded") || l.contains("dyld:") || l.contains("dyld["))
+    {
         return Err(format!(
             "piper binary can't load required libraries: {}",
             line.trim(),
@@ -515,7 +516,8 @@ pub fn speak_standalone<F: FnOnce()>(
     // calling us, so this snapshot is the marker we compare against.
     let my_gen = active.lock().unwrap().generation;
 
-    let piper_bin = snap.models_dir.join("piper").join("piper");
+    let piper_dir = snap.models_dir.join("piper");
+    let piper_bin = piper_dir.join("piper");
     let model_path = snap
         .models_dir
         .join("voice")
@@ -545,6 +547,7 @@ pub fn speak_standalone<F: FnOnce()>(
 
     let piper_status = spawn_and_track(
         Command::new(&piper_bin)
+            .env("DYLD_LIBRARY_PATH", &piper_dir)
             .arg("--model")
             .arg(&model_path)
             .arg("--output_file")
@@ -608,9 +611,7 @@ pub fn speak_standalone<F: FnOnce()>(
             speak_fallback_standalone(snap, text, active, my_gen, on_ready_to_play)
         }
         SubprocessOutcome::SpawnErr(e) => {
-            eprintln!(
-                "[tts] piper spawn failed: {e} \u{2014} falling back to macOS `say`",
-            );
+            eprintln!("[tts] piper spawn failed: {e} \u{2014} falling back to macOS `say`",);
             speak_fallback_standalone(snap, text, active, my_gen, on_ready_to_play)
         }
     }
@@ -745,7 +746,20 @@ fn spawn_and_track(
 
 /// Piper binary download URL for the current platform.
 pub fn piper_binary_url() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
+    // cfg!(target_arch) is compile-time and reflects the Tauri binary's
+    // target, not the machine's native arch — on an arm64 Mac with an
+    // x86_64 Tauri build this evaluates to false, downloading the wrong
+    // piper tarball. Use uname -m for runtime detection instead.
+    let is_arm64 = std::process::Command::new("uname")
+        .arg("-m")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+        .as_deref()
+        == Some("arm64");
+
+    if is_arm64 {
         "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_macos_aarch64.tar.gz"
     } else {
         "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_macos_x64.tar.gz"

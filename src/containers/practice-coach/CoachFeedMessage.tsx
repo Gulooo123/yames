@@ -237,7 +237,7 @@ export function FeedMessageItem({
           ) : (
             !message.pending && <span className="coach-mini-report-text">{message.content}</span>
           )}
-          {message.segments && message.segments.length > 1 && (
+          {message.segments && message.segments.length > 0 && (
             <SegmentTimeline segments={message.segments} sessionStart={message.segments[0].startTime ?? message.timestamp} />
           )}
           <div className="coach-feed-msg-time">{formatTime(message.timestamp)}</div>
@@ -267,13 +267,29 @@ function TtsThinkingSpinner() {
   );
 }
 
+const scoreQualifier = (score: number): string =>
+  score >= 90 ? "Excellent" :
+  score >= 75 ? "Good" :
+  score >= 55 ? "Fair" :
+  "Keep practicing";
+
 function EndReportSummary({ report }: { report: SessionReport }) {
-  // Accuracy uses SCORED beats (hits + misses) as the denominator — not
-  // totalBeats — so a session that started before the user picked up the
-  // instrument doesn't get a misleading "12% accuracy" because half the
-  // metronome ticks landed in silence. The `accuracyPct` helper centralises
-  // this calculation; see `src/coach/reportStats.ts` for the rationale.
-  const accuracy = accuracyPct(report);
+  // In Default mode with subdivision > 1, show accent (downbeat) accuracy:
+  // only the quarter-beat positions count toward the score. For Pro mode
+  // or when accent data is unavailable, fall back to hit/(hit+miss).
+  const accuracy =
+    report.coachMode === "default" &&
+    report.accentBeatsCount != null &&
+    report.accentBeatsCount > 0
+      ? Math.round((report.accentHitsCount! / report.accentBeatsCount) * 100)
+      : accuracyPct(report);
+
+  // In subdivision mode, convert longestStreak (in subdivision units) to
+  // quarter-note beats so "Best Streak: 3" reads "3 downbeats" not "3 sixteenths".
+  const streakBeats =
+    report.subdivision && report.subdivision > 1
+      ? Math.floor(report.longestStreak / report.subdivision)
+      : report.longestStreak;
 
   return (
     <>
@@ -281,6 +297,9 @@ function EndReportSummary({ report }: { report: SessionReport }) {
         <ScoreRing score={report.score} size={52} strokeWidth={5} />
         <div className="coach-mini-report-stats">
           <span className="coach-mini-report-score-label">Session Score</span>
+          <span className="coach-mini-report-score-sublabel">
+            {scoreQualifier(report.score)}
+          </span>
           {/*
             The letter grade (F/D/C/B/A/S) was previously rendered here.
             Removed in v0.10 — a grade letter framed practice as an
@@ -297,11 +316,13 @@ function EndReportSummary({ report }: { report: SessionReport }) {
       </div>
       <div className="coach-end-report-grid">
         <div className="coach-end-report-stat">
-          <span className="coach-end-report-stat-label">Accuracy</span>
+          <span className="coach-end-report-stat-label">Beats hit</span>
+          <span className="coach-end-report-stat-sublabel">beats you played vs. beats counted</span>
           <span className="coach-end-report-stat-value">{accuracy}%</span>
         </div>
         <div className="coach-end-report-stat">
           <span className="coach-end-report-stat-label">Avg Timing Error</span>
+          <span className="coach-end-report-stat-sublabel">lower is tighter</span>
           <span className="coach-end-report-stat-value">{"\u00B1"}{report.meanAbsDeviationMs.toFixed(1)}ms</span>
         </div>
         <div className="coach-end-report-stat">
@@ -310,9 +331,43 @@ function EndReportSummary({ report }: { report: SessionReport }) {
         </div>
         <div className="coach-end-report-stat">
           <span className="coach-end-report-stat-label">Best Streak</span>
-          <span className="coach-end-report-stat-value">{report.longestStreak}</span>
+          <span className="coach-end-report-stat-value">{streakBeats}</span>
         </div>
       </div>
+      {report.intervalConsistency !== undefined && (
+        <div className="end-report-components">
+          <div className="end-report-component-row">
+            <div className="end-report-component-label-group">
+              <span className="end-report-component-label" title="How evenly spaced your notes are — higher is more consistent">Note spacing</span>
+              <span className="end-report-component-sublabel">Even gaps between your notes</span>
+            </div>
+            <div className="end-report-component-bar-track">
+              <div
+                className="end-report-component-bar-fill"
+                style={{ width: `${Math.round(report.intervalConsistency * 100)}%` }}
+              />
+            </div>
+            <span className="end-report-component-value">
+              {Math.round(report.intervalConsistency * 100)}%
+            </span>
+          </div>
+          <div className="end-report-component-row">
+            <div className="end-report-component-label-group">
+              <span className="end-report-component-label" title="How close your hits land to the beat grid — higher is more accurate">Beat placement</span>
+              <span className="end-report-component-sublabel">How close your hits land to the beat</span>
+            </div>
+            <div className="end-report-component-bar-track">
+              <div
+                className="end-report-component-bar-fill"
+                style={{ width: `${Math.round((report.gridAlignment ?? 0) * 100)}%` }}
+              />
+            </div>
+            <span className="end-report-component-value">
+              {report.gridAlignment !== undefined ? `${Math.round(report.gridAlignment * 100)}%` : "—"}
+            </span>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -446,6 +501,16 @@ function SegmentTimeline({ segments, sessionStart }: { segments: SessionSegment[
           : "Free playing";
         const pocket = seg.report.meanDeviationMs < -5 ? "rushing"
           : seg.report.meanDeviationMs > 5 ? "dragging" : "on beat";
+        const styleTitle = seg.report.gridCorrelation > 0.8
+          ? "Your playing closely matched the metronome grid"
+          : seg.report.gridCorrelation > 0.3
+          ? "Your playing roughly followed the beat with some variation"
+          : "Your playing wasn't tightly tied to the beat — exploratory";
+        const pocketTitle = seg.report.meanDeviationMs < -5
+          ? `You played an average of ${Math.abs(Math.round(seg.report.meanDeviationMs))}ms early`
+          : seg.report.meanDeviationMs > 5
+          ? `You played an average of ${Math.round(seg.report.meanDeviationMs)}ms late`
+          : `Your timing was centred on the beat (±5ms average)`;
 
         return (
           <div key={i} className="coach-segment-row">
@@ -453,13 +518,13 @@ function SegmentTimeline({ segments, sessionStart }: { segments: SessionSegment[
               {formatDuration(offsetSec)}–{formatDuration(offsetSec + durationSec)}
             </div>
             <div className="coach-segment-info">
-              <span className="coach-segment-style">{style}</span>
+              <span className="coach-segment-style" title={styleTitle}>{style}</span>
               <span className="coach-segment-sep">&middot;</span>
               <span>{seg.bpm} BPM</span>
               <span className="coach-segment-sep">&middot;</span>
-              <span>{accuracy}%</span>
+              <span title="How many expected beats you actually played">Beats hit: {accuracy}%</span>
               <span className="coach-segment-sep">&middot;</span>
-              <span>{pocket}</span>
+              <span title={pocketTitle}>{pocket}</span>
             </div>
             <ScoreBadge score={seg.report.score} />
             <SegmentBreakdownBar report={seg.report} />

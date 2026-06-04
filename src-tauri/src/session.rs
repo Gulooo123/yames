@@ -18,6 +18,10 @@ pub enum CoachMode {
     Pro,
 }
 
+fn default_subdivision() -> u8 {
+    1
+}
+
 /// Accumulated session statistics from beat feedback events.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionReport {
@@ -97,7 +101,10 @@ pub struct SessionReport {
     /// Mean interval consistency over the segment window (0.0–1.0).
     /// Gaussian decay of inter-onset interval MAD. 1.0 = perfectly even spacing.
     /// `None` when no segments were recorded.
-    #[serde(rename = "intervalConsistency", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "intervalConsistency",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub interval_consistency: Option<f32>,
     /// Mean grid alignment over the segment window (0.0–1.0).
     /// Confidence-weighted hit-quality average (perfect=1.0, miss=0.0).
@@ -106,7 +113,9 @@ pub struct SessionReport {
     pub grid_alignment: Option<f32>,
     /// Coach mode active during this session. Determines which scoring
     /// constants were applied (k-factor, score weights).
-    #[serde(rename = "coachMode")]
+    /// `default` when absent so legacy golden fixtures / old saved sessions
+    /// deserialise without error (pre-dates the coach-mode field).
+    #[serde(rename = "coachMode", default)]
     pub coach_mode: CoachMode,
     /// Mean amplitude of downbeat onsets averaged across segments.
     /// `None` when no segment had enough downbeat data points.
@@ -124,6 +133,21 @@ pub struct SessionReport {
     /// `None` when no segment had enough matched onsets.
     #[serde(rename = "ampStdDev", skip_serializing_if = "Option::is_none")]
     pub amp_std_dev: Option<f32>,
+    /// Count of accent (downbeat) positions matched within the active window.
+    /// 0 when no post-session telemetry was available (live mini-reports, short
+    /// warmups). Use to compute Default-mode display accuracy:
+    /// `accent_hits_count / accent_beats_count`.
+    #[serde(rename = "accentHitsCount", default)]
+    pub accent_hits_count: u32,
+    /// Total accent positions that fell within the active segment window.
+    /// 0 when no post-session telemetry available.
+    #[serde(rename = "accentBeatsCount", default)]
+    pub accent_beats_count: u32,
+    /// Subdivision count active during this session (1 = quarter notes,
+    /// 2 = eighth, 4 = sixteenth). Defaults to 1 for backward compat with
+    /// old saved sessions and live mini-reports.
+    #[serde(rename = "subdivision", default = "default_subdivision")]
+    pub subdivision: u8,
 }
 
 /// Accumulates BeatFeedback events during a playing session.
@@ -155,6 +179,13 @@ pub struct SessionAccumulator {
     /// only cleared at session start (`clear()`). Drives the persisted
     /// D1 JSON `report` field via `persist_session_log`.
     all_feedbacks: Vec<BeatFeedback>,
+    /// POSTMATCH_1: Post-session best-candidate feedbacks. Computed once
+    /// at `stop_evaluation` by `recompute_matches` on the raw telemetry
+    /// streams. `report_final()` uses these when present (falls back to
+    /// `all_feedbacks` for synthetic tests / fixture sessions where
+    /// telemetry is absent). Cleared only at `clear()` (session start),
+    /// not at `clear_segment_window()`.
+    recomputed_feedbacks: Option<Vec<BeatFeedback>>,
     /// UNIX seconds when the session started. `None` until
     /// `mark_session_start` is called (`start_evaluation` sets this).
     /// Survives `clear_segment_window()` so the session epoch isn't lost
@@ -175,6 +206,14 @@ pub struct SessionAccumulator {
     /// `start_evaluation`. Propagated to `SessionReport` and into each
     /// `SegmentState` so `score_segment` can branch on it.
     pub coach_mode: CoachMode,
+    /// Post-session accent counts — populated by `set_accent_counts` in
+    /// `stop_evaluation` after `recompute_matches`. 0 for live mini-reports
+    /// (real-time accumulator path lacks per-beat `is_accent` metadata).
+    pub accent_hits_count: u32,
+    pub accent_beats_count: u32,
+    /// Subdivision count for this session. Set from SharedState at
+    /// `start_evaluation` so `report_final()` can include it.
+    pub subdivision: u8,
 }
 
 impl SessionAccumulator {
@@ -182,11 +221,15 @@ impl SessionAccumulator {
         Self {
             feedbacks: Vec::with_capacity(256),
             all_feedbacks: Vec::with_capacity(1024),
+            recomputed_feedbacks: None,
             session_start_secs: None,
             session_start_ms: None,
             segments: Vec::new(),
             all_segments: Vec::new(),
             coach_mode: CoachMode::Default,
+            accent_hits_count: 0,
+            accent_beats_count: 0,
+            subdivision: 1,
         }
     }
 
@@ -215,10 +258,38 @@ impl SessionAccumulator {
     pub fn clear(&mut self) {
         self.feedbacks.clear();
         self.all_feedbacks.clear();
+        self.recomputed_feedbacks = None;
         self.segments.clear();
         self.all_segments.clear();
         self.session_start_secs = None;
         self.session_start_ms = None;
+        self.accent_hits_count = 0;
+        self.accent_beats_count = 0;
+        // subdivision is intentionally NOT reset — it persists until
+        // start_evaluation sets it from the current SharedState. This
+        // prevents a 0-subdivision report if clear() is ever called without
+        // a subsequent set_subdivision().
+    }
+
+    /// Store post-session best-candidate feedbacks (POSTMATCH_1).
+    /// Called once from `stop_evaluation` after `recompute_matches`.
+    /// `report_final()` uses these in preference to `all_feedbacks`.
+    pub fn set_recomputed_feedbacks(&mut self, fbs: Vec<BeatFeedback>) {
+        self.recomputed_feedbacks = Some(fbs);
+    }
+
+    /// Store post-session accent counts for Default-mode accuracy display.
+    /// Called from `stop_evaluation` alongside `set_recomputed_feedbacks`.
+    /// `hits` = accent beats where an onset was matched; `beats` = total
+    /// accent positions in the active window (reason != NoActivity).
+    pub fn set_accent_counts(&mut self, hits: u32, beats: u32) {
+        self.accent_hits_count = hits;
+        self.accent_beats_count = beats;
+    }
+
+    /// Set the subdivision count from SharedState at `start_evaluation`.
+    pub fn set_subdivision(&mut self, sub: u8) {
+        self.subdivision = sub.max(1);
     }
 
     /// Mid-session clear — wipes ONLY the mini-report window so the next
@@ -322,7 +393,10 @@ impl SessionAccumulator {
                     current_streak = 0;
                 }
             }
-            if fb.classification != "miss" && fb.classification != "skipped" && fb.interval_error_ms != 0.0 {
+            if fb.classification != "miss"
+                && fb.classification != "skipped"
+                && fb.interval_error_ms != 0.0
+            {
                 interval_errors.push(fb.interval_error_ms.abs());
             }
             if fb.grid_correlation > 0.0 {
@@ -407,11 +481,14 @@ impl SessionAccumulator {
         let accuracy_score = if deviations.is_empty() {
             0.0
         } else {
-            let points = perfect_count as f64 * 10.0
-                + good_count as f64 * 7.0
-                + ok_count as f64 * 3.0;
+            let points =
+                perfect_count as f64 * 10.0 + good_count as f64 * 7.0 + ok_count as f64 * 3.0;
             let max_points = hits_count as f64 * 10.0;
-            if max_points > 0.0 { points / max_points } else { 0.0 }
+            if max_points > 0.0 {
+                points / max_points
+            } else {
+                0.0
+            }
         };
         let consistency_score = (1.0 - (std_deviation_ms / 50.0).min(1.0)).max(0.0);
 
@@ -488,13 +565,14 @@ impl SessionAccumulator {
                 .sum();
             Some(sum / self.segments.len() as f32)
         };
-        let play_mode = onset_efficiency.map(|oe| {
-            if oe >= 0.65 {
-                PlayMode::Structured
-            } else {
-                PlayMode::Noodling
-            }
-        });
+        // DEFAULT_EVAL: play_mode is always Structured. Noodling detection
+        // is removed — penalising extra notes (16ths over quarters, fills,
+        // ghost notes) conflicts with free-form practice and produces
+        // demotivating results for correct playing. OE weight is also 0.0
+        // in all instrument profiles, so this is purely cosmetic, but
+        // keeping play_mode=Noodling in any code path would still surface
+        // as a misleading label in the UI and coach feed.
+        let play_mode = onset_efficiency.map(|_| PlayMode::Structured);
         let hit_completeness = if self.segments.is_empty() {
             None
         } else {
@@ -527,28 +605,52 @@ impl SessionAccumulator {
         };
 
         let downbeat_amp_avg = {
-            let vals: Vec<f32> = self.segments.iter()
+            let vals: Vec<f32> = self
+                .segments
+                .iter()
                 .filter_map(|s| s.component_scores.downbeat_amp_avg)
                 .collect();
-            if vals.is_empty() { None } else { Some(vals.iter().sum::<f32>() / vals.len() as f32) }
+            if vals.is_empty() {
+                None
+            } else {
+                Some(vals.iter().sum::<f32>() / vals.len() as f32)
+            }
         };
         let upbeat_amp_avg = {
-            let vals: Vec<f32> = self.segments.iter()
+            let vals: Vec<f32> = self
+                .segments
+                .iter()
                 .filter_map(|s| s.component_scores.upbeat_amp_avg)
                 .collect();
-            if vals.is_empty() { None } else { Some(vals.iter().sum::<f32>() / vals.len() as f32) }
+            if vals.is_empty() {
+                None
+            } else {
+                Some(vals.iter().sum::<f32>() / vals.len() as f32)
+            }
         };
         let subdivision_amp_avg = {
-            let vals: Vec<f32> = self.segments.iter()
+            let vals: Vec<f32> = self
+                .segments
+                .iter()
                 .filter_map(|s| s.component_scores.subdivision_amp_avg)
                 .collect();
-            if vals.is_empty() { None } else { Some(vals.iter().sum::<f32>() / vals.len() as f32) }
+            if vals.is_empty() {
+                None
+            } else {
+                Some(vals.iter().sum::<f32>() / vals.len() as f32)
+            }
         };
         let amp_std_dev = {
-            let vals: Vec<f32> = self.segments.iter()
+            let vals: Vec<f32> = self
+                .segments
+                .iter()
                 .filter_map(|s| s.component_scores.amp_std_dev)
                 .collect();
-            if vals.is_empty() { None } else { Some(vals.iter().sum::<f32>() / vals.len() as f32) }
+            if vals.is_empty() {
+                None
+            } else {
+                Some(vals.iter().sum::<f32>() / vals.len() as f32)
+            }
         };
 
         SessionReport {
@@ -572,7 +674,11 @@ impl SessionAccumulator {
             longest_streak,
             comment,
             insights,
-            grid_correlation: if grid_correlations.is_empty() { 0.0 } else { grid_correlations.iter().sum::<f64>() / grid_correlations.len() as f64 },
+            grid_correlation: if grid_correlations.is_empty() {
+                0.0
+            } else {
+                grid_correlations.iter().sum::<f64>() / grid_correlations.len() as f64
+            },
             onset_efficiency,
             play_mode,
             hit_completeness,
@@ -583,6 +689,12 @@ impl SessionAccumulator {
             upbeat_amp_avg,
             subdivision_amp_avg,
             amp_std_dev,
+            // Accent counts are populated by report_final() after post-session
+            // recompute_matches; live mini-reports via report() carry 0 because
+            // the real-time accumulator path lacks per-beat is_accent metadata.
+            accent_hits_count: 0,
+            accent_beats_count: 0,
+            subdivision: self.subdivision,
         }
     }
 
@@ -604,71 +716,34 @@ impl SessionAccumulator {
     /// The session-end path uses a dedicated `get_final_session_report`
     /// command that calls this method, so the two call sites stay independent.
     pub fn report_final(&self) -> SessionReport {
-        // Start with the full beat-level report (hits, misses, deviations,
-        // streak, legacy score, etc.).  All those fields come from
-        // `self.feedbacks`, which is independent of which segment buffer
-        // we use.  We then override only the segment-derived fields.
-        let mut r = self.report();
+        // POSTMATCH_1: use post-session best-candidate feedbacks when
+        // available (set by stop_evaluation via recompute_matches).
+        // Fall back to all_feedbacks for synthetic tests / fixture
+        // sessions where telemetry is absent.
+        let beat_feedbacks: &[BeatFeedback] = if let Some(ref rfs) = self.recomputed_feedbacks {
+            rfs.as_slice()
+        } else {
+            &self.all_feedbacks
+        };
 
-        let segs = &self.all_segments;
-        if segs.is_empty() {
-            // No segments recorded at all — legacy formula from report() is
-            // already correct; nothing to override.
-            return r;
+        // Build a scratch accumulator loaded with the chosen feedbacks +
+        // all_segments. A single report() call then computes all fields
+        // correctly: beat-level stats from feedbacks, D3 score and
+        // component averages from segments.
+        let mut tmp = SessionAccumulator::new();
+        tmp.coach_mode = self.coach_mode;
+        tmp.subdivision = self.subdivision;
+        for fb in beat_feedbacks {
+            tmp.feedbacks.push(fb.clone());
         }
-
-        // Score: duration-weighted mean across every segment in the session.
-        let pairs: Vec<(f32, u64)> = segs
-            .iter()
-            .map(|s| (s.score, s.end_ms.saturating_sub(s.start_ms)))
-            .collect();
-        r.score = crate::timing::duration_weighted_session_score(&pairs)
-            .round()
-            .clamp(0.0, 100.0) as u32;
-
-        // Grade and comment must be recomputed from the updated score.
-        // scored_beats = hits + misses (skipped excluded), mirroring report().
-        r.grade = match r.score {
-            95..=100 => "S",
-            85..=94  => "A",
-            70..=84  => "B",
-            55..=69  => "C",
-            40..=54  => "D",
-            _        => "F",
+        for seg in &self.all_segments {
+            tmp.segments.push(seg.clone());
         }
-        .to_string();
-        r.comment = generate_comment(&r.grade, r.score, r.hits_count + r.miss_count);
-
-        // Component averages from all_segments.
-        let len = segs.len() as f32;
-
-        let sum_oe: f32 = segs.iter().map(|s| s.component_scores.onset_efficiency).sum();
-        r.onset_efficiency = Some(sum_oe / len);
-        r.play_mode = r.onset_efficiency.map(|oe| {
-            if oe >= 0.65 { PlayMode::Structured } else { PlayMode::Noodling }
-        });
-
-        let sum_hc: f32 = segs.iter().map(|s| s.component_scores.hit_completeness).sum();
-        r.hit_completeness = Some(sum_hc / len);
-
-        let sum_ic: f32 = segs.iter().map(|s| s.component_scores.interval_consistency).sum();
-        r.interval_consistency = Some(sum_ic / len);
-
-        let sum_ga: f32 = segs.iter().map(|s| s.component_scores.grid_alignment).sum();
-        r.grid_alignment = Some(sum_ga / len);
-
-        let dba: Vec<f32> = segs.iter().filter_map(|s| s.component_scores.downbeat_amp_avg).collect();
-        r.downbeat_amp_avg = if dba.is_empty() { None } else { Some(dba.iter().sum::<f32>() / dba.len() as f32) };
-
-        let uba: Vec<f32> = segs.iter().filter_map(|s| s.component_scores.upbeat_amp_avg).collect();
-        r.upbeat_amp_avg = if uba.is_empty() { None } else { Some(uba.iter().sum::<f32>() / uba.len() as f32) };
-
-        let suba: Vec<f32> = segs.iter().filter_map(|s| s.component_scores.subdivision_amp_avg).collect();
-        r.subdivision_amp_avg = if suba.is_empty() { None } else { Some(suba.iter().sum::<f32>() / suba.len() as f32) };
-
-        let asd: Vec<f32> = segs.iter().filter_map(|s| s.component_scores.amp_std_dev).collect();
-        r.amp_std_dev = if asd.is_empty() { None } else { Some(asd.iter().sum::<f32>() / asd.len() as f32) };
-
+        let mut r = tmp.report();
+        // Patch in post-session accent counts (computed by stop_evaluation
+        // after recompute_matches — not available in the scratch accumulator).
+        r.accent_hits_count = self.accent_hits_count;
+        r.accent_beats_count = self.accent_beats_count;
         r
     }
 }
@@ -690,7 +765,11 @@ pub struct SavedSession {
     pub report: SessionReport,
     #[serde(rename = "presetId", default, skip_serializing_if = "Option::is_none")]
     pub preset_id: Option<String>,
-    #[serde(rename = "presetName", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "presetName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub preset_name: Option<String>,
 }
 
@@ -754,7 +833,10 @@ fn generate_insights(
     if std_deviation_ms < 8.0 && hits_count > 12 {
         insights.push("Extremely consistent — your timing barely varies.".to_string());
     } else if std_deviation_ms > 25.0 {
-        insights.push("Your timing varies quite a bit between beats. Try focusing on smaller phrases.".to_string());
+        insights.push(
+            "Your timing varies quite a bit between beats. Try focusing on smaller phrases."
+                .to_string(),
+        );
     }
 
     // Streak highlight
@@ -772,7 +854,10 @@ fn generate_insights(
 
     // High hit rate but low score = accuracy issue
     if hit_rate > 0.9 && score < 70 {
-        insights.push("You're hitting most beats but not precisely — focus on locking in tighter.".to_string());
+        insights.push(
+            "You're hitting most beats but not precisely — focus on locking in tighter."
+                .to_string(),
+        );
     }
 
     // Perfect ratio
@@ -790,7 +875,9 @@ fn generate_insights(
     if tempo_stability_ms > 25.0 && hits_count > 8 {
         insights.push("Your spacing between beats is uneven. Try subdividing mentally to keep a steadier pulse.".to_string());
     } else if tempo_stability_ms < 5.0 && hits_count > 12 {
-        insights.push("Rock-solid internal clock — your spacing between beats is very even.".to_string());
+        insights.push(
+            "Rock-solid internal clock — your spacing between beats is very even.".to_string(),
+        );
     }
 
     // Cap at 3 most relevant insights
@@ -824,7 +911,11 @@ mod tests {
         let acc = SessionAccumulator::new();
         let r = acc.report();
         assert_eq!(r.total_beats, 0);
-        assert!(r.score < 40, "Empty session score should be < 40, got {}", r.score);
+        assert!(
+            r.score < 40,
+            "Empty session score should be < 40, got {}",
+            r.score
+        );
         assert_eq!(r.grade, "F");
     }
 
@@ -864,10 +955,10 @@ mod tests {
         // perfect/good/ok/miss mixes
         let cases = [
             // (perfect, good, ok, miss, expected_grade_or_alternatives)
-            (16, 0, 0, 0, vec!["S"]),                  // all perfect = S
-            (12, 4, 0, 0, vec!["A", "S"]),             // mostly perfect
-            (8, 4, 4, 0, vec!["A", "B"]),              // mixed quality, no miss
-            (4, 4, 4, 4, vec!["B", "C", "D"]),          // balanced with miss
+            (16, 0, 0, 0, vec!["S"]),          // all perfect = S
+            (12, 4, 0, 0, vec!["A", "S"]),     // mostly perfect
+            (8, 4, 4, 0, vec!["A", "B"]),      // mixed quality, no miss
+            (4, 4, 4, 4, vec!["B", "C", "D"]), // balanced with miss
         ];
         for (p, g, o, m, expected) in cases {
             let mut acc = SessionAccumulator::new();
@@ -988,6 +1079,10 @@ mod tests {
                 grid_alignment: score_0_1,
                 hit_completeness: score_0_1,
                 onset_efficiency: score_0_1,
+                downbeat_amp_avg: None,
+                upbeat_amp_avg: None,
+                subdivision_amp_avg: None,
+                amp_std_dev: None,
             },
             end_reason: crate::session_log::SegmentEndReason::SettingsChange,
             // Path B — fixtures don't exercise rhythm-inference; use
@@ -1112,12 +1207,23 @@ mod tests {
         acc.clear_segment_window();
 
         // Window is empty (mini-report scope reset).
-        assert!(acc.is_empty(), "window feedbacks should be empty after clear_segment_window");
+        assert!(
+            acc.is_empty(),
+            "window feedbacks should be empty after clear_segment_window"
+        );
         assert!(acc.segments().is_empty(), "window segments should be empty");
 
         // Full-session totals survive.
-        assert_eq!(acc.all_feedbacks().len(), 8, "all_feedbacks should keep segment 1");
-        assert_eq!(acc.all_segments().len(), 1, "all_segments should keep segment 1");
+        assert_eq!(
+            acc.all_feedbacks().len(),
+            8,
+            "all_feedbacks should keep segment 1"
+        );
+        assert_eq!(
+            acc.all_segments().len(),
+            1,
+            "all_segments should keep segment 1"
+        );
         assert_eq!(
             acc.session_start_secs(),
             Some(1_700_000_000),
@@ -1137,7 +1243,11 @@ mod tests {
         // Full session sees both segments' beats; window only sees the
         // post-clear ones.
         assert_eq!(acc.feedbacks().len(), 4, "window only has post-clear beats");
-        assert_eq!(acc.all_feedbacks().len(), 12, "all_feedbacks accumulates across clears");
+        assert_eq!(
+            acc.all_feedbacks().len(),
+            12,
+            "all_feedbacks accumulates across clears"
+        );
     }
 
     #[test]
@@ -1162,7 +1272,11 @@ mod tests {
 
         // Full-session feedbacks: 24 perfects across three segments.
         let all = acc.all_feedbacks();
-        assert_eq!(all.len(), 24, "all_feedbacks should keep every push across clears");
+        assert_eq!(
+            all.len(),
+            24,
+            "all_feedbacks should keep every push across clears"
+        );
 
         // Score the FULL session via the public helper used by
         // `build_log_from_session` — this is the path that produces the
@@ -1210,4 +1324,3 @@ mod tests {
         assert_eq!(acc.session_start_ms(), None);
     }
 }
-

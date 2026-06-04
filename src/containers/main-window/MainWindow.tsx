@@ -354,6 +354,7 @@ export function MainWindow() {
     setIsFullscreen,
     setIsOsFullscreen,
     setSidebarOpen,
+    toggleCard: session.toggleCard,
     forceWebviewFocus,
   });
 

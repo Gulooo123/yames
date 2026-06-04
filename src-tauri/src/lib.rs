@@ -24,35 +24,30 @@ mod tts;
 use audio_input::create_shared_audio_input;
 use calibration_cache::create_shared_calibration_cache;
 use coach::create_shared_engine;
-use tts::{create_shared_tts, create_shared_tts_active, create_shared_tts_dim};
 use commands::{
-    clear_calibration_cache_entry, get_calibration_cache_entry, get_state, get_active_tab, get_calibration_offset, list_calibration_cache, open_url, save_window_position, set_active_tab, set_always_on_top, set_bpm, set_calibration_offset,
-    set_instrument, set_playing, set_sound_type, set_subdivision, set_theme, set_time_signature, set_volume, set_widget_mode,
-    set_widget_always_on_top, show_floating, show_main, toggle_playback, configure_speed_ramp, start_speed_ramp,
-    start_speed_ramp_from, stop_speed_ramp, set_adaptive_decision,
-    list_midi_devices, connect_midi_device, disconnect_midi_device, set_midi_binding, clear_midi_binding, get_midi_bindings,
-    list_presets, save_preset, delete_preset, reorder_presets,
-    list_audio_input_devices, start_evaluation, stop_evaluation, get_evaluation_state,
-    notify_settings_change,
-    get_session_report, get_final_session_report, clear_session,
-    save_session, get_session_history, delete_session, clear_all_sessions,
-    list_session_logs, get_session_log, export_session_logs, clear_session_logs,
-    start_recording, stop_recording, start_playback, stop_playback, discard_recording, get_waveform,
-    set_input_gain,
-    list_audio_output_devices, set_audio_output_device,
-    get_model_status, write_model_chunk, get_models_path, delete_models,
-    start_model_download, cancel_model_download,
-    load_coach_model, coach_generate, is_coach_loaded,
-    tts_speak, tts_stop, tts_set_voice, tts_set_volume, tts_list_voices,
-    tts_voice_diagnostics, start_voice_repair,
-    EngineState, DownloadState,
+    cancel_model_download, clear_all_sessions, clear_calibration_cache_entry, clear_midi_binding,
+    clear_session, clear_session_logs, coach_generate, configure_speed_ramp, connect_midi_device,
+    delete_models, delete_preset, delete_session, discard_recording, disconnect_midi_device,
+    export_session_logs, get_active_tab, get_calibration_cache_entry, get_calibration_offset,
+    get_evaluation_state, get_final_session_report, get_midi_bindings, get_model_status,
+    get_models_path, get_session_history, get_session_log, get_session_report, get_state,
+    get_waveform, is_coach_loaded, list_audio_input_devices, list_audio_output_devices,
+    list_calibration_cache, list_midi_devices, list_presets, list_session_logs, load_coach_model,
+    close_open_segment, notify_settings_change, open_url, reorder_presets, save_preset, save_session,
+    save_window_position, set_active_tab, set_adaptive_decision, set_always_on_top,
+    set_audio_output_device, set_bpm, set_calibration_offset, set_input_gain, set_instrument,
+    set_midi_binding, set_playing, set_sound_type, set_subdivision, set_theme, set_time_signature,
+    set_volume, set_widget_always_on_top, set_widget_mode, show_floating, show_main,
+    start_evaluation, start_model_download, start_playback, start_recording, start_speed_ramp,
+    start_speed_ramp_from, start_voice_repair, stop_evaluation, stop_playback, stop_recording,
+    stop_speed_ramp, toggle_playback, tts_list_voices, tts_set_voice, tts_set_volume, tts_speak,
+    tts_stop, tts_voice_diagnostics, write_model_chunk, DownloadState, EngineState,
 };
-use onset::{create_shared_onset_detector, SharedTempoContext, TempoContext};
 use engine::MetronomeEngine;
 use midi::create_shared_midi;
+use onset::{create_shared_onset_detector, SharedTempoContext, TempoContext};
 use session::create_shared_session_accumulator;
 use state::{create_shared_state, SharedState};
-use timing::{create_beat_log, TimingAnalyzer};
 use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem},
@@ -60,6 +55,8 @@ use tauri::{
     Manager,
 };
 use tauri_plugin_store::StoreExt;
+use timing::{create_beat_log, TimingAnalyzer};
+use tts::{create_shared_tts, create_shared_tts_active, create_shared_tts_dim};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -117,7 +114,9 @@ pub fn run() {
                     s.theme = v;
                 }
                 if let Some(v) = store.get("volume").and_then(|v| v.as_f64()) {
-                    s.volume = (v as f32).clamp(0.0, 1.0);
+                    let vol = (v as f32).clamp(0.0, 1.0);
+                    s.volume = vol;
+                    s.volume_real = vol; // keep shadow in sync with loaded value
                 }
                 if let Some(v) = store.get("soundType").and_then(|v| v.as_str().map(String::from)) {
                     s.sound_type = v;
@@ -397,6 +396,47 @@ pub fn run() {
                 }
             }
 
+            // Dev-only screenshot helper: poll /tmp/yames-capture-trigger every 50 ms.
+            // When the file appears, delete it, call capture_image() on the main window
+            // (which reads GPU-composited layers that screencapture cannot see), encode
+            // the result as PNG, and write /tmp/yames-capture.png.
+            // Used exclusively by scripts/take-screenshots.sh.
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let trigger = std::path::Path::new("/tmp/yames-capture-trigger");
+                    let output = "/tmp/yames-capture.png";
+                    loop {
+                        if trigger.exists() {
+                            let _ = std::fs::remove_file(trigger);
+                            if let Some(window) = app_handle.get_webview_window("main") {
+                                match window.capture_image() {
+                                    Ok(img) => {
+                                        let w = img.width();
+                                        let h = img.height();
+                                        let bytes = img.into_bytes();
+                                        let mut buf: Vec<u8> = Vec::new();
+                                        let mut encoder = png::Encoder::new(&mut buf, w, h);
+                                        encoder.set_color(png::ColorType::Rgba);
+                                        encoder.set_depth(png::BitDepth::Eight);
+                                        match encoder.write_header().and_then(|mut w| w.write_image_data(&bytes)) {
+                                            Ok(_) => {
+                                                if let Err(e) = std::fs::write(output, &buf) {
+                                                    eprintln!("[yames] capture save failed: {e}");
+                                                }
+                                            }
+                                            Err(e) => eprintln!("[yames] PNG encode failed: {e}"),
+                                        }
+                                    }
+                                    Err(e) => eprintln!("[yames] capture_image failed: {e}"),
+                                }
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -444,6 +484,7 @@ pub fn run() {
             stop_evaluation,
             get_evaluation_state,
             notify_settings_change,
+            close_open_segment,
             get_session_report,
             get_final_session_report,
             clear_session,

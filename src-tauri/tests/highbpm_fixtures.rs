@@ -105,8 +105,7 @@ fn all_fixtures_replay_stably() {
         let golden_file = golden_path(input_path);
 
         if update_mode {
-            let pretty = serde_json::to_string_pretty(&actual)
-                .expect("serialize SessionReport");
+            let pretty = serde_json::to_string_pretty(&actual).expect("serialize SessionReport");
             fs::write(&golden_file, format!("{pretty}\n"))
                 .unwrap_or_else(|e| panic!("write {}: {e}", golden_file.display()));
             eprintln!(
@@ -142,10 +141,10 @@ fn all_fixtures_replay_stably() {
         let golden: SessionReport = serde_json::from_str(&golden_raw)
             .unwrap_or_else(|e| panic!("parse {}: {e}", golden_file.display()));
 
-        let actual_json = serde_json::to_string_pretty(&actual)
-            .expect("serialize actual SessionReport");
-        let golden_json = serde_json::to_string_pretty(&golden)
-            .expect("serialize golden SessionReport");
+        let actual_json =
+            serde_json::to_string_pretty(&actual).expect("serialize actual SessionReport");
+        let golden_json =
+            serde_json::to_string_pretty(&golden).expect("serialize golden SessionReport");
 
         if actual_json != golden_json {
             failures.push(format!(

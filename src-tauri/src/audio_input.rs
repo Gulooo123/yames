@@ -27,7 +27,13 @@ fn now_ts() -> String {
         .unwrap_or_default()
         .as_millis();
     let s = (ms / 1000) % 86400;
-    format!("{:02}:{:02}:{:02}.{:03}", s / 3600, (s % 3600) / 60, s % 60, ms % 1000)
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        s / 3600,
+        (s % 3600) / 60,
+        s % 60,
+        ms % 1000
+    )
 }
 
 /// Module-local dev-only logger. Expands to `println!` in debug builds
@@ -47,9 +53,24 @@ macro_rules! audio_dbg {
 
 /// Known audio interface brand patterns for smart default detection.
 const INTERFACE_PATTERNS: &[&str] = &[
-    "scarlett", "focusrite", "apollo", "motu", "audient", "presonus",
-    "behringer", "ssl", "rme", "uad", "universal audio", "steinberg",
-    "ur22", "ur44", "babyface", "clarett", "saffire", "tascam",
+    "scarlett",
+    "focusrite",
+    "apollo",
+    "motu",
+    "audient",
+    "presonus",
+    "behringer",
+    "ssl",
+    "rme",
+    "uad",
+    "universal audio",
+    "steinberg",
+    "ur22",
+    "ur44",
+    "babyface",
+    "clarett",
+    "saffire",
+    "tascam",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,7 +224,10 @@ impl AudioInput {
                         .ok()
                         .and_then(|cfgs| cfgs.map(|c| c.channels()).max())
                         .unwrap_or_else(|| {
-                            device.default_input_config().map(|c| c.channels()).unwrap_or(0)
+                            device
+                                .default_input_config()
+                                .map(|c| c.channels())
+                                .unwrap_or(0)
                         });
                     audio_dbg!("[audio_input] list_devices: {:?} — {} channels (max across supported configs), is_interface={}", name, channels, is_interface);
                     devices.push(AudioDevice {
@@ -221,7 +245,12 @@ impl AudioInput {
     /// Start capturing audio from the given device.
     /// Spawns a dedicated thread that owns the cpal stream.
     /// `input_channel` is 0-indexed; it is clamped to the device's valid range.
-    pub fn start(&mut self, device_name: Option<&str>, input_channel: usize, app_handle: AppHandle) -> Result<(), String> {
+    pub fn start(
+        &mut self,
+        device_name: Option<&str>,
+        input_channel: usize,
+        app_handle: AppHandle,
+    ) -> Result<(), String> {
         self.stop();
 
         // Resolve device and config on the current thread (for error reporting)
@@ -273,7 +302,14 @@ impl AudioInput {
         };
         let sr = config.sample_rate.0;
 
-        audio_dbg!("[audio_input] device config: {}Hz, {}ch, {:?} (input_channel={}→ch={})", sr, in_channels, sample_format, input_channel, ch);
+        audio_dbg!(
+            "[audio_input] device config: {}Hz, {}ch, {:?} (input_channel={}→ch={})",
+            sr,
+            in_channels,
+            sample_format,
+            input_channel,
+            ch
+        );
 
         // Update sample rate and resize ring buffer
         {
@@ -348,7 +384,9 @@ impl AudioInput {
             // Re-open the device on this thread (cpal streams must be created on the thread that runs them)
             let host = cpal::default_host();
             let device = if let Ok(devices) = host.input_devices() {
-                devices.into_iter().find(|d| d.name().ok().as_deref() == Some(&device_name_owned))
+                devices
+                    .into_iter()
+                    .find(|d| d.name().ok().as_deref() == Some(&device_name_owned))
             } else {
                 None
             };
@@ -381,12 +419,18 @@ impl AudioInput {
             }
             impl LevelAcc {
                 fn new() -> Self {
-                    Self { peak: 0.0, sum_abs: 0.0, frames: 0 }
+                    Self {
+                        peak: 0.0,
+                        sum_abs: 0.0,
+                        frames: 0,
+                    }
                 }
                 fn observe(&mut self, samples: &[f32]) {
                     for &s in samples {
                         let a = s.abs();
-                        if a > self.peak { self.peak = a; }
+                        if a > self.peak {
+                            self.peak = a;
+                        }
                         self.sum_abs += a;
                     }
                     self.frames += samples.len() as u32;
@@ -412,7 +456,11 @@ impl AudioInput {
             let my_stream_id = STREAM_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
             eprintln!(
                 "[{}] [stream-built] id={} device={:?} sr={}Hz ch={}",
-                now_ts(), my_stream_id, device_name_owned, sample_rate, selected_ch
+                now_ts(),
+                my_stream_id,
+                device_name_owned,
+                sample_rate,
+                selected_ch
             );
 
             let stream_result = match sample_format {
@@ -484,7 +532,8 @@ impl AudioInput {
                     },
                     |err| eprintln!("[audio_input] cpal stream error: {} — recovery path is print-only; subsequent silence in WAV / DSP may follow", err),
                     None,
-                )},
+                )
+                }
                 SampleFormat::I16 => {
                     let is_rec = is_recording_cb.clone();
                     let rec_buf = recording_buf_cb.clone();
@@ -542,7 +591,8 @@ impl AudioInput {
                     },
                     |err| eprintln!("[audio_input] cpal stream error: {} — recovery path is print-only; subsequent silence in WAV / DSP may follow", err),
                     None,
-                )},
+                )
+                }
                 _ => {
                     eprintln!("Unsupported sample format: {:?}", sample_format);
                     return;
@@ -584,7 +634,7 @@ impl AudioInput {
         // patch). Stash the resulting path for the JSON-pairing step.
         let recorder = self.session_recorder.lock().unwrap().take();
         if let Some(rec) = recorder {
-            let samples = rec.sample_count();
+            let _samples = rec.sample_count();
             match rec.finish() {
                 Ok(path) => {
                     audio_dbg!(
@@ -617,7 +667,11 @@ impl AudioInput {
 
     pub fn set_input_gain(&self, gain_linear: f32) {
         let clamped = gain_linear.clamp(0.0, 100.0); // 0 to +40dB ~ 100x
-        audio_dbg!("[audio_input] set_input_gain: {:.2}x ({:.1} dB)", clamped, 20.0 * clamped.log10());
+        audio_dbg!(
+            "[audio_input] set_input_gain: {:.2}x ({:.1} dB)",
+            clamped,
+            20.0 * clamped.log10()
+        );
         self.input_gain.store(clamped.to_bits(), Ordering::Relaxed);
     }
 
@@ -685,7 +739,8 @@ impl AudioInput {
         // by CoreAudio (content at half density), ZCR ≈ 0.010 for the same pitch.
         // Compare ch1 vs ch3 ZCR for the same guitar note to diagnose slow-mo cause.
         let zcr = if samples.len() > 1 {
-            let crossings = samples.windows(2)
+            let crossings = samples
+                .windows(2)
                 .filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0))
                 .count();
             crossings as f32 / samples.len() as f32
@@ -694,7 +749,13 @@ impl AudioInput {
         };
         eprintln!(
             "[{}] [recording] stopped, {} samples, {:.2}s @ {}Hz | rms={:.4} peak={:.4} zcr={:.4}",
-            now_ts(), samples.len(), duration, sr, rms, peak, zcr
+            now_ts(),
+            samples.len(),
+            duration,
+            sr,
+            rms,
+            peak,
+            zcr
         );
         *self.recorded_audio.lock().unwrap() = Some((samples, sr));
         duration
@@ -715,11 +776,10 @@ impl AudioInput {
         match &*guard {
             Some((samples, _)) if !samples.is_empty() => {
                 let chunk_size = (samples.len() / num_points).max(1);
-                samples.chunks(chunk_size)
+                samples
+                    .chunks(chunk_size)
                     .take(num_points)
-                    .map(|chunk| {
-                        chunk.iter().map(|s| s.abs()).fold(0.0_f32, f32::max)
-                    })
+                    .map(|chunk| chunk.iter().map(|s| s.abs()).fold(0.0_f32, f32::max))
                     .collect()
             }
             _ => vec![0.0; num_points],
@@ -728,7 +788,11 @@ impl AudioInput {
 
     // ─── Playback ──────────────────────────────────────────────────
 
-    pub fn start_playback(&mut self, app_handle: AppHandle, output_device_name: Option<&str>) -> Result<(), String> {
+    pub fn start_playback(
+        &mut self,
+        app_handle: AppHandle,
+        output_device_name: Option<&str>,
+    ) -> Result<(), String> {
         self.stop_playback();
 
         let (samples, rec_sr) = {
@@ -749,7 +813,9 @@ impl AudioInput {
             let device = if let Some(name) = &device_name_owned {
                 host.output_devices()
                     .ok()
-                    .and_then(|mut devs| devs.find(|d| d.name().ok().as_deref() == Some(name.as_str())))
+                    .and_then(|mut devs| {
+                        devs.find(|d| d.name().ok().as_deref() == Some(name.as_str()))
+                    })
                     .or_else(|| host.default_output_device())
             } else {
                 host.default_output_device()
@@ -792,7 +858,12 @@ impl AudioInput {
 
             // Resample if needed (linear interpolation)
             let playback_samples = if rec_sr != out_sr {
-                eprintln!("[{}] [playback] SR mismatch: recorded={}Hz output={}Hz → resampling", now_ts(), rec_sr, out_sr);
+                eprintln!(
+                    "[{}] [playback] SR mismatch: recorded={}Hz output={}Hz → resampling",
+                    now_ts(),
+                    rec_sr,
+                    out_sr
+                );
                 let ratio = rec_sr as f64 / out_sr as f64;
                 let out_len = (samples.len() as f64 / ratio).ceil() as usize;
                 let mut resampled = Vec::with_capacity(out_len);
@@ -854,7 +925,11 @@ impl AudioInput {
                 Ok(s) => s,
                 Err(e) => {
                     let dev_channels = default_config.channels() as usize;
-                    audio_dbg!("[playback] stereo stream failed ({}), retrying with {}ch", e, dev_channels);
+                    audio_dbg!(
+                        "[playback] stereo stream failed ({}), retrying with {}ch",
+                        e,
+                        dev_channels
+                    );
                     if dev_channels == out_channels {
                         eprintln!("Failed to build output stream for playback: {}", e);
                         let _ = app_handle.emit("playback-finished", ());
@@ -872,7 +947,9 @@ impl AudioInput {
                         &config2,
                         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                             if !alive_for_cb2.load(Ordering::Relaxed) {
-                                for s in data.iter_mut() { *s = 0.0; }
+                                for s in data.iter_mut() {
+                                    *s = 0.0;
+                                }
                                 return;
                             }
                             let pos = cursor_for_cb2.load(Ordering::Relaxed);
@@ -888,14 +965,20 @@ impl AudioInput {
                                     data[frame * dev_channels + ch] = sample;
                                 }
                             }
-                            cursor_for_cb2.store((pos + frames).min(samples_for_cb2.len()), Ordering::Relaxed);
+                            cursor_for_cb2.store(
+                                (pos + frames).min(samples_for_cb2.len()),
+                                Ordering::Relaxed,
+                            );
                         },
                         |err| eprintln!("Playback error: {}", err),
                         None,
                     ) {
                         Ok(s) => s,
                         Err(e2) => {
-                            eprintln!("Failed to build output stream for playback (both attempts): {}", e2);
+                            eprintln!(
+                                "Failed to build output stream for playback (both attempts): {}",
+                                e2
+                            );
                             let _ = app_handle.emit("playback-finished", ());
                             return;
                         }

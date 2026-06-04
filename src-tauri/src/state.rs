@@ -15,7 +15,7 @@ pub struct SpeedRamp {
     pub bars_per_step: u8,
     #[serde(rename = "beatsPerBar")]
     pub beats_per_bar: u8,
-    pub mode: String,       // "linear" | "zigzag" | "adaptive"
+    pub mode: String, // "linear" | "zigzag" | "adaptive"
     pub cyclic: bool,
     pub aggressiveness: String, // "conservative" | "moderate" | "aggressive"
     // Runtime state
@@ -24,7 +24,7 @@ pub struct SpeedRamp {
     pub current_step: u16,
     #[serde(rename = "currentBpm")]
     pub current_bpm: u16,
-    pub direction: String,  // "up" | "down"
+    pub direction: String, // "up" | "down"
     #[serde(rename = "barsInStep")]
     pub bars_in_step: u8,
     pub completed: bool,
@@ -74,6 +74,15 @@ pub struct AppState {
     pub accent_color: String,
     pub theme: String,
     pub volume: f32,
+    /// The user's intended volume (0.0–1.0), updated only by explicit
+    /// user actions (`set_volume`). The TTS dim mechanism temporarily
+    /// lowers `volume` for the audio engine but MUST NOT touch this field.
+    /// `persist_state` writes this field so a settings-change that fires
+    /// while TTS is dimming the click track doesn't bake the dimmed value
+    /// into the store. Skipped in serde so it stays Rust-internal and
+    /// doesn't surface in the JS `AppState` type.
+    #[serde(skip)]
+    pub volume_real: f32,
     #[serde(rename = "soundType")]
     pub sound_type: String,
     #[serde(rename = "timeSignature")]
@@ -104,6 +113,7 @@ impl Default for AppState {
             accent_color: "#e94560".to_string(),
             theme: "mono".to_string(),
             volume: 0.8,
+            volume_real: 0.8,
             sound_type: "click".to_string(),
             time_signature: 4,
             speed_ramp: SpeedRamp::default(),

@@ -33,22 +33,30 @@ fn persist_state(state: &SharedState, app_handle: &AppHandle) {
         store.set("mode", serde_json::json!(s.mode));
         store.set("corner", serde_json::json!(s.corner));
         store.set("alwaysOnTop", serde_json::json!(s.always_on_top));
-        store.set("widgetAlwaysOnTop", serde_json::json!(s.widget_always_on_top));
+        store.set(
+            "widgetAlwaysOnTop",
+            serde_json::json!(s.widget_always_on_top),
+        );
         store.set("accentColor", serde_json::json!(s.accent_color));
         store.set("theme", serde_json::json!(s.theme));
-        store.set("volume", serde_json::json!(s.volume));
+        // Write volume_real (not volume) so a concurrent TTS dim can't bake
+        // the temporarily-lowered value into the store. See state.rs.
+        store.set("volume", serde_json::json!(s.volume_real));
         store.set("soundType", serde_json::json!(s.sound_type));
         store.set("timeSignature", serde_json::json!(s.time_signature));
-        store.set("speedRamp", serde_json::json!({
-            "startBpm": s.speed_ramp.start_bpm,
-            "targetBpm": s.speed_ramp.target_bpm,
-            "increment": s.speed_ramp.increment,
-            "decrement": s.speed_ramp.decrement,
-            "barsPerStep": s.speed_ramp.bars_per_step,
-            "beatsPerBar": s.speed_ramp.beats_per_bar,
-            "mode": s.speed_ramp.mode,
-            "cyclic": s.speed_ramp.cyclic,
-        }));
+        store.set(
+            "speedRamp",
+            serde_json::json!({
+                "startBpm": s.speed_ramp.start_bpm,
+                "targetBpm": s.speed_ramp.target_bpm,
+                "increment": s.speed_ramp.increment,
+                "decrement": s.speed_ramp.decrement,
+                "barsPerStep": s.speed_ramp.bars_per_step,
+                "beatsPerBar": s.speed_ramp.beats_per_bar,
+                "mode": s.speed_ramp.mode,
+                "cyclic": s.speed_ramp.cyclic,
+            }),
+        );
         store.set("instrument", serde_json::json!(s.instrument.id()));
     }
 }
@@ -265,6 +273,7 @@ pub fn set_volume(
         let mut s = state.lock().unwrap();
         crate::tts::dim_user_set(&mut dim, clamped);
         s.volume = clamped;
+        s.volume_real = clamped; // always track real intent — dim must not touch this
     }
     emit_state_changed(&state, &app_handle);
     persist_state(&state, &app_handle);
@@ -388,7 +397,11 @@ pub fn start_speed_ramp_from(
         s.speed_ramp.active = true;
         s.speed_ramp.current_step = step;
         s.speed_ramp.current_bpm = bpm.clamp(20, 300);
-        s.speed_ramp.direction = if bpm >= s.speed_ramp.target_bpm { "down".to_string() } else { "up".to_string() };
+        s.speed_ramp.direction = if bpm >= s.speed_ramp.target_bpm {
+            "down".to_string()
+        } else {
+            "up".to_string()
+        };
         s.speed_ramp.bars_in_step = bar;
         s.speed_ramp.completed = false;
         s.speed_ramp.warmup_count = 0;
@@ -426,11 +439,8 @@ pub fn stop_speed_ramp(
 }
 
 #[tauri::command]
-pub fn set_adaptive_decision(
-    decision: String,
-    engine_state: State<EngineState>,
-) {
-    use crate::engine::{DECISION_UP, DECISION_HOLD, DECISION_DOWN};
+pub fn set_adaptive_decision(decision: String, engine_state: State<EngineState>) {
+    use crate::engine::{DECISION_DOWN, DECISION_HOLD, DECISION_UP};
     let val = match decision.as_str() {
         "up" => DECISION_UP,
         "hold" => DECISION_HOLD,
@@ -438,7 +448,9 @@ pub fn set_adaptive_decision(
         _ => return,
     };
     let engine = engine_state.0.lock().unwrap();
-    engine.adaptive_model_decision().store(val, std::sync::atomic::Ordering::Relaxed);
+    engine
+        .adaptive_model_decision()
+        .store(val, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -453,7 +465,10 @@ pub fn set_active_tab(tab: String, app_handle: AppHandle) {
 pub fn get_active_tab(app_handle: AppHandle) -> String {
     use tauri_plugin_store::StoreExt;
     if let Ok(store) = app_handle.store("settings.json") {
-        if let Some(v) = store.get("activeTab").and_then(|v| v.as_str().map(String::from)) {
+        if let Some(v) = store
+            .get("activeTab")
+            .and_then(|v| v.as_str().map(String::from))
+        {
             return v;
         }
     }
@@ -497,7 +512,11 @@ pub fn get_calibration_cache_entry(
     cal_cache: State<'_, crate::calibration_cache::SharedCalibrationCache>,
 ) -> Option<crate::calibration_cache::CalibrationEntry> {
     let key = device_name.unwrap_or_else(|| "default".to_string());
-    cal_cache.lock().unwrap().lookup(&instrument_id, &key).cloned()
+    cal_cache
+        .lock()
+        .unwrap()
+        .lookup(&instrument_id, &key)
+        .cloned()
 }
 
 /// Forget the cached calibration for one `(instrument, device)` pair
@@ -529,11 +548,19 @@ pub fn list_calibration_cache(
 #[tauri::command]
 pub fn open_url(url: String) {
     #[cfg(target_os = "macos")]
-    { let _ = std::process::Command::new("open").arg(&url).spawn(); }
+    {
+        let _ = std::process::Command::new("open").arg(&url).spawn();
+    }
     #[cfg(target_os = "windows")]
-    { let _ = std::process::Command::new("cmd").args(["/C", "start", &url]).spawn(); }
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", &url])
+            .spawn();
+    }
     #[cfg(target_os = "linux")]
-    { let _ = std::process::Command::new("xdg-open").arg(&url).spawn(); }
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -563,7 +590,10 @@ pub fn connect_midi_device(
 }
 
 #[tauri::command]
-pub fn disconnect_midi_device(midi: State<SharedMidi>, app_handle: AppHandle) -> Result<(), String> {
+pub fn disconnect_midi_device(
+    midi: State<SharedMidi>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
     let listener = midi.lock().unwrap();
     listener.disconnect();
     use tauri_plugin_store::StoreExt;
@@ -647,15 +677,23 @@ pub fn list_presets(app_handle: AppHandle) -> Vec<serde_json::Value> {
 #[tauri::command]
 pub fn save_preset(preset: serde_json::Value, app_handle: AppHandle) -> Result<(), String> {
     use tauri_plugin_store::StoreExt;
-    let store = app_handle.store("settings.json").map_err(|e| e.to_string())?;
-    let id = preset.get("id").and_then(|v| v.as_str()).ok_or("preset must have an id")?;
+    let store = app_handle
+        .store("settings.json")
+        .map_err(|e| e.to_string())?;
+    let id = preset
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("preset must have an id")?;
     let mut presets: Vec<serde_json::Value> = store
         .get("presets")
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
 
     // Update existing or append new
-    if let Some(pos) = presets.iter().position(|p| p.get("id").and_then(|v| v.as_str()) == Some(id)) {
+    if let Some(pos) = presets
+        .iter()
+        .position(|p| p.get("id").and_then(|v| v.as_str()) == Some(id))
+    {
         presets[pos] = preset;
     } else {
         presets.push(preset);
@@ -668,7 +706,9 @@ pub fn save_preset(preset: serde_json::Value, app_handle: AppHandle) -> Result<(
 #[tauri::command]
 pub fn delete_preset(id: String, app_handle: AppHandle) -> Result<(), String> {
     use tauri_plugin_store::StoreExt;
-    let store = app_handle.store("settings.json").map_err(|e| e.to_string())?;
+    let store = app_handle
+        .store("settings.json")
+        .map_err(|e| e.to_string())?;
     let mut presets: Vec<serde_json::Value> = store
         .get("presets")
         .and_then(|v| v.as_array().cloned())
@@ -682,7 +722,9 @@ pub fn delete_preset(id: String, app_handle: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn reorder_presets(ids: Vec<String>, app_handle: AppHandle) -> Result<(), String> {
     use tauri_plugin_store::StoreExt;
-    let store = app_handle.store("settings.json").map_err(|e| e.to_string())?;
+    let store = app_handle
+        .store("settings.json")
+        .map_err(|e| e.to_string())?;
     let presets: Vec<serde_json::Value> = store
         .get("presets")
         .and_then(|v| v.as_array().cloned())
@@ -690,7 +732,10 @@ pub fn reorder_presets(ids: Vec<String>, app_handle: AppHandle) -> Result<(), St
 
     let mut reordered: Vec<serde_json::Value> = Vec::with_capacity(ids.len());
     for id in &ids {
-        if let Some(p) = presets.iter().find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id)) {
+        if let Some(p) = presets
+            .iter()
+            .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id))
+        {
             reordered.push(p.clone());
         }
     }
@@ -704,9 +749,9 @@ pub fn reorder_presets(ids: Vec<String>, app_handle: AppHandle) -> Result<(), St
 
 #[tauri::command]
 pub async fn list_audio_input_devices() -> Vec<AudioDevice> {
-    tauri::async_runtime::spawn_blocking(|| {
-        crate::audio_input::AudioInput::list_devices()
-    }).await.unwrap_or_default()
+    tauri::async_runtime::spawn_blocking(|| crate::audio_input::AudioInput::list_devices())
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -738,7 +783,18 @@ pub async fn start_evaluation(
     timing_analyzer.lock().unwrap().stop();
 
     let mut ai = audio_input.lock().unwrap();
-    ai.start(device_name.as_deref(), input_channel.unwrap_or(0), app_handle.clone())?;
+    ai.start(
+        device_name.as_deref(),
+        input_channel.unwrap_or(0),
+        app_handle.clone(),
+    )?;
+
+    // Snapshot subdivision from SharedState before locking the accumulator
+    // (separate lock scopes to avoid any potential deadlock ordering issues).
+    let current_subdivision = {
+        let s = state.lock().unwrap();
+        s.subdivision
+    };
 
     // Clear previous session data + stamp the session start so the D1
     // diagnostic log (saved at stop) has a stable epoch.
@@ -746,6 +802,7 @@ pub async fn start_evaluation(
         let mut acc = session_acc.lock().unwrap();
         acc.clear();
         acc.coach_mode = coach_mode;
+        acc.set_subdivision(current_subdivision);
         let (secs, ms) = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| (d.as_secs(), d.as_millis() as u64))
@@ -831,9 +888,12 @@ pub async fn start_evaluation(
                     }
                     let total = hits.len() as u32;
                     let hit_count = hits.iter().filter(|&&h| h).count() as u32;
-                    let score = if total > 0 { (hit_count * 100) / total } else { 0 };
-                    adaptive_score_for_timing
-                        .store(score, std::sync::atomic::Ordering::Relaxed);
+                    let score = if total > 0 {
+                        (hit_count * 100) / total
+                    } else {
+                        0
+                    };
+                    adaptive_score_for_timing.store(score, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         },
@@ -858,8 +918,7 @@ pub async fn start_evaluation(
                     // scoring against (essential for debugging "why did
                     // this score this way?" from session_*.json).
                     inferred_divisor: segment_end.inferred_divisor,
-                    inferred_divisor_confidence:
-                        segment_end.inferred_divisor_confidence,
+                    inferred_divisor_confidence: segment_end.inferred_divisor_confidence,
                     // D4c — forward raw IC errors for post-hoc debugging.
                     interval_errors: segment_end.interval_errors.clone(),
                 });
@@ -971,13 +1030,35 @@ pub async fn stop_evaluation(
     }
     // Stop in reverse-start order: onset_detector → timing_analyzer → audio_input
     // This matches start_evaluation's lock acquisition order to prevent deadlocks
-    onset_detector.lock().map_err(|e| format!("Lock failed: {e}"))?.stop();
-    // Drain raw telemetry from the timing analyzer BEFORE stop() —
-    // actually, drain AFTER stop() so the analyzer thread has fully
-    // joined and there's no concurrent push racing the take.
-    // `TimingAnalyzer::drain_telemetry()` requires the analyzer to be
-    // stopped for that race-free guarantee; `start()` resets the
-    // buffer for the next session.
+    onset_detector
+        .lock()
+        .map_err(|e| format!("Lock failed: {e}"))?
+        .stop();
+    // Finalize the session WAV BEFORE stopping the timing analyzer.
+    // audio_input.stop() is idempotent (capture_thread.take() / recorder.take()
+    // are no-ops on a second call), so this is safe to call here even if the
+    // timing_analyzer block below also tried to call it. Doing it early means
+    // the WAV is always saved even when timing_analyzer.stop() fails (e.g. due
+    // to a poisoned inner mutex from a timing-thread panic).
+    //
+    // Drain audio levels first — the comment "BEFORE stop()" still holds since
+    // we call take_audio_levels() immediately before stop() in the same block.
+    let captured_audio_levels = {
+        let ai = audio_input
+            .lock()
+            .map_err(|e| format!("Lock failed: {e}"))?;
+        ai.take_audio_levels()
+    };
+    audio_input
+        .lock()
+        .map_err(|e| format!("Lock failed: {e}"))?
+        .stop();
+
+    // Drain raw telemetry from the timing analyzer AFTER stop() so the
+    // analyzer thread has fully joined and there's no concurrent push
+    // racing the take. `TimingAnalyzer::drain_telemetry()` requires the
+    // analyzer to be stopped for that race-free guarantee; `start()`
+    // resets the buffer for the next session.
     let mut telemetry = {
         let mut ta = timing_analyzer
             .lock()
@@ -985,20 +1066,53 @@ pub async fn stop_evaluation(
         ta.stop();
         ta.drain_telemetry()
     };
-    // Drain per-second input-level snapshots BEFORE stop() so we get
-    // the live atomic view; stop() then drops the cpal stream.
-    {
-        let ai = audio_input.lock().map_err(|e| format!("Lock failed: {e}"))?;
-        telemetry.audio_levels = ai.take_audio_levels();
+    telemetry.audio_levels = captured_audio_levels;
+
+    // POSTMATCH_1: Post-session best-candidate matching. Run on the raw
+    // telemetry before it's consumed by persist_session_log. Results are
+    // stored in session_acc so get_final_session_report can use them via
+    // report_final() without needing the (now-consumed) telemetry.
+    if !telemetry.detected_onsets.is_empty() && !telemetry.expected_beats.is_empty() {
+        let new_matches = crate::session_log::recompute_matches(
+            &telemetry.detected_onsets,
+            &telemetry.expected_beats,
+        );
+        let new_feedbacks =
+            crate::session_log::matches_to_feedbacks(&new_matches, &telemetry.detected_onsets);
+
+        // Compute accent (downbeat) hit counts for Default-mode accuracy display.
+        // Build a set of expected-beat indices that are accent beats, then count
+        // how many were matched (hit) vs. total non-idle accent beats.
+        // NoActivity reason is excluded (player was in warmup/idle for that beat).
+        let accent_beat_indices: std::collections::HashSet<u32> = telemetry.expected_beats
+            .iter()
+            .filter(|b| b.is_accent)
+            .map(|b| b.index)
+            .collect();
+        let mut accent_hits = 0u32;
+        let mut accent_beats = 0u32;
+        for m in &new_matches {
+            if accent_beat_indices.contains(&m.beat_index)
+                && m.reason != crate::session_log::MatchReason::NoActivity
+            {
+                accent_beats += 1;
+                if m.classification != crate::session_log::Classification::Miss {
+                    accent_hits += 1;
+                }
+            }
+        }
+
+        if let Ok(mut acc) = session_acc.lock() {
+            acc.set_recomputed_feedbacks(new_feedbacks);
+            acc.set_accent_counts(accent_hits, accent_beats);
+        }
     }
-    audio_input.lock().map_err(|e| format!("Lock failed: {e}"))?.stop();
 
     // D1 — persist a diagnostic session log. Best-effort: failures here
     // must never fail the stop path (the user already finished playing,
     // we just lose retroactive debugging data). The log layer auto-prunes
     // to MAX_SESSION_LOGS so disk growth is bounded.
-    if let Err(e) =
-        persist_session_log(&session_acc, &state, &app_handle, &audio_input, telemetry)
+    if let Err(e) = persist_session_log(&session_acc, &state, &app_handle, &audio_input, telemetry)
     {
         eprintln!("[D1] failed to persist session log: {e}");
     }
@@ -1071,7 +1185,9 @@ fn persist_session_log(
     }
 
     let (bpm, time_signature, subdivision, instrument) = {
-        let s = state.lock().map_err(|e| format!("state lock failed: {e}"))?;
+        let s = state
+            .lock()
+            .map_err(|e| format!("state lock failed: {e}"))?;
         (s.bpm, s.time_signature, s.subdivision, s.instrument.clone())
     };
 
@@ -1137,9 +1253,7 @@ pub fn get_evaluation_state(audio_input: State<SharedAudioInput>) -> bool {
 /// event fires — the coach speaks the boundary via the forced
 /// `boundary_signal_a` gatekeeper event in the JS layer.
 #[tauri::command]
-pub fn notify_settings_change(
-    timing_analyzer: State<SharedTimingAnalyzer>,
-) -> Result<(), String> {
+pub fn notify_settings_change(timing_analyzer: State<SharedTimingAnalyzer>) -> Result<(), String> {
     let ta = timing_analyzer
         .lock()
         .map_err(|e| format!("Lock failed: {e}"))?;
@@ -1147,9 +1261,28 @@ pub fn notify_settings_change(
     Ok(())
 }
 
+/// Force-close the open practice segment so that `get_session_report`
+/// returns the IC/GA formula score instead of the legacy fallback.
+/// Called by the JS falling-edge handler before fetching the mini-report.
+/// Emits `practice-segment-ended` with `UserStopped` and calls
+/// `push_segment()` via the `on_segment_end` callback.
+/// Safe to call when no session is active (no-op).
 #[tauri::command]
-pub async fn get_session_report(session_acc: State<'_, SharedSessionAccumulator>) -> Result<Option<SessionReport>, String> {
-    let acc = session_acc.lock().map_err(|e| format!("Lock failed: {e}"))?;
+pub fn close_open_segment(timing_analyzer: State<SharedTimingAnalyzer>) -> Result<(), String> {
+    let ta = timing_analyzer
+        .lock()
+        .map_err(|e| format!("Lock failed: {e}"))?;
+    ta.close_open_segment();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_session_report(
+    session_acc: State<'_, SharedSessionAccumulator>,
+) -> Result<Option<SessionReport>, String> {
+    let acc = session_acc
+        .lock()
+        .map_err(|e| format!("Lock failed: {e}"))?;
     if acc.is_empty() {
         Ok(None)
     } else {
@@ -1166,8 +1299,12 @@ pub async fn get_session_report(session_acc: State<'_, SharedSessionAccumulator>
 /// per-exercise. Merging the two would make exercise-N mini-reports show a
 /// cumulative score instead of exercise-N's individual score.
 #[tauri::command]
-pub async fn get_final_session_report(session_acc: State<'_, SharedSessionAccumulator>) -> Result<Option<SessionReport>, String> {
-    let acc = session_acc.lock().map_err(|e| format!("Lock failed: {e}"))?;
+pub async fn get_final_session_report(
+    session_acc: State<'_, SharedSessionAccumulator>,
+) -> Result<Option<SessionReport>, String> {
+    let acc = session_acc
+        .lock()
+        .map_err(|e| format!("Lock failed: {e}"))?;
     // Use all_segments; report_final() returns None-equivalent (legacy
     // formula) when all_segments is empty, but surface that as Ok(None)
     // here to keep the JS side consistent with get_session_report.
@@ -1195,9 +1332,14 @@ pub async fn clear_session(session_acc: State<'_, SharedSessionAccumulator>) -> 
 }
 
 #[tauri::command]
-pub fn save_session(session: crate::session::SavedSession, app_handle: AppHandle) -> Result<(), String> {
+pub fn save_session(
+    session: crate::session::SavedSession,
+    app_handle: AppHandle,
+) -> Result<(), String> {
     use tauri_plugin_store::StoreExt;
-    let store = app_handle.store("settings.json").map_err(|e| e.to_string())?;
+    let store = app_handle
+        .store("settings.json")
+        .map_err(|e| e.to_string())?;
     let mut history: Vec<crate::session::SavedSession> = store
         .get("evalSessionHistory")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -1206,7 +1348,10 @@ pub fn save_session(session: crate::session::SavedSession, app_handle: AppHandle
     history.insert(0, session);
     // Cap at max
     history.truncate(crate::session::MAX_SESSION_HISTORY);
-    store.set("evalSessionHistory", serde_json::to_value(&history).unwrap());
+    store.set(
+        "evalSessionHistory",
+        serde_json::to_value(&history).unwrap(),
+    );
     Ok(())
 }
 
@@ -1227,20 +1372,27 @@ pub fn get_session_history(app_handle: AppHandle) -> Vec<crate::session::SavedSe
 #[tauri::command]
 pub fn delete_session(id: String, app_handle: AppHandle) -> Result<(), String> {
     use tauri_plugin_store::StoreExt;
-    let store = app_handle.store("settings.json").map_err(|e| e.to_string())?;
+    let store = app_handle
+        .store("settings.json")
+        .map_err(|e| e.to_string())?;
     let mut history: Vec<crate::session::SavedSession> = store
         .get("evalSessionHistory")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
     history.retain(|s| s.id != id);
-    store.set("evalSessionHistory", serde_json::to_value(&history).unwrap());
+    store.set(
+        "evalSessionHistory",
+        serde_json::to_value(&history).unwrap(),
+    );
     Ok(())
 }
 
 #[tauri::command]
 pub fn clear_all_sessions(app_handle: AppHandle) -> Result<(), String> {
     use tauri_plugin_store::StoreExt;
-    let store = app_handle.store("settings.json").map_err(|e| e.to_string())?;
+    let store = app_handle
+        .store("settings.json")
+        .map_err(|e| e.to_string())?;
     let empty: Vec<crate::session::SavedSession> = Vec::new();
     store.set("evalSessionHistory", serde_json::to_value(&empty).unwrap());
     Ok(())
@@ -1419,10 +1571,7 @@ pub fn get_models_path(app_handle: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn delete_models(
-    app_handle: AppHandle,
-    dl_state: State<DownloadState>,
-) -> Result<(), String> {
+pub fn delete_models(app_handle: AppHandle, dl_state: State<DownloadState>) -> Result<(), String> {
     // Signal any in-flight download to abort BEFORE wiping the models
     // directory. Otherwise the download thread continues, sees its
     // partial-file destination vanish, and emits a confusing failure
@@ -1646,7 +1795,9 @@ pub fn tts_set_volume(tts: State<'_, SharedTts>, volume: f32) {
 
 #[tauri::command]
 pub fn tts_list_voices(tts: State<'_, SharedTts>) -> Vec<(String, String)> {
-    tts.lock().map(|e| e.list_available_voices()).unwrap_or_default()
+    tts.lock()
+        .map(|e| e.list_available_voices())
+        .unwrap_or_default()
 }
 
 /// Per-voice readiness for the Settings UI — the JS layer renders the
@@ -1654,7 +1805,9 @@ pub fn tts_list_voices(tts: State<'_, SharedTts>) -> Vec<(String, String)> {
 /// so the user can repair a single voice without nuking the brain.
 #[tauri::command]
 pub fn tts_voice_diagnostics(tts: State<'_, SharedTts>) -> Vec<crate::tts::VoiceDiagnostic> {
-    tts.lock().map(|e| e.list_voice_diagnostics()).unwrap_or_default()
+    tts.lock()
+        .map(|e| e.list_voice_diagnostics())
+        .unwrap_or_default()
 }
 
 /// Repair-download a single voice. Re-installs the Piper engine if

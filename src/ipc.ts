@@ -421,6 +421,19 @@ export async function notifySettingsChange(): Promise<void> {
   return invoke("notify_settings_change");
 }
 
+/**
+ * Force-close the open practice segment so `getSessionReport()` returns
+ * the IC/GA formula score instead of the legacy fallback. The analyzer
+ * loop picks this up within 5ms, emits `practice-segment-ended` with
+ * `UserStopped`, and calls `push_segment()`.
+ *
+ * Call this in the falling-edge handler BEFORE `getSessionReport()`.
+ * Safe when no session is active (no-op).
+ */
+export async function closeOpenSegment(): Promise<void> {
+  return invoke("close_open_segment");
+}
+
 export function onAudioSpectrum(callback: (spectrum: AudioSpectrum) => void) {
   return listen<AudioSpectrum>("audio-spectrum", (e) => callback(e.payload));
 }

@@ -215,6 +215,16 @@ export type SessionReport = {
   /** Population std dev of all matched onset amplitudes averaged across segments.
    *  Absent when no segment had enough matched onsets. */
   ampStdDev?: number;
+  /** Count of accent (downbeat) beats that were matched within the active
+   *  window. 0 for live mini-reports and old saved sessions.
+   *  Use with `accentBeatsCount` to compute Default-mode accuracy. */
+  accentHitsCount?: number;
+  /** Total accent positions in the active segment window. 0 for live
+   *  mini-reports and old saved sessions. */
+  accentBeatsCount?: number;
+  /** Subdivision count active during this session (1 = quarter, 2 = eighth,
+   *  4 = sixteenth). Defaults to 1 for backward compat. */
+  subdivision?: number;
 };
 
 export type SavedSession = {

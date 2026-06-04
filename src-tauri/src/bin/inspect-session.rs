@@ -17,7 +17,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use yames_lib::session_log::{Classification, SegmentEndReason, load_log};
+use yames_lib::session_log::{load_log, Classification, SegmentEndReason};
 use yames_lib::timing::{tempo_aware_window_ms, REFRACTORY_SUBDIVISION_FACTOR};
 
 // ---------------------------------------------------------------------------
@@ -49,20 +49,20 @@ fn subdivision_name(s: u8) -> &'static str {
 fn class_char(c: Classification) -> char {
     match c {
         Classification::Perfect => '*',
-        Classification::Good    => '+',
-        Classification::Ok      => 'o',
-        Classification::Miss    => '·',
+        Classification::Good => '+',
+        Classification::Ok => 'o',
+        Classification::Miss => '·',
         Classification::Skipped => 'S',
     }
 }
 
 fn end_reason_label(r: &SegmentEndReason) -> &'static str {
     match r {
-        SegmentEndReason::SettingsChange    => "settings-change",
-        SegmentEndReason::ActivityGap       => "activity-gap",
+        SegmentEndReason::SettingsChange => "settings-change",
+        SegmentEndReason::ActivityGap => "activity-gap",
         SegmentEndReason::GridDiscontinuity => "grid-discontinuity",
-        SegmentEndReason::SessionEnd        => "session-end",
-        SegmentEndReason::UserStopped       => "user-stopped",
+        SegmentEndReason::SessionEnd => "session-end",
+        SegmentEndReason::UserStopped => "user-stopped",
     }
 }
 
@@ -73,9 +73,7 @@ fn end_reason_label(r: &SegmentEndReason) -> &'static str {
 /// Find clusters of ≥ `SPURIOUS_CLUSTER_MIN` spurious onsets that all fall
 /// within a single `SPURIOUS_CLUSTER_WINDOW_MS` sliding window.
 /// Returns `(start_ms, end_ms, count)` for each cluster found.
-fn find_spurious_clusters(
-    log: &yames_lib::session_log::SessionLog,
-) -> Vec<(u64, u64, usize)> {
+fn find_spurious_clusters(log: &yames_lib::session_log::SessionLog) -> Vec<(u64, u64, usize)> {
     let mut ts: Vec<u64> = log
         .spurious_onsets
         .iter()
@@ -187,15 +185,26 @@ fn run(path: &Path) -> Result<(), String> {
     // the two sources disagree so the discrepancy is visible.
     let (beats_total, beats_hits, beats_miss, beats_skip) = if !log.matches.is_empty() {
         let total = log.matches.len() as u32;
-        let hits = log.matches.iter().filter(|m| !matches!(
-            m.classification, Classification::Miss | Classification::Skipped
-        )).count() as u32;
-        let miss = log.matches.iter().filter(|m| {
-            m.classification == Classification::Miss
-        }).count() as u32;
-        let skip = log.matches.iter().filter(|m| {
-            m.classification == Classification::Skipped
-        }).count() as u32;
+        let hits = log
+            .matches
+            .iter()
+            .filter(|m| {
+                !matches!(
+                    m.classification,
+                    Classification::Miss | Classification::Skipped
+                )
+            })
+            .count() as u32;
+        let miss = log
+            .matches
+            .iter()
+            .filter(|m| m.classification == Classification::Miss)
+            .count() as u32;
+        let skip = log
+            .matches
+            .iter()
+            .filter(|m| m.classification == Classification::Skipped)
+            .count() as u32;
         (total, hits, miss, skip)
     } else {
         (
@@ -206,13 +215,8 @@ fn run(path: &Path) -> Result<(), String> {
         )
     };
     // Flag when the report disagrees so the stale-window issue is visible.
-    let beats_note = if !log.matches.is_empty()
-        && log.report.total_beats != beats_total
-    {
-        format!(
-            " [report says {}; match log used]",
-            log.report.total_beats
-        )
+    let beats_note = if !log.matches.is_empty() && log.report.total_beats != beats_total {
+        format!(" [report says {}; match log used]", log.report.total_beats)
     } else {
         String::new()
     };
@@ -227,18 +231,31 @@ fn run(path: &Path) -> Result<(), String> {
         .unwrap_or_else(|| "n/a".to_string());
     println!(
         "Score: {} ({}) | Grid corr: {:.2} | Onset eff: {}",
-        log.report.score,
-        log.report.grade,
-        log.report.grid_correlation,
-        oe_str,
+        log.report.score, log.report.grade, log.report.grid_correlation, oe_str,
     );
     let (perf_n, good_n, ok_n) = if !log.matches.is_empty() {
-        let p = log.matches.iter().filter(|m| m.classification == Classification::Perfect).count();
-        let g = log.matches.iter().filter(|m| m.classification == Classification::Good).count();
-        let o = log.matches.iter().filter(|m| m.classification == Classification::Ok).count();
+        let p = log
+            .matches
+            .iter()
+            .filter(|m| m.classification == Classification::Perfect)
+            .count();
+        let g = log
+            .matches
+            .iter()
+            .filter(|m| m.classification == Classification::Good)
+            .count();
+        let o = log
+            .matches
+            .iter()
+            .filter(|m| m.classification == Classification::Ok)
+            .count();
         (p as u32, g as u32, o as u32)
     } else {
-        (log.report.perfect_count, log.report.good_count, log.report.ok_count)
+        (
+            log.report.perfect_count,
+            log.report.good_count,
+            log.report.ok_count,
+        )
     };
     println!(
         "Perf: {}  Good: {}  Ok: {}  Miss: {}  Skip: {}",
@@ -253,9 +270,7 @@ fn run(path: &Path) -> Result<(), String> {
     };
     println!(
         "Timing: mean dev {}  | std dev {:.1}ms | streak: {}",
-        tendency,
-        log.report.std_deviation_ms,
-        log.report.longest_streak,
+        tendency, log.report.std_deviation_ms, log.report.longest_streak,
     );
     println!();
 
@@ -267,10 +282,7 @@ fn run(path: &Path) -> Result<(), String> {
     );
     println!(
         "  Window: ±{:.0}ms | Refractory: {:.0}ms (floor={}ms × {:.2})",
-        window_ms,
-        refractory_ms,
-        profile.refractory_floor_ms,
-        REFRACTORY_SUBDIVISION_FACTOR,
+        window_ms, refractory_ms, profile.refractory_floor_ms, REFRACTORY_SUBDIVISION_FACTOR,
     );
 
     let low_conf_indices: Vec<usize> = log
@@ -295,9 +307,7 @@ fn run(path: &Path) -> Result<(), String> {
     if log.matches.is_empty() || log.expected_beats.is_empty() {
         println!("Beat timeline: (no per-beat data recorded)");
     } else {
-        println!(
-            "Beat timeline  (* perfect  + good  o ok  · miss  S skip  ! spurious-miss):"
-        );
+        println!("Beat timeline  (* perfect  + good  o ok  · miss  S skip  ! spurious-miss):");
 
         // Build tick-index → classification lookup.
         let mut class_map: std::collections::HashMap<u32, Classification> =

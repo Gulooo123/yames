@@ -153,9 +153,7 @@ impl MidiListener {
                         for binding in binds.iter() {
                             if binding.msg_type == msg_type
                                 && binding.number == number
-                                && binding
-                                    .channel
-                                    .map_or(true, |ch| ch == channel)
+                                && binding.channel.map_or(true, |ch| ch == channel)
                             {
                                 // For CC, only trigger on value > 63 (button press)
                                 // For NoteOn, only trigger on velocity > 0
@@ -217,7 +215,11 @@ impl MidiListener {
         // Remove existing binding for same action
         bindings.retain(|b| b.action != binding.action);
         // Remove any other binding using the same MIDI signal (prevent conflicts)
-        bindings.retain(|b| !(b.msg_type == binding.msg_type && b.number == binding.number && b.channel == binding.channel));
+        bindings.retain(|b| {
+            !(b.msg_type == binding.msg_type
+                && b.number == binding.number
+                && b.channel == binding.channel)
+        });
         bindings.push(binding);
     }
 
@@ -318,15 +320,9 @@ fn parse_midi(bytes: &[u8]) -> Option<(u8, MidiMsgType, u8, u8)> {
     let status = bytes[0];
     let channel = status & 0x0F;
     match status & 0xF0 {
-        0x90 if bytes.len() >= 3 => {
-            Some((channel, MidiMsgType::NoteOn, bytes[1], bytes[2]))
-        }
-        0xB0 if bytes.len() >= 3 => {
-            Some((channel, MidiMsgType::ControlChange, bytes[1], bytes[2]))
-        }
-        0xC0 if bytes.len() >= 2 => {
-            Some((channel, MidiMsgType::ProgramChange, bytes[1], 127))
-        }
+        0x90 if bytes.len() >= 3 => Some((channel, MidiMsgType::NoteOn, bytes[1], bytes[2])),
+        0xB0 if bytes.len() >= 3 => Some((channel, MidiMsgType::ControlChange, bytes[1], bytes[2])),
+        0xC0 if bytes.len() >= 2 => Some((channel, MidiMsgType::ProgramChange, bytes[1], 127)),
         _ => None,
     }
 }
