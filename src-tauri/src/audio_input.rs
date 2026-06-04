@@ -634,7 +634,7 @@ impl AudioInput {
         // patch). Stash the resulting path for the JSON-pairing step.
         let recorder = self.session_recorder.lock().unwrap().take();
         if let Some(rec) = recorder {
-            let _samples = rec.sample_count();
+            let samples = rec.sample_count();
             match rec.finish() {
                 Ok(path) => {
                     audio_dbg!(

@@ -108,7 +108,7 @@ impl Instrument {
                 max_onsets_per_beat: 3,
                 expected_onsets_per_beat: 0.5..=2.0,
                 spectral_weights: spectral_weights_mid(),
-                activity_silence_beats: 4,
+                activity_silence_beats: 2,
                 // Guitar-tuned weights: IC leads (timing regularity is the
                 // primary practice signal), GA second (beat placement).
                 // HC = 0.0: hit_completeness penalises intentional sparse
@@ -139,7 +139,7 @@ impl Instrument {
                 max_onsets_per_beat: 4,
                 expected_onsets_per_beat: 0.5..=2.0,
                 spectral_weights: spectral_weights_mid_high(),
-                activity_silence_beats: 4,
+                activity_silence_beats: 2,
                 // Same guitar-tuned weights as electric (see above).
                 score_weights: ScoreWeights {
                     ic: 0.60,
@@ -163,7 +163,7 @@ impl Instrument {
                 max_onsets_per_beat: 2,
                 expected_onsets_per_beat: 0.5..=1.5,
                 spectral_weights: spectral_weights_low(),
-                activity_silence_beats: 4,
+                activity_silence_beats: 2,
                 // Bass is the rhythmic anchor — ga bump, oe removed
                 // (bass lines are intentionally sparse; efficiency measure
                 // unfairly penalises fills and ghost notes).
@@ -217,7 +217,7 @@ impl Instrument {
                 max_onsets_per_beat: 4,
                 expected_onsets_per_beat: 0.5..=2.0,
                 spectral_weights: spectral_weights_moderate_broadband(),
-                activity_silence_beats: 5,
+                activity_silence_beats: 2,
                 // Unknown instrument — use the default distribution,
                 // but oe=0.0 per DEFAULT_EVAL; freed weight goes to ga.
                 score_weights: ScoreWeights {

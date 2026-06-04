@@ -4,6 +4,7 @@ import type { SavedSession } from "../../types";
 import { formatDate } from "./coachCardHelpers";
 import { accuracyPct, scoredBeats } from "../../coach/reportStats";
 import { SessionNarrativeView } from "../../coach/SessionNarrativeView";
+import { SegmentTimeline } from "./CoachFeedMessage";
 
 /**
  * Detail view for a single saved session — shown when the user picks a
@@ -71,13 +72,23 @@ export function CoachSessionDetail({
         </div>
       )}
 
+      {session.segments && session.segments.length > 0 && (
+        <div className="coach-detail-section">
+          <div className="coach-detail-section-title">Exercises</div>
+          <SegmentTimeline
+            segments={session.segments}
+            sessionStart={session.segments[0].startTime ?? session.timestamp}
+          />
+        </div>
+      )}
+
       <div className="coach-detail-section">
         <div className="coach-detail-section-title">Breakdown</div>
         <div className="coach-detail-bars">
-          <BreakdownBar label="Perfect" count={report.perfectCount} total={scored} color={FEEDBACK_COLORS.perfect} />
-          <BreakdownBar label="Good" count={report.goodCount} total={scored} color={FEEDBACK_COLORS.good} />
-          <BreakdownBar label="OK" count={report.okCount} total={scored} color={FEEDBACK_COLORS.ok} />
-          <BreakdownBar label="Miss" count={report.missCount} total={scored} color={FEEDBACK_COLORS.miss} />
+          <BreakdownBar label="Perfect"  count={report.perfectCount} total={scored} color={FEEDBACK_COLORS.perfect} />
+          <BreakdownBar label="Good"     count={report.goodCount}    total={scored} color={FEEDBACK_COLORS.good} />
+          <BreakdownBar label="OK"       count={report.okCount}      total={scored} color={FEEDBACK_COLORS.ok} />
+          <BreakdownBar label="Off-beat" count={report.missCount}    total={scored} color={FEEDBACK_COLORS.miss} />
         </div>
       </div>
 
@@ -125,7 +136,7 @@ export function CoachSessionDetail({
           </div>
           {report.skippedBeats > 0 && (
             <div className="coach-detail-stat">
-              <span className="coach-detail-stat-label">Skipped</span>
+              <span className="coach-detail-stat-label">Not played</span>
               <span className="coach-detail-stat-value">{report.skippedBeats}</span>
             </div>
           )}

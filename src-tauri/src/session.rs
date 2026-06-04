@@ -771,6 +771,12 @@ pub struct SavedSession {
         skip_serializing_if = "Option::is_none"
     )]
     pub preset_name: Option<String>,
+    /// Per-segment exercise data, serialised as raw JSON so the Rust layer
+    /// doesn't need to mirror the full `SessionSegment` TypeScript shape.
+    /// `None` for old sessions that pre-date this field — deserialized via
+    /// `serde(default)` so existing stored data loads cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segments: Option<serde_json::Value>,
 }
 
 pub const MAX_SESSION_HISTORY: usize = 30;

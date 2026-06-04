@@ -1,4 +1,6 @@
-import { ScoreRing, ScoreBadge } from "../drill/evaluation";
+import { ScoreRing, ScoreBadge, BreakdownBar, Histogram } from "../drill/evaluation";
+import { FEEDBACK_COLORS } from "../../hooks/useEvaluation";
+import { SessionNarrativeView } from "../../coach/SessionNarrativeView";
 import type { FeedAffordance, FeedChip, FeedMessage, SessionReport, SessionSegment } from "../../types";
 import { formatTime, formatDuration } from "./coachCardHelpers";
 import { accuracyPct, scoredBeats } from "../../coach/reportStats";
@@ -226,7 +228,6 @@ export function FeedMessageItem({
     case "session-end":
       return (
         <div className="coach-feed-msg coach-feed-msg-session-end">
-          <div className="coach-end-report-title">Session Complete</div>
           {message.pending ? (
             <div className="coach-end-report-comment"><TtsThinkingSpinner /></div>
           ) : (
@@ -239,6 +240,23 @@ export function FeedMessageItem({
           )}
           {message.segments && message.segments.length > 0 && (
             <SegmentTimeline segments={message.segments} sessionStart={message.segments[0].startTime ?? message.timestamp} />
+          )}
+          {message.report && (
+            <div className="coach-detail-section">
+              <div className="coach-detail-section-title">Breakdown</div>
+              <div className="coach-detail-bars">
+                <BreakdownBar label="Perfect"  count={message.report.perfectCount} total={scoredBeats(message.report)} color={FEEDBACK_COLORS.perfect} />
+                <BreakdownBar label="Good"     count={message.report.goodCount}    total={scoredBeats(message.report)} color={FEEDBACK_COLORS.good} />
+                <BreakdownBar label="OK"       count={message.report.okCount}      total={scoredBeats(message.report)} color={FEEDBACK_COLORS.ok} />
+                <BreakdownBar label="Off-beat" count={message.report.missCount}    total={scoredBeats(message.report)} color={FEEDBACK_COLORS.miss} />
+              </div>
+            </div>
+          )}
+          {message.report && message.report.deviations.length > 4 && (
+            <div className="coach-detail-section">
+              <div className="coach-detail-section-title">Timing Distribution</div>
+              <Histogram deviations={message.report.deviations} />
+            </div>
           )}
           <div className="coach-feed-msg-time">{formatTime(message.timestamp)}</div>
         </div>
@@ -326,13 +344,40 @@ function EndReportSummary({ report }: { report: SessionReport }) {
           <span className="coach-end-report-stat-value">{"\u00B1"}{report.meanAbsDeviationMs.toFixed(1)}ms</span>
         </div>
         <div className="coach-end-report-stat">
-          <span className="coach-end-report-stat-label">Beats</span>
-          <span className="coach-end-report-stat-value">{report.totalBeats}</span>
+          <span className="coach-end-report-stat-label">Consistency</span>
+          <span className="coach-end-report-stat-sublabel">lower is tighter</span>
+          <span className="coach-end-report-stat-value">{"\u00B1"}{report.stdDeviationMs.toFixed(1)}ms</span>
+        </div>
+        <div className="coach-end-report-stat">
+          <span className="coach-end-report-stat-label">Tempo stability</span>
+          <span className="coach-end-report-stat-value">{"\u00B1"}{report.tempoStabilityMs.toFixed(1)}ms</span>
         </div>
         <div className="coach-end-report-stat">
           <span className="coach-end-report-stat-label">Best Streak</span>
           <span className="coach-end-report-stat-value">{streakBeats}</span>
         </div>
+        <div className="coach-end-report-stat">
+          <span className="coach-end-report-stat-label">Scored beats</span>
+          <span className="coach-end-report-stat-value">{scoredBeats(report)}</span>
+        </div>
+        {report.skippedBeats > 0 && (
+          <div className="coach-end-report-stat">
+            <span className="coach-end-report-stat-label">Not played</span>
+            <span className="coach-end-report-stat-value">{report.skippedBeats}</span>
+          </div>
+        )}
+        {report.intervalConsistency !== undefined && (
+          <div className="coach-end-report-stat">
+            <span className="coach-end-report-stat-label">Note spacing</span>
+            <span className="coach-end-report-stat-value">{report.intervalConsistency.toFixed(2)}</span>
+          </div>
+        )}
+        {report.gridAlignment !== undefined && (
+          <div className="coach-end-report-stat">
+            <span className="coach-end-report-stat-label">Beat placement</span>
+            <span className="coach-end-report-stat-value">{report.gridAlignment.toFixed(2)}</span>
+          </div>
+        )}
       </div>
       {report.intervalConsistency !== undefined && (
         <div className="end-report-components">
@@ -366,6 +411,16 @@ function EndReportSummary({ report }: { report: SessionReport }) {
               {report.gridAlignment !== undefined ? `${Math.round(report.gridAlignment * 100)}%` : "—"}
             </span>
           </div>
+        </div>
+      )}
+      {/* AI narrative — rule-based systematic analysis */}
+      <SessionNarrativeView report={report} />
+      {/* Rule-based insights */}
+      {report.insights.length > 0 && (
+        <div className="coach-detail-insights">
+          {report.insights.map((insight, i) => (
+            <div key={i} className="coach-detail-insight">{insight}</div>
+          ))}
         </div>
       )}
     </>
@@ -482,7 +537,7 @@ function SegmentBreakdownBar({ report }: { report: SessionReport }) {
   );
 }
 
-function SegmentTimeline({ segments, sessionStart }: { segments: SessionSegment[]; sessionStart: number }) {
+export function SegmentTimeline({ segments, sessionStart }: { segments: SessionSegment[]; sessionStart: number }) {
   return (
     <div className="coach-segment-timeline">
       <div className="coach-segment-timeline-title">Timeline</div>

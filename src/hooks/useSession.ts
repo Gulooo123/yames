@@ -1417,6 +1417,7 @@ export function useSession({ evaluation, isPlaying, bpm, timeSignature, presetId
         report: sessionReport,
         presetId: presetId,
         presetName: presetName,
+        segments: miniReportSegments.length > 0 ? miniReportSegments : undefined,
       }).catch(() => {});
     }
 

@@ -235,6 +235,9 @@ export type SavedSession = {
   report: SessionReport;
   presetId?: string;
   presetName?: string;
+  /** Per-segment exercise data. Absent for sessions saved before this field
+   *  was added — UI silently hides the segment timeline for old sessions. */
+  segments?: SessionSegment[];
 };
 
 // ---------------------------------------------------------------------------

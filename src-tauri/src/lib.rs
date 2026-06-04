@@ -396,46 +396,11 @@ pub fn run() {
                 }
             }
 
-            // Dev-only screenshot helper: poll /tmp/yames-capture-trigger every 50 ms.
-            // When the file appears, delete it, call capture_image() on the main window
-            // (which reads GPU-composited layers that screencapture cannot see), encode
-            // the result as PNG, and write /tmp/yames-capture.png.
-            // Used exclusively by scripts/take-screenshots.sh.
-            {
-                let app_handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    let trigger = std::path::Path::new("/tmp/yames-capture-trigger");
-                    let output = "/tmp/yames-capture.png";
-                    loop {
-                        if trigger.exists() {
-                            let _ = std::fs::remove_file(trigger);
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                match window.capture_image() {
-                                    Ok(img) => {
-                                        let w = img.width();
-                                        let h = img.height();
-                                        let bytes = img.into_bytes();
-                                        let mut buf: Vec<u8> = Vec::new();
-                                        let mut encoder = png::Encoder::new(&mut buf, w, h);
-                                        encoder.set_color(png::ColorType::Rgba);
-                                        encoder.set_depth(png::BitDepth::Eight);
-                                        match encoder.write_header().and_then(|mut w| w.write_image_data(&bytes)) {
-                                            Ok(_) => {
-                                                if let Err(e) = std::fs::write(output, &buf) {
-                                                    eprintln!("[yames] capture save failed: {e}");
-                                                }
-                                            }
-                                            Err(e) => eprintln!("[yames] PNG encode failed: {e}"),
-                                        }
-                                    }
-                                    Err(e) => eprintln!("[yames] capture_image failed: {e}"),
-                                }
-                            }
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                });
-            }
+            // NOTE: capture_image() + png-based trigger helper was removed here.
+            // tauri::WebviewWindow::capture_image() requires the `image` Tauri feature
+            // and the `png` crate; the screenshot script (scripts/take-screenshots.sh)
+            // uses macOS screencapture directly and does not need this trigger path.
+            // Re-enable when Tauri image capture support is properly wired up.
 
             Ok(())
         })
