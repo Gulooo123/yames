@@ -89,9 +89,9 @@
       "license": "https://github.com/turutupa/yames/blob/main/LICENSE",
       "screenshot": [
         "https://yames.app/og-image.png",
-        "https://yames.app/img/drill/obsidian-drill.png",
-        "https://yames.app/img/zen/obsidian-cosmos-zen.png",
-        "https://yames.app/img/metronome/obsidian-metronome.png"
+        "https://yames.app/img/metronome/aurora-metronome.png",
+        "https://yames.app/img/zen/aurora-cosmos.png",
+        "https://yames.app/img/drill/aurora-drill.png"
       ],
       "featureList": [
         "Hands-free practice — MIDI footswitch and controller support",
@@ -260,7 +260,7 @@
     <link rel="stylesheet" href="style.css" />
 
     <!-- Preload LCP image for faster first paint -->
-    <link rel="preload" href="img/drill/obsidian-drill.png" as="image" />
+    <link rel="preload" href="img/metronome/aurora-metronome.png" as="image" />
 
     <!-- Web App Manifest -->
     <link rel="manifest" href="manifest.json" />
@@ -290,8 +290,8 @@
               exercise configs, always-on-top widget over your DAW.
             </p>
             <p class="feature">
-              <strong>Practice coach (coming soon).</strong> AI-powered live
-              feedback, adaptive tempo, and session history — all running locally.
+              <strong>Practice coach.</strong> AI-powered live feedback,
+              session history, and adaptive coaching — all running locally.
             </p>
           </div>
 
@@ -398,14 +398,14 @@
               <div class="preview-frame">
                 <img
                   id="preview-img"
-                  src="img/drill/obsidian-drill.png"
+                  src="img/metronome/aurora-metronome.png"
                   alt="App screenshot"
                 />
               </div>
               <div class="widget-overlay" id="widget-overlay">
                 <img
                   id="widget-img"
-                  src="img/widget/obsidian-widget.png"
+                  src="img/widget/aurora-widget.png"
                   alt="Widget"
                 />
               </div>
@@ -414,17 +414,45 @@
 
           <!-- Tab selector -->
           <div class="tab-selector">
-            <button class="tab-btn" data-tab="metronome">Metronome</button>
-            <button class="tab-btn active" data-tab="drill">Drill</button>
-            <button class="tab-btn" data-tab="tapit">Tap It</button>
+            <button class="tab-btn active" data-tab="metronome">Metronome</button>
+            <button class="tab-btn" data-tab="drill">Drill</button>
             <button class="tab-btn" data-tab="zen">Zen</button>
+          </div>
+
+          <!-- Zen style picker — visible only when Zen tab is active -->
+          <div class="zen-style-selector" id="zen-style-selector">
+            <div class="swatch-row">
+              <button class="zen-swatch active" data-style="cosmos" data-tooltip="Cosmos">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="6" cy="8" r="1.5"/><circle cx="18" cy="6" r="1"/><circle cx="12" cy="16" r="1.5"/><circle cx="4" cy="18" r="1"/><circle cx="19" cy="15" r="1.2"/></svg>
+              </button>
+              <button class="zen-swatch" data-style="rain" data-tooltip="Rain">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v6M8 4v4M16 5v3M6 8v3M18 7v3"/><ellipse cx="12" cy="20" rx="3" ry="1"/></svg>
+              </button>
+              <button class="zen-swatch" data-style="warp" data-tooltip="Warp">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12,2 22,12 12,22 2,12"/></svg>
+              </button>
+              <button class="zen-swatch" data-style="gravity" data-tooltip="Gravity">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="8" r="3"/><line x1="12" y1="18" x2="12" y2="18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              </button>
+            </div>
+            <div class="swatch-row">
+              <button class="zen-swatch" data-style="pulse" data-tooltip="Pulse">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/></svg>
+              </button>
+              <button class="zen-swatch" data-style="sweep" data-tooltip="Sweep">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><line x1="12" y1="12" x2="12" y2="5"/></svg>
+              </button>
+              <button class="zen-swatch" data-style="focus" data-tooltip="Focus">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="5"/></svg>
+              </button>
+            </div>
           </div>
 
           <!-- Theme swatches -->
           <div class="theme-swatches">
             <div class="swatch-row">
               <button
-                class="swatch active"
+                class="swatch"
                 data-theme="obsidian"
                 data-tooltip="Obsidian"
                 style="--c1: #0a0a0a; --c2: #f59e0b"
@@ -456,7 +484,7 @@
                 <span class="swatch-half"></span>
               </button>
               <button
-                class="swatch"
+                class="swatch active"
                 data-theme="aurora"
                 data-tooltip="Aurora"
                 style="--c1: #0a0020; --c2: #00d4ff"
@@ -603,8 +631,9 @@
       const tabBtns = document.querySelectorAll(".tab-btn");
       const swatches = document.querySelectorAll(".swatch");
 
-      let currentTab = localStorage.getItem("yames-tab") || "drill";
-      let currentTheme = localStorage.getItem("yames-theme") || "obsidian";
+      let currentTab = localStorage.getItem("yames-tab") || "metronome";
+      let currentTheme = localStorage.getItem("yames-theme") || "aurora";
+      let currentZenStyle = localStorage.getItem("yames-zen-style") || "cosmos";
 
       // Theme accent colors (from --c2 of each swatch)
       const themeAccents = {
@@ -693,15 +722,17 @@
           lavender: "img/drill/lavender-drill.png",
           prism: "img/drill/prism-drill.png",
         },
-        tapit: {
-          obsidian: "img/tapit/obsidian-tap.png",
-          mono: "img/tapit/mono-tap.png",
-          aurora: "img/tapit/aurora-tap.png",
-          prism: "img/tapit/prism-tap.png",
-        },
         zen: {
-          obsidian: "img/zen/obsidian-cosmos-zen.png",
-          neon: "img/zen/neon-pulse-zen.png",
+          obsidian: { focus: "img/zen/obsidian-focus.png", pulse: "img/zen/obsidian-pulse.png", gravity: "img/zen/obsidian-gravity.png", sweep: "img/zen/obsidian-sweep.png", cosmos: "img/zen/obsidian-cosmos.png", warp: "img/zen/obsidian-warp.png", rain: "img/zen/obsidian-rain.png" },
+          mono:     { focus: "img/zen/mono-focus.png",     pulse: "img/zen/mono-pulse.png",     gravity: "img/zen/mono-gravity.png",     sweep: "img/zen/mono-sweep.png",     cosmos: "img/zen/mono-cosmos.png",     warp: "img/zen/mono-warp.png",     rain: "img/zen/mono-rain.png" },
+          velvet:   { focus: "img/zen/velvet-focus.png",   pulse: "img/zen/velvet-pulse.png",   gravity: "img/zen/velvet-gravity.png",   sweep: "img/zen/velvet-sweep.png",   cosmos: "img/zen/velvet-cosmos.png",   warp: "img/zen/velvet-warp.png",   rain: "img/zen/velvet-rain.png" },
+          neon:     { focus: "img/zen/neon-focus.png",     pulse: "img/zen/neon-pulse.png",     gravity: "img/zen/neon-gravity.png",     sweep: "img/zen/neon-sweep.png",     cosmos: "img/zen/neon-cosmos.png",     warp: "img/zen/neon-warp.png",     rain: "img/zen/neon-rain.png" },
+          aurora:   { focus: "img/zen/aurora-focus.png",   pulse: "img/zen/aurora-pulse.png",   gravity: "img/zen/aurora-gravity.png",   sweep: "img/zen/aurora-sweep.png",   cosmos: "img/zen/aurora-cosmos.png",   warp: "img/zen/aurora-warp.png",   rain: "img/zen/aurora-rain.png" },
+          ivory:    { focus: "img/zen/ivory-focus.png",    pulse: "img/zen/ivory-pulse.png",    gravity: "img/zen/ivory-gravity.png",    sweep: "img/zen/ivory-sweep.png",    cosmos: "img/zen/ivory-cosmos.png",    warp: "img/zen/ivory-warp.png",    rain: "img/zen/ivory-rain.png" },
+          arctic:   { focus: "img/zen/arctic-focus.png",   pulse: "img/zen/arctic-pulse.png",   gravity: "img/zen/arctic-gravity.png",   sweep: "img/zen/arctic-sweep.png",   cosmos: "img/zen/arctic-cosmos.png",   warp: "img/zen/arctic-warp.png",   rain: "img/zen/arctic-rain.png" },
+          sand:     { focus: "img/zen/sand-focus.png",     pulse: "img/zen/sand-pulse.png",     gravity: "img/zen/sand-gravity.png",     sweep: "img/zen/sand-sweep.png",     cosmos: "img/zen/sand-cosmos.png",     warp: "img/zen/sand-warp.png",     rain: "img/zen/sand-rain.png" },
+          lavender: { focus: "img/zen/lavender-focus.png", pulse: "img/zen/lavender-pulse.png", gravity: "img/zen/lavender-gravity.png", sweep: "img/zen/lavender-sweep.png", cosmos: "img/zen/lavender-cosmos.png", warp: "img/zen/lavender-warp.png", rain: "img/zen/lavender-rain.png" },
+          prism:    { focus: "img/zen/prism-focus.png",    pulse: "img/zen/prism-pulse.png",    gravity: "img/zen/prism-gravity.png",    sweep: "img/zen/prism-sweep.png",    cosmos: "img/zen/prism-cosmos.png",    warp: "img/zen/prism-warp.png",    rain: "img/zen/prism-rain.png" },
         },
       };
 
@@ -723,6 +754,11 @@
       const widgetImg = document.getElementById("widget-img");
 
       function updateWidget() {
+        // Never show the floating widget when showcasing zen (it's fullscreen)
+        if (currentTab === "zen") {
+          widgetOverlay.classList.remove("visible");
+          return;
+        }
         const src = widgetImages[currentTheme];
         if (src) {
           widgetImg.src = src;
@@ -736,12 +772,19 @@
         const tabImages = images[currentTab];
         swatches.forEach((sw) => {
           const theme = sw.dataset.theme;
-          const available = tabImages && tabImages[theme];
+          const available = currentTab === "zen"
+            ? !!images.zen[theme]
+            : (tabImages && tabImages[theme]);
           sw.style.display = available ? "" : "none";
         });
         // If current theme isn't available in this tab, select first available
-        if (!tabImages || !tabImages[currentTheme]) {
-          const firstAvailable = Object.keys(tabImages || {})[0];
+        const themeAvailable = currentTab === "zen"
+          ? !!images.zen[currentTheme]
+          : (tabImages && tabImages[currentTheme]);
+        if (!themeAvailable) {
+          const firstAvailable = currentTab === "zen"
+            ? Object.keys(images.zen)[0]
+            : Object.keys(tabImages || {})[0];
           if (firstAvailable) {
             currentTheme = firstAvailable;
             swatches.forEach((s) =>
@@ -754,14 +797,20 @@
 
       function updatePreview() {
         updateSwatches();
-        const tabImages = images[currentTab];
-        const src = tabImages && tabImages[currentTheme];
+        let src;
+        if (currentTab === "zen") {
+          const zenStyles = images.zen[currentTheme];
+          src = zenStyles && zenStyles[currentZenStyle];
+        } else {
+          const tabImages = images[currentTab];
+          src = tabImages && tabImages[currentTheme];
+        }
         if (src) {
           previewImg.src = src;
           previewImg.style.opacity = "1";
         } else {
           // Fallback: show any available image for this theme, or keep current
-          for (const tab of ["metronome", "drill", "tapit"]) {
+          for (const tab of ["metronome", "drill"]) {
             if (images[tab] && images[tab][currentTheme]) {
               previewImg.src = images[tab][currentTheme];
               previewImg.style.opacity = "0.6";
@@ -770,13 +819,29 @@
           }
         }
         updateWidget();
+        // Show/hide zen style selector + zen glow on frame + hide theme swatches in zen
+        const isZen = currentTab === "zen";
+        const zenSel = document.getElementById("zen-style-selector");
+        if (zenSel) zenSel.classList.toggle("visible", isZen);
+        const previewFrame = document.querySelector(".preview-frame");
+        if (previewFrame) previewFrame.classList.toggle("zen-active", isZen);
+        const themeSwatchContainer = document.querySelector(".theme-swatches");
+        if (themeSwatchContainer) themeSwatchContainer.classList.toggle("zen-hidden", isZen);
       }
 
-      // Preload all images for instant theme/tab switching
+      // Preload all images for instant theme/tab switching.
+      // For zen, only preload the default style (cosmos) to avoid 70 upfront loads.
       (function preloadImages() {
         const allSrcs = new Set();
         Object.values(images).forEach((tab) =>
-          Object.values(tab).forEach((src) => allSrcs.add(src))
+          Object.values(tab).forEach((val) => {
+            if (typeof val === "string") {
+              allSrcs.add(val);
+            } else if (val && typeof val === "object") {
+              // nested zen structure — preload only the default style
+              if (val.cosmos) allSrcs.add(val.cosmos);
+            }
+          })
         );
         Object.values(widgetImages).forEach((src) => allSrcs.add(src));
         allSrcs.forEach((src) => { new Image().src = src; });
@@ -802,6 +867,20 @@
           updatePreview();
         });
       });
+
+      // Zen style icon swatches
+      const zenSwatches = document.querySelectorAll(".zen-swatch");
+      zenSwatches.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          zenSwatches.forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          currentZenStyle = btn.dataset.style;
+          localStorage.setItem("yames-zen-style", currentZenStyle);
+          updatePreview();
+        });
+      });
+      // Restore saved zen style active state
+      zenSwatches.forEach((b) => b.classList.toggle("active", b.dataset.style === currentZenStyle));
 
       // Initial swatch visibility
       updateSwatches();

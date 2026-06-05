@@ -84,7 +84,9 @@ launch_and_wait() {
   echo "  [warn] window still not ready after 15s" >&2
 }
 
-# Resize the main window to 1400 × 900 at origin (0,0).
+# Resize the main window to 1400 × 1050 at origin (0,0).
+# ensure_main_window() already closes the floating widget before this runs,
+# so window 1 is always the main window here — no need for size-based lookup.
 resize_main_window() {
   osascript <<'AS' 2>/dev/null || true
 tell application "System Events"
@@ -171,10 +173,25 @@ SWEOF
   [[ -x "$_WIDGET_WID_BIN" ]] && "$_WIDGET_WID_BIN" 2>/dev/null || echo ""
 }
 
+# Hide every visible app except yames so screencapture -R regions are clean.
+# (Other apps, e.g. Slack, can bleed into the capture region from the right edge.)
+hide_other_apps() {
+  osascript <<'AS' 2>/dev/null || true
+tell application "System Events"
+  repeat with p in (every process where visible is true)
+    if name of p is not "yames" and name of p is not "Yames" then
+      set visible of p to false
+    end if
+  end repeat
+end tell
+AS
+}
+
 # Bring the app to a known normal state after launch:
 #   1. Press Escape — exits zen mode if the app restored to that state (no-op otherwise)
 #   2. If window is widget-sized (< 400px wide), send W to exit widget mode
 #   3. Cmd+1 — land on the metronome tab so every shot starts from a known tab
+#   4. Hide all other apps so no foreign windows bleed into the capture region
 ensure_main_window() {
   # Escape exits zen if active; harmless if not
   osascript -e 'tell application "System Events" to tell process "yames" to key code 53' 2>/dev/null || true
@@ -190,6 +207,19 @@ ensure_main_window() {
   # Always land on the metronome tab so subsequent keystrokes target the right view
   osascript -e 'tell application "System Events" to tell process "yames" to keystroke "1" using {command down}' 2>/dev/null || true
   sleep 0.3
+
+  # Close the floating widget if it is open (> 1 window means widget is visible).
+  # Drill/metronome/zen captures use the CSS overlay on the website — the real
+  # widget window must not bleed into the main-window region capture.
+  local wc
+  wc=$(osascript -e 'tell application "System Events" to tell process "yames" to count windows' 2>/dev/null || echo "1")
+  if [[ "$wc" -gt 1 ]]; then
+    osascript -e 'tell application "System Events" to tell process "yames" to keystroke "w"'
+    sleep 0.5
+  fi
+
+  # Hide all other apps — prevents bleed from e.g. Slack in the capture region
+  hide_other_apps
 }
 
 # After opening the coach panel, click HISTORY tab then the top session entry

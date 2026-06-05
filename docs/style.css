@@ -581,6 +581,13 @@ body {
   transition: box-shadow 0.4s ease;
 }
 
+.preview-frame.zen-active {
+  box-shadow:
+    0 24px 80px color-mix(in srgb, var(--accent) 50%, transparent),
+    0 0 48px color-mix(in srgb, var(--accent) 22%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
 .preview-frame > img {
   width: 100%;
   height: auto;
@@ -612,6 +619,76 @@ body {
 }
 
 /* ─── Tab selector ─── */
+/* ─── Zen style picker (icon swatches, 2 rows) ─── */
+.zen-style-selector {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+
+.zen-style-selector.visible {
+  display: flex;
+}
+
+.theme-swatches.zen-hidden {
+  display: none;
+}
+
+.zen-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  transition: all 0.15s ease;
+  padding: 0;
+  position: relative;
+}
+
+.zen-swatch[data-tooltip]::before {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%) scale(0.8);
+  background: var(--text);
+  color: var(--bg);
+  font-size: 0.7rem;
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  z-index: 10;
+}
+
+.zen-swatch:hover[data-tooltip]::before {
+  opacity: 1;
+  transform: translateX(-50%) scale(1);
+}
+
+.zen-swatch:hover {
+  transform: scale(1.15);
+  border-color: rgba(255, 255, 255, 0.3);
+  color: var(--text);
+}
+
+.zen-swatch.active {
+  background: var(--accent);
+  border-color: var(--text);
+  color: var(--bg);
+  transform: scale(1.2);
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.15);
+}
+
 .tab-selector {
   display: flex;
   gap: 4px;
