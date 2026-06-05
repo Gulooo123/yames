@@ -991,6 +991,11 @@
       let sweepAngle = 0, sweepDots = [];
       let focusPulse = 0;
 
+      function hexToRgbArr(hex) {
+        const h = hex.replace('#', '');
+        return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+      }
+
       function resizeCanvas() {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
@@ -1209,16 +1214,22 @@
         const cx = animCx, cy = animCy;
         const maxR = Math.hypot(Math.max(cx, canvas.width - cx), Math.max(cy, canvas.height - cy));
         sweepAngle += 0.018;
-        // Trail
-        for (let t = 1; t < 35; t++) {
+        // Radar wake — filled wedge fan fading from transparent (trailing edge)
+        // to near-opaque (leading edge). 60 slices covers ~90 degrees.
+        const [wr, wg, wb] = hexToRgbArr(particleColor);
+        const wakeArc = Math.PI * 0.5;
+        const slices = 60;
+        for (let t = 0; t < slices; t++) {
+          const frac = t / slices;
+          const a0 = sweepAngle - wakeArc + frac * wakeArc;
+          const a1 = sweepAngle - wakeArc + (frac + 1 / slices) * wakeArc;
           ctx.beginPath();
           ctx.moveTo(cx, cy);
-          const ang = sweepAngle - t * 0.018;
-          ctx.lineTo(cx + Math.cos(ang) * maxR, cy + Math.sin(ang) * maxR);
-          ctx.strokeStyle = particleColor;
-          ctx.globalAlpha = 0.012 * (1 - t / 35);
-          ctx.lineWidth = 1;
-          ctx.stroke();
+          ctx.arc(cx, cy, maxR, a0, a1);
+          ctx.closePath();
+          ctx.fillStyle = `rgba(${wr},${wg},${wb},${0.0045 * frac * frac})`;
+          ctx.globalAlpha = 1;
+          ctx.fill();
         }
         // Active line
         ctx.beginPath();

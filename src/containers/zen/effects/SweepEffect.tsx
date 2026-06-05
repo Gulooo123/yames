@@ -79,15 +79,20 @@ export function SweepEffect({ currentBeat, isPlaying, activeTab: _activeTab, bea
       sweepAngleRef.current += inc;
       const sweepAngle = sweepAngleRef.current;
 
-      // Sweep trail (35 ghost lines fading behind the active sweep)
-      for (let t = 1; t < 35; t++) {
-        const ang = sweepAngle - t * inc;
+      // Radar wake — filled wedge fan fading from transparent (trailing edge)
+      // to near-opaque (leading edge). 60 thin slices covers ~90 degrees.
+      const wakeArc = Math.PI * 0.5; // 90-degree wake
+      const slices = 60;
+      for (let t = 0; t < slices; t++) {
+        const frac = t / slices; // 0 = trailing edge, 1 = leading edge
+        const a0 = sweepAngle - wakeArc + frac * wakeArc;
+        const a1 = sweepAngle - wakeArc + (frac + 1 / slices) * wakeArc;
         ctx.beginPath();
         ctx.moveTo(cx, cy);
-        ctx.lineTo(cx + Math.cos(ang) * maxR, cy + Math.sin(ang) * maxR);
-        ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${0.012 * (1 - t / 35)})`;
-        ctx.lineWidth = 1;
-        ctx.stroke();
+        ctx.arc(cx, cy, maxR, a0, a1);
+        ctx.closePath();
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.0045 * frac * frac})`;
+        ctx.fill();
       }
 
       // Active scan line
