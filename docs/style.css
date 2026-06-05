@@ -935,6 +935,17 @@ body {
     width: calc(65vh * 4 / 3);
     border-radius: 12px !important;
   }
+
+  /* Move zen-active ring from frame to zen-live-preview (frame is narrower than preview on wide layout) */
+  .preview-frame.zen-active {
+    box-shadow: none;
+  }
+
+  .zen-live-preview.active {
+    box-shadow:
+      0 20px 60px color-mix(in srgb, var(--accent) 25%, transparent),
+      0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+  }
 }
 
 /* ─── Version badge ─── */
