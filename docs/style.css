@@ -928,6 +928,13 @@ body {
       0 20px 60px color-mix(in srgb, var(--text) 15%, transparent),
       0 0 0 1px color-mix(in srgb, var(--text) 5%, transparent);
   }
+
+  /* Match zen preview to the actual image dimensions */
+  .zen-live-preview {
+    right: auto;
+    width: calc(65vh * 4 / 3);
+    border-radius: 12px !important;
+  }
 }
 
 /* ─── Version badge ─── */
