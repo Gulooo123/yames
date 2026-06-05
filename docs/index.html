@@ -1304,8 +1304,15 @@
         const zenLive = document.getElementById("zen-live-preview");
         if (zenLive && zenLive.classList.contains("active")) {
           const r = zenLive.getBoundingClientRect();
+          const sx = Math.round(r.left), sy = Math.round(r.top), sw = Math.round(r.width), sh = Math.round(r.height);
           zenCtx.clearRect(0, 0, zenCanvas.width, zenCanvas.height);
-          zenCtx.drawImage(canvas, Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), 0, 0, zenCanvas.width, zenCanvas.height);
+          // First pass: copy
+          zenCtx.globalCompositeOperation = 'source-over';
+          zenCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, zenCanvas.width, zenCanvas.height);
+          // Second pass: screen-blend the same source on top — doubles brightness while preserving hue
+          zenCtx.globalCompositeOperation = 'screen';
+          zenCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, zenCanvas.width, zenCanvas.height);
+          zenCtx.globalCompositeOperation = 'source-over';
         }
         amplifyId = requestAnimationFrame(amplifyZenArea);
       }

@@ -1265,12 +1265,11 @@ body {
   pointer-events: none;
   z-index: 0;
   mix-blend-mode: screen;
-  filter: brightness(3);
 }
 
-/* In zen mode the full-page canvas is a subtle hint; zen canvas amplifies the focal area */
+/* In zen mode the full-page canvas is slightly dimmed; zen canvas amplifies the focal area */
 #particles-canvas.active.zen {
-  opacity: 0.5;
+  opacity: 0.85;
 }
 
 .zen-live-preview.active {
