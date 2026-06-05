@@ -21,7 +21,7 @@ function zenStyleIcon(s: ZenStyle) {
     case "focus": return <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="5"/></svg>;
     case "pulse": return <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/></svg>;
     case "gravity": return <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="8" r="3"/><line x1="12" y1="18" x2="12" y2="18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>;
-    case "sweep": return <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9"/><line x1="12" y1="12" x2="12" y2="5"/></svg>;
+    case "radar": return <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9"/><line x1="12" y1="12" x2="12" y2="5"/></svg>;
     case "cosmos": return <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="6" cy="8" r="1.5"/><circle cx="18" cy="6" r="1"/><circle cx="12" cy="16" r="1.5"/><circle cx="4" cy="18" r="1"/><circle cx="19" cy="15" r="1.2"/></svg>;
     case "warp": return <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="12,2 22,12 12,22 2,12"/></svg>;
     case "rain": return <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v6M8 4v4M16 5v3M6 8v3M18 7v3"/><ellipse cx="12" cy="20" rx="3" ry="1"/></svg>;
@@ -141,7 +141,7 @@ export function FullscreenView({ state, currentBeat, activeTab, onExit }: Fullsc
             {zenStyleIcon(zenStyle)}
           </button>
           <div className="zen-theme-dropdown">
-            {(["focus", "pulse", "gravity", "sweep", "cosmos", "warp", "rain"] as ZenStyle[]).map((s) => (
+            {(["focus", "pulse", "gravity", "radar", "cosmos", "warp", "rain"] as ZenStyle[]).map((s) => (
               <button
                 key={s}
                 className={`zen-theme-option ${zenStyle === s ? "active" : ""}`}

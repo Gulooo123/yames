@@ -220,7 +220,7 @@ export function CoachSettingsSection({
             <path d="M8.5 2h7" />
             <path d="M7 16h10" />
           </svg>
-          Experimental
+          Beta
         </span>
       </div>
       <div className="setting-row">

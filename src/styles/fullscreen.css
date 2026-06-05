@@ -38,9 +38,9 @@
   gap: 48px;
 }
 
-/* Subtle glow ring when playing — only for gravity, sweep, warp, rain */
+/* Subtle glow ring when playing — only for gravity, radar, warp, rain */
 .fullscreen-view[data-playing="true"][data-zen-style="gravity"]::before,
-.fullscreen-view[data-playing="true"][data-zen-style="sweep"]::before,
+.fullscreen-view[data-playing="true"][data-zen-style="radar"]::before,
 .fullscreen-view[data-playing="true"][data-zen-style="warp"]::before,
 .fullscreen-view[data-playing="true"][data-zen-style="rain"]::before {
   content: "";

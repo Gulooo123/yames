@@ -226,7 +226,7 @@ export default function CoachCard({ open, active, messages, onToggle, onStartSes
                   <path d="M8.5 2h7" />
                   <path d="M7 16h10" />
                 </svg>
-                Experimental
+                Beta
               </span>
               {active && listening && spectrum && (
                 <span className={`coach-title-spectrum ${hasSignal ? "has-signal" : ""}`}>

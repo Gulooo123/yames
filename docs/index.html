@@ -290,7 +290,7 @@
               respond to the beat. No distractions.
             </p>
             <p class="feature">
-              <strong>Practice coach.</strong><span class="experimental-badge" title="Experimental — behaviour may change between builds"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></svg>Experimental</span> AI-powered live feedback,
+              <strong>Practice coach.</strong><span class="experimental-badge" title="Experimental — behaviour may change between builds"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></svg>Beta</span> AI-powered live feedback,
               session history, and adaptive coaching — all running locally.
             </p>
           </div>
@@ -495,7 +495,7 @@
               <button class="zen-swatch" data-style="pulse" data-tooltip="Pulse">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/></svg>
               </button>
-              <button class="zen-swatch" data-style="sweep" data-tooltip="Sweep">
+              <button class="zen-swatch" data-style="radar" data-tooltip="Radar">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><line x1="12" y1="12" x2="12" y2="5"/></svg>
               </button>
               <button class="zen-swatch" data-style="focus" data-tooltip="Focus">
@@ -988,7 +988,7 @@
       let warpAngle = 0;
       let gravDots = [];
       let pulseRings = [], pulseTick = 0;
-      let sweepAngle = 0, sweepDots = [];
+      let radarAngle = 0, radarDots = [];
       let focusPulse = 0;
 
       function hexToRgbArr(hex) {
@@ -1146,28 +1146,28 @@
         gravDots = [];
         const cx = animCx, cy = animCy;
         const maxR = Math.hypot(Math.max(cx, canvas.width - cx), Math.max(cy, canvas.height - cy));
-        for (let i = 0; i < 150; i++) {
+        for (let i = 0; i < 100; i++) {
           gravDots.push({
             angle: Math.random() * Math.PI * 2,
             r: 30 + Math.random() * maxR,
-            speed: (0.003 + Math.random() * 0.009) * (Math.random() < 0.5 ? 1 : -1),
+            speed: (0.0018 + Math.random() * 0.005) * (Math.random() < 0.5 ? 1 : -1),
             size: 1 + Math.random() * 2.5,
-            alpha: 0.15 + Math.random() * 0.5,
+            alpha: 0.2 + Math.random() * 0.5,
           });
         }
       }
       function drawGravity() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         const cx = animCx, cy = animCy;
+        const [gr, gg, gb] = hexToRgbArr(particleColor);
+        ctx.globalAlpha = 1;
         for (const d of gravDots) {
           d.angle += d.speed;
           ctx.beginPath();
           ctx.arc(cx + Math.cos(d.angle) * d.r, cy + Math.sin(d.angle) * d.r, d.size, 0, Math.PI * 2);
-          ctx.fillStyle = particleColor;
-          ctx.globalAlpha = d.alpha;
+          ctx.fillStyle = `rgba(${gr},${gg},${gb},${d.alpha})`;
           ctx.fill();
         }
-        ctx.globalAlpha = 1;
         if (currentAnim === 'gravity') animId = requestAnimationFrame(drawGravity);
       }
 
@@ -1202,58 +1202,88 @@
         if (currentAnim === 'pulse') animId = requestAnimationFrame(drawPulse);
       }
 
-      function initSweep() {
-        sweepAngle = 0;
-        sweepDots = [];
+      function initRadar() {
+        radarAngle = 0;
+        radarDots = [];
         for (let i = 0; i < 50; i++) {
-          sweepDots.push({ x: Math.random() * canvas.width, y: Math.random() * canvas.height, a: 0 });
+          radarDots.push({ x: Math.random() * canvas.width, y: Math.random() * canvas.height, a: 0 });
         }
       }
-      function drawSweep() {
+      function drawRadar() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         const cx = animCx, cy = animCy;
         const maxR = Math.hypot(Math.max(cx, canvas.width - cx), Math.max(cy, canvas.height - cy));
-        sweepAngle += 0.018;
-        // Radar wake — filled wedge fan fading from transparent (trailing edge)
-        // to near-opaque (leading edge). 60 slices covers ~90 degrees.
+        radarAngle += 0.018;
         const [wr, wg, wb] = hexToRgbArr(particleColor);
-        const wakeArc = Math.PI * 0.5;
-        const slices = 60;
-        for (let t = 0; t < slices; t++) {
-          const frac = t / slices;
-          const a0 = sweepAngle - wakeArc + frac * wakeArc;
-          const a1 = sweepAngle - wakeArc + (frac + 1 / slices) * wakeArc;
+        ctx.globalAlpha = 1;
+        // Radar grid — concentric rings + radial spokes
+        ctx.strokeStyle = `rgba(${wr},${wg},${wb},0.08)`;
+        ctx.lineWidth = 0.6;
+        for (let ring = 1; ring <= 4; ring++) {
+          ctx.beginPath();
+          ctx.arc(cx, cy, maxR * (ring / 4), 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        for (let s = 0; s < 12; s++) {
+          const ang = (s / 12) * Math.PI * 2;
           ctx.beginPath();
           ctx.moveTo(cx, cy);
-          ctx.arc(cx, cy, maxR, a0, a1);
+          ctx.lineTo(cx + Math.cos(ang) * maxR, cy + Math.sin(ang) * maxR);
+          ctx.stroke();
+        }
+        // Radar wake — smooth conic gradient (slice fallback for older browsers)
+        // Website alpha is halved to account for zen-canvas double screen-blend amplification
+        const wakeArc = Math.PI * 0.6;
+        if ('createConicGradient' in ctx) {
+          const grad = ctx.createConicGradient(radarAngle - wakeArc, cx, cy);
+          const wFrac = wakeArc / (Math.PI * 2);
+          grad.addColorStop(0, `rgba(${wr},${wg},${wb},0)`);
+          grad.addColorStop(wFrac, `rgba(${wr},${wg},${wb},0.065)`);
+          grad.addColorStop(Math.min(wFrac + 0.01, 1), `rgba(${wr},${wg},${wb},0)`);
+          grad.addColorStop(1, `rgba(${wr},${wg},${wb},0)`);
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.arc(cx, cy, maxR, radarAngle - wakeArc, radarAngle);
           ctx.closePath();
-          ctx.fillStyle = `rgba(${wr},${wg},${wb},${0.0045 * frac * frac})`;
+          ctx.fillStyle = grad;
           ctx.globalAlpha = 1;
           ctx.fill();
+        } else {
+          for (let t = 0; t < 120; t++) {
+            const frac = t / 120;
+            const a0 = radarAngle - wakeArc + frac * wakeArc;
+            const a1 = radarAngle - wakeArc + (frac + 1 / 120) * wakeArc;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.arc(cx, cy, maxR, a0, a1);
+            ctx.closePath();
+            ctx.fillStyle = `rgba(${wr},${wg},${wb},${0.06 * Math.pow(frac, 1.3)})`;
+            ctx.globalAlpha = 1;
+            ctx.fill();
+          }
         }
-        // Active line
+        // Active scan line
         ctx.beginPath();
         ctx.moveTo(cx, cy);
-        ctx.lineTo(cx + Math.cos(sweepAngle) * maxR, cy + Math.sin(sweepAngle) * maxR);
-        ctx.strokeStyle = particleColor;
-        ctx.globalAlpha = 0.55;
-        ctx.lineWidth = 1;
+        ctx.lineTo(cx + Math.cos(radarAngle) * maxR, cy + Math.sin(radarAngle) * maxR);
+        ctx.strokeStyle = `rgba(${wr},${wg},${wb},0.55)`;
+        ctx.globalAlpha = 1;
+        ctx.lineWidth = 1.5;
         ctx.stroke();
-        // Lit dots
-        for (const d of sweepDots) {
-          const diff = ((sweepAngle - Math.atan2(d.y - cy, d.x - cx)) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+        // Scatter dots — light up when swept, then fade slowly (~4 s)
+        for (const d of radarDots) {
+          const diff = ((radarAngle - Math.atan2(d.y - cy, d.x - cx)) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
           if (diff < 0.12) d.a = 0.85;
-          d.a *= 0.96;
+          d.a *= 0.985;
           if (d.a > 0.02) {
             ctx.beginPath();
-            ctx.arc(d.x, d.y, 2, 0, Math.PI * 2);
-            ctx.fillStyle = particleColor;
-            ctx.globalAlpha = d.a;
+            ctx.arc(d.x, d.y, 2.5, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(${wr},${wg},${wb},${d.a})`;
             ctx.fill();
           }
         }
         ctx.globalAlpha = 1;
-        if (currentAnim === 'sweep') animId = requestAnimationFrame(drawSweep);
+        if (currentAnim === 'radar') animId = requestAnimationFrame(drawRadar);
       }
 
       function drawFocus() {
@@ -1296,7 +1326,7 @@
           case 'warp':    warpAngle = 0;   animId = requestAnimationFrame(drawWarp);      break;
           case 'gravity': initGravity();   animId = requestAnimationFrame(drawGravity);   break;
           case 'pulse':   initPulse();     animId = requestAnimationFrame(drawPulse);     break;
-          case 'sweep':   initSweep();     animId = requestAnimationFrame(drawSweep);     break;
+          case 'radar':   initRadar();     animId = requestAnimationFrame(drawRadar);     break;
           case 'focus':   focusPulse = 0;  animId = requestAnimationFrame(drawFocus);     break;
         }
       }

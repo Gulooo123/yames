@@ -56,12 +56,12 @@ export function GravityEffect({ currentBeat, isPlaying, activeTab: _activeTab }:
       const cx = canvas.width / 2;
       const cy = canvas.height / 2;
       const maxR = Math.hypot(Math.max(cx, canvas.width - cx), Math.max(cy, canvas.height - cy));
-      dotsRef.current = Array.from({ length: 150 }, () => ({
+      dotsRef.current = Array.from({ length: 100 }, () => ({
         angle: Math.random() * Math.PI * 2,
         r: 30 + Math.random() * maxR,
-        speed: (0.003 + Math.random() * 0.009) * (Math.random() < 0.5 ? 1 : -1),
+        speed: (0.0018 + Math.random() * 0.005) * (Math.random() < 0.5 ? 1 : -1),
         size: 1 + Math.random() * 2.5,
-        alpha: 0.3 + Math.random() * 0.55,
+        alpha: 0.2 + Math.random() * 0.5,
       }));
     };
 

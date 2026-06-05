@@ -5,7 +5,7 @@
  * - Renders the BPM display
  * - Escape key calls onExit
  * - Double-click on the root calls onExit
- * - Renders 7 zen-style options (focus/pulse/gravity/sweep/cosmos/warp/rain)
+ * - Renders 7 zen-style options (focus/pulse/gravity/radar/cosmos/warp/rain)
  *   when the theme picker is opened
  */
 import { describe, it, expect, vi } from "vitest";

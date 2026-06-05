@@ -5,22 +5,22 @@ import { getAccentColor, hexToRgb } from "./helpers";
 interface Dot {
   x: number;
   y: number;
-  a: number; // current alpha (0 when unlit, decays after sweep)
+  a: number; // current alpha (0 when unlit, decays after radar scan)
 }
 
 /**
- * Sweep zen effect — a radar scan line rotates from center out to screen edges.
+ * Radar zen effect — a radar scan line rotates from center out to screen edges.
  * 50 scatter dots are placed randomly; each lights up (alpha 0.85) when the
- * sweep passes through it and then fades out over ~30 frames.
+ * radar passes through it and then fades out over ~250 frames.
  *
  * Rotation speed scales with live BPM via a sqrt curve clamped to [0.5×, 1.75×]
  * so tempo changes feel responsive without becoming dizzying at high BPM.
  * Live BPM is derived from beat intervals with EMA smoothing.
  */
-export function SweepEffect({ currentBeat, isPlaying, activeTab: _activeTab, beatsPerMeasure: _beatsPerMeasure }: { currentBeat: BeatEvent | null; isPlaying: boolean; activeTab: "beat" | "drill"; beatsPerMeasure: number }) {
+export function RadarEffect({ currentBeat, isPlaying, activeTab: _activeTab, beatsPerMeasure: _beatsPerMeasure }: { currentBeat: BeatEvent | null; isPlaying: boolean; activeTab: "beat" | "drill"; beatsPerMeasure: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef(0);
-  const sweepAngleRef = useRef(0);
+  const radarAngleRef = useRef(0);
   const dotsRef = useRef<Dot[]>([]);
   const prevBeatRef = useRef(-1);
   const lastBeatTimeRef = useRef(0);
@@ -76,41 +76,73 @@ export function SweepEffect({ currentBeat, isPlaying, activeTab: _activeTab, bea
       // sqrt-clamped speed multiplier
       const speedMult = Math.max(0.5, Math.min(1.75, Math.pow(liveBpmRef.current / 120, 0.5)));
       const inc = BASE_INCREMENT * speedMult;
-      sweepAngleRef.current += inc;
-      const sweepAngle = sweepAngleRef.current;
+      radarAngleRef.current += inc;
+      const radarAngle = radarAngleRef.current;
 
-      // Radar wake — filled wedge fan fading from transparent (trailing edge)
-      // to near-opaque (leading edge). 60 thin slices covers ~90 degrees.
-      const wakeArc = Math.PI * 0.5; // 90-degree wake
-      const slices = 60;
-      for (let t = 0; t < slices; t++) {
-        const frac = t / slices; // 0 = trailing edge, 1 = leading edge
-        const a0 = sweepAngle - wakeArc + frac * wakeArc;
-        const a1 = sweepAngle - wakeArc + (frac + 1 / slices) * wakeArc;
+      // Radar grid — concentric rings + radial spokes forming mesh
+      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.08)`;
+      ctx.lineWidth = 0.6;
+      for (let ring = 1; ring <= 4; ring++) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, maxR * (ring / 4), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      for (let s = 0; s < 12; s++) {
+        const ang = (s / 12) * Math.PI * 2;
         ctx.beginPath();
         ctx.moveTo(cx, cy);
-        ctx.arc(cx, cy, maxR, a0, a1);
+        ctx.lineTo(cx + Math.cos(ang) * maxR, cy + Math.sin(ang) * maxR);
+        ctx.stroke();
+      }
+
+      // Radar wake — smooth conic gradient (slice fallback for older WebKit)
+      // Use typeof check cast through unknown to prevent TS narrowing else to never
+      // (TS DOM lib declares createConicGradient so 'in' narrows else to never)
+      const wakeArc = Math.PI * 0.6;
+      const wFrac = wakeArc / (Math.PI * 2);
+      if (typeof (ctx as unknown as Record<string, unknown>).createConicGradient === 'function') {
+        const grad = ctx.createConicGradient(radarAngle - wakeArc, cx, cy);
+        grad.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0)`);
+        grad.addColorStop(wFrac, `rgba(${r}, ${g}, ${b}, 0.13)`);
+        grad.addColorStop(Math.min(wFrac + 0.01, 1), `rgba(${r}, ${g}, ${b}, 0)`);
+        grad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, maxR, radarAngle - wakeArc, radarAngle);
         ctx.closePath();
-        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.0045 * frac * frac})`;
+        ctx.fillStyle = grad;
         ctx.fill();
+      } else {
+        // Fallback: 120 slices (sub-pixel steps, effectively smooth)
+        for (let t = 0; t < 120; t++) {
+          const frac = t / 120;
+          const a0 = radarAngle - wakeArc + frac * wakeArc;
+          const a1 = radarAngle - wakeArc + (frac + 1 / 120) * wakeArc;
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.arc(cx, cy, maxR, a0, a1);
+          ctx.closePath();
+          ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.12 * Math.pow(frac, 1.3)})`;
+          ctx.fill();
+        }
       }
 
       // Active scan line
       ctx.beginPath();
       ctx.moveTo(cx, cy);
-      ctx.lineTo(cx + Math.cos(sweepAngle) * maxR, cy + Math.sin(sweepAngle) * maxR);
+      ctx.lineTo(cx + Math.cos(radarAngle) * maxR, cy + Math.sin(radarAngle) * maxR);
       ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.55)`;
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 1.5;
       ctx.stroke();
 
-      // Scatter dots — light up when swept, then fade
+      // Scatter dots — light up when swept, then fade slowly (~4 s)
       for (const d of dotsRef.current) {
-        const diff = ((sweepAngle - Math.atan2(d.y - cy, d.x - cx)) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+        const diff = ((radarAngle - Math.atan2(d.y - cy, d.x - cx)) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
         if (diff < 0.12) d.a = 0.85;
-        d.a *= 0.96;
+        d.a *= 0.985;
         if (d.a > 0.02) {
           ctx.beginPath();
-          ctx.arc(d.x, d.y, 2, 0, Math.PI * 2);
+          ctx.arc(d.x, d.y, 2.5, 0, Math.PI * 2);
           ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${d.a})`;
           ctx.fill();
         }
