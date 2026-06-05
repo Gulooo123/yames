@@ -2,41 +2,44 @@ import { useEffect, useRef } from "react";
 import type { BeatEvent } from "../../../types";
 import { getAccentColor, hexToRgb } from "./helpers";
 
+interface Dot {
+  x: number;
+  y: number;
+  a: number; // current alpha (0 when unlit, decays after sweep)
+}
+
 /**
- * Clock-sweep zen effect. A radius line rotates around the center, one full
- * revolution per measure. On each beat we update the *target* angle to that
- * beat's position on the clock face and smoothly chase it with exponential
- * easing — this guarantees forward-only motion even across tempo changes.
+ * Sweep zen effect — a radar scan line rotates from center out to screen edges.
+ * 50 scatter dots are placed randomly; each lights up (alpha 0.85) when the
+ * sweep passes through it and then fades out over ~30 frames.
  *
- * Glow intensity spikes on downbeats and decays each frame so accents look
- * percussive without breaking the smooth-rotation illusion.
+ * Rotation speed scales with live BPM via a sqrt curve clamped to [0.5×, 1.75×]
+ * so tempo changes feel responsive without becoming dizzying at high BPM.
+ * Live BPM is derived from beat intervals with EMA smoothing.
  */
-export function SweepEffect({ currentBeat, isPlaying, activeTab: _activeTab, beatsPerMeasure }: { currentBeat: BeatEvent | null; isPlaying: boolean; activeTab: "beat" | "drill"; beatsPerMeasure: number }) {
+export function SweepEffect({ currentBeat, isPlaying, activeTab: _activeTab, beatsPerMeasure: _beatsPerMeasure }: { currentBeat: BeatEvent | null; isPlaying: boolean; activeTab: "beat" | "drill"; beatsPerMeasure: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef(0);
+  const sweepAngleRef = useRef(0);
+  const dotsRef = useRef<Dot[]>([]);
   const prevBeatRef = useRef(-1);
-  const angleRef = useRef(-Math.PI / 2);
-  const targetAngleRef = useRef(-Math.PI / 2);
-  const glowRef = useRef(0);
+  const lastBeatTimeRef = useRef(0);
+  const liveBpmRef = useRef(120);
 
+  // BPM measurement via beat interval
   useEffect(() => {
     if (!isPlaying || !currentBeat) return;
     if (currentBeat.beat === prevBeatRef.current) return;
     prevBeatRef.current = currentBeat.beat;
 
-    // Always advance forward — compute the next target as the smallest forward step
-    const beatInMeasure = currentBeat.beat % beatsPerMeasure;
-    const beatAngle = -Math.PI / 2 + (beatInMeasure / beatsPerMeasure) * Math.PI * 2;
-
-    // Normalize current target to find forward distance
-    const currentNorm = targetAngleRef.current % (Math.PI * 2);
-    let forwardDiff = beatAngle - currentNorm;
-    // Ensure always moves forward (clockwise)
-    if (forwardDiff <= 0.01) forwardDiff += Math.PI * 2;
-    targetAngleRef.current += forwardDiff;
-
-    glowRef.current = currentBeat.isDownbeat ? 1.0 : 0.5;
-  }, [currentBeat, isPlaying, beatsPerMeasure]);
+    const now = performance.now();
+    if (lastBeatTimeRef.current > 0) {
+      const interval = now - lastBeatTimeRef.current;
+      const bpm = 60000 / interval;
+      liveBpmRef.current = liveBpmRef.current * 0.75 + bpm * 0.25;
+    }
+    lastBeatTimeRef.current = now;
+  }, [currentBeat, isPlaying]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -44,81 +47,84 @@ export function SweepEffect({ currentBeat, isPlaying, activeTab: _activeTab, bea
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const resize = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; };
+    const initDots = () => {
+      dotsRef.current = Array.from({ length: 50 }, () => ({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        a: 0,
+      }));
+    };
+
+    const resize = () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      initDots();
+    };
     resize();
     window.addEventListener("resize", resize);
+
+    const BASE_INCREMENT = 0.018;
 
     const animate = () => {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const cx = canvas.width / 2;
       const cy = canvas.height / 2;
+      const maxR = Math.sqrt(cx * cx + cy * cy);
       const accent = getAccentColor();
       const { r, g, b } = hexToRgb(accent);
-      const radius = Math.min(canvas.width, canvas.height) * 0.32;
 
-      // Smooth interpolation — always forward
-      angleRef.current += (targetAngleRef.current - angleRef.current) * 0.15;
+      // sqrt-clamped speed multiplier
+      const speedMult = Math.max(0.5, Math.min(1.75, Math.pow(liveBpmRef.current / 120, 0.5)));
+      const inc = BASE_INCREMENT * speedMult;
+      sweepAngleRef.current += inc;
+      const sweepAngle = sweepAngleRef.current;
 
-      const angle = angleRef.current;
-      const endX = cx + Math.cos(angle) * radius;
-      const endY = cy + Math.sin(angle) * radius;
-
-      // Trail arc
-      const trailLength = Math.PI * 0.3;
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, angle - trailLength, angle);
-      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.1)`;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      // Main line
-      const lineAlpha = 0.2 + glowRef.current * 0.4;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(endX, endY);
-      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${lineAlpha})`;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-
-      // Dot at end
-      ctx.beginPath();
-      ctx.arc(endX, endY, 3.5 + glowRef.current * 3, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.4 + glowRef.current * 0.5})`;
-      ctx.fill();
-
-      // Glow on accent
-      if (glowRef.current > 0.05) {
+      // Sweep trail (35 ghost lines fading behind the active sweep)
+      for (let t = 1; t < 35; t++) {
+        const ang = sweepAngle - t * inc;
         ctx.beginPath();
-        ctx.arc(endX, endY, 12 + glowRef.current * 10, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${glowRef.current * 0.15})`;
-        ctx.fill();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + Math.cos(ang) * maxR, cy + Math.sin(ang) * maxR);
+        ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${0.012 * (1 - t / 35)})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
       }
 
-      // Subtle circle outline
+      // Active scan line
       ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.04)`;
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(sweepAngle) * maxR, cy + Math.sin(sweepAngle) * maxR);
+      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.55)`;
       ctx.lineWidth = 1;
       ctx.stroke();
 
-      // Beat markers
-      for (let i = 0; i < beatsPerMeasure; i++) {
-        const a = -Math.PI / 2 + (i / beatsPerMeasure) * Math.PI * 2;
-        const mx = cx + Math.cos(a) * radius;
-        const my = cy + Math.sin(a) * radius;
-        ctx.beginPath();
-        ctx.arc(mx, my, i === 0 ? 3 : 2, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${i === 0 ? 0.3 : 0.1})`;
-        ctx.fill();
+      // Scatter dots — light up when swept, then fade
+      for (const d of dotsRef.current) {
+        const diff = ((sweepAngle - Math.atan2(d.y - cy, d.x - cx)) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+        if (diff < 0.12) d.a = 0.85;
+        d.a *= 0.96;
+        if (d.a > 0.02) {
+          ctx.beginPath();
+          ctx.arc(d.x, d.y, 2, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${d.a})`;
+          ctx.fill();
+        }
       }
 
-      glowRef.current *= 0.92;
       rafRef.current = requestAnimationFrame(animate);
     };
 
     rafRef.current = requestAnimationFrame(animate);
-    return () => { cancelAnimationFrame(rafRef.current); window.removeEventListener("resize", resize); };
-  }, [beatsPerMeasure]);
+    return () => {
+      cancelAnimationFrame(rafRef.current);
+      window.removeEventListener("resize", resize);
+    };
+  }, []);
 
-  return <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, zIndex: 0, pointerEvents: "none" }} />;
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{ position: "absolute", inset: 0, zIndex: 0, pointerEvents: "none" }}
+    />
+  );
 }

@@ -134,8 +134,8 @@
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.1);
-  border: 2px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.18);
+  border: 2px solid rgba(255, 255, 255, 0.3);
   transition: all 0.08s ease;
 }
 
@@ -487,30 +487,7 @@
   transform: translateY(-50%) translateX(0);
 }
 
-/* ─── Pulse ──────────────────────────────────────── */
-.zen-pulse {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background: radial-gradient(
-    ellipse at center,
-    color-mix(in srgb, var(--accent) 25%, transparent) 0%,
-    transparent 60%
-  );
-  animation: zenPulseBreathe 4s ease-in-out infinite;
-}
-
-@keyframes zenPulseBreathe {
-  0%, 100% {
-    opacity: 0.6;
-    transform: scale(0.85);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.2);
-  }
-}
+/* ─── Pulse — canvas-based, no CSS class needed ─── */
 
 
 

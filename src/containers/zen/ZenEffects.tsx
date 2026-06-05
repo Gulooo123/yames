@@ -24,7 +24,7 @@ interface ZenEffectsProps {
  */
 export function ZenEffects({ style, currentBeat, isPlaying, activeTab, beatsPerMeasure }: ZenEffectsProps) {
   if (style === "focus") return null;
-  if (style === "pulse") return <PulseEffect />;
+  if (style === "pulse") return <PulseEffect currentBeat={currentBeat} isPlaying={isPlaying} />;
   if (style === "gravity") return <GravityEffect currentBeat={currentBeat} isPlaying={isPlaying} activeTab={activeTab} />;
   if (style === "sweep") return <SweepEffect currentBeat={currentBeat} isPlaying={isPlaying} activeTab={activeTab} beatsPerMeasure={beatsPerMeasure} />;
   if (style === "cosmos") return <CosmosEffect currentBeat={currentBeat} isPlaying={isPlaying} />;

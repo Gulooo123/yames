@@ -570,7 +570,9 @@ body {
   padding-bottom: 50px;
 }
 
+
 .preview-frame {
+  position: relative;
   width: 100%;
   border-radius: 14px;
   overflow: hidden;
@@ -583,9 +585,8 @@ body {
 
 .preview-frame.zen-active {
   box-shadow:
-    0 24px 80px color-mix(in srgb, var(--accent) 50%, transparent),
-    0 0 48px color-mix(in srgb, var(--accent) 22%, transparent),
-    0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+    0 12px 40px color-mix(in srgb, var(--accent) 25%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .preview-frame > img {
@@ -619,7 +620,7 @@ body {
 }
 
 /* ─── Tab selector ─── */
-/* ─── Zen style picker (icon swatches, 2 rows) ─── */
+/* ─── Zen style picker — below tabs, visible when zen tab is active ─── */
 .zen-style-selector {
   display: none;
   flex-direction: column;
@@ -817,6 +818,7 @@ body {
 #particles-canvas.active {
   opacity: 1;
 }
+
 
 .page {
   position: relative;
@@ -1240,4 +1242,150 @@ body {
   .platforms {
     flex-wrap: wrap;
   }
+}
+
+/* ─── Zen live preview component ─── */
+.zen-live-preview {
+  display: none;
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  border-radius: 14px;
+  background: radial-gradient(ellipse at center, #0d0d1a 0%, #000000 100%);
+  overflow: hidden;
+  user-select: none;
+  z-index: 1;
+}
+
+#zen-canvas {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  mix-blend-mode: screen;
+  filter: brightness(3);
+}
+
+/* In zen mode the full-page canvas is a subtle hint; zen canvas amplifies the focal area */
+#particles-canvas.active.zen {
+  opacity: 0.5;
+}
+
+.zen-live-preview.active {
+  display: flex;
+}
+
+.zen-preview-inner {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.zen-bpm-number {
+  font-size: clamp(4.5rem, 9vw, 9rem);
+  font-family: var(--font-family);
+  font-weight: var(--font-weight-theme, 800);
+  letter-spacing: -0.02em;
+  line-height: 1;
+  color: #fff;
+  animation: zen-bpm-breathe 2s ease-in-out infinite;
+  font-variant-numeric: tabular-nums;
+}
+
+.zen-bpm-label {
+  font-size: 0.85rem;
+  font-family: var(--font-family);
+  font-weight: var(--font-weight-theme, 500);
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+@keyframes zen-bpm-breathe {
+  0%, 100% { opacity: 0.8; transform: scale(0.98); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+/* ─── Zen beat dots ─── */
+.zen-beats {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.zen-beat-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
+
+.zen-beat {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  border: 1.5px solid rgba(255, 255, 255, 0.3);
+}
+
+.zen-sub-dots {
+  display: flex;
+  gap: 2px;
+}
+
+.zen-sub-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* ─── Zen preview bottom controls (visual-only) ─── */
+.zen-preview-controls {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.zen-ctrl-btn {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.45);
+  border-radius: 7px;
+  padding: 4px 9px;
+  font-size: 0.7rem;
+  font-family: inherit;
+  letter-spacing: 0.02em;
+  min-width: 28px;
+  text-align: center;
+}
+
+.zen-ctrl-sub {
+  color: rgba(255, 255, 255, 0.35);
+  min-width: 32px;
+}
+
+.zen-play-btn {
+  background: var(--accent);
+  border: none;
+  color: #000;
+  border-radius: 50%;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }

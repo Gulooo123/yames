@@ -253,7 +253,7 @@
       as="style"
     />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Comfortaa:wght@400;600;700&family=Nunito:wght@400;600;700;800&family=Quicksand:wght@400;500;600;700&family=Orbitron:wght@400;500;700;900&family=Rajdhani:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
     <link rel="preload" href="style.css" as="style" />
@@ -278,16 +278,16 @@
 
           <div class="features">
             <p class="feature">
+              <strong>Speed drills & presets.</strong> Auto-ramping BPM, saved
+              exercise configs, always-on-top widget over your DAW.
+            </p>
+            <p class="feature">
               <strong>Hands stay on the instrument.</strong> MIDI footswitches,
               controllers, and keyboard shortcuts — practice without breaking flow.
             </p>
             <p class="feature">
               <strong>Zen mode.</strong> Fullscreen immersive visuals that
               respond to the beat. No distractions.
-            </p>
-            <p class="feature">
-              <strong>Speed drills & presets.</strong> Auto-ramping BPM, saved
-              exercise configs, always-on-top widget over your DAW.
             </p>
             <p class="feature">
               <strong>Practice coach.</strong> AI-powered live feedback,
@@ -401,6 +401,62 @@
                   src="img/metronome/aurora-metronome.png"
                   alt="App screenshot"
                 />
+                <div id="zen-live-preview" class="zen-live-preview">
+                  <canvas id="zen-canvas"></canvas>
+                  <div class="zen-preview-inner">
+                    <div class="zen-bpm-number">120</div>
+                    <div class="zen-bpm-label">BPM</div>
+                    <div class="zen-beats">
+                      <div class="zen-beat-group">
+                        <div class="zen-beat"></div>
+                        <div class="zen-sub-dots">
+                          <div class="zen-sub-dot"></div>
+                          <div class="zen-sub-dot"></div>
+                          <div class="zen-sub-dot"></div>
+                          <div class="zen-sub-dot"></div>
+                        </div>
+                      </div>
+                      <div class="zen-beat-group">
+                        <div class="zen-beat"></div>
+                        <div class="zen-sub-dots">
+                          <div class="zen-sub-dot"></div>
+                          <div class="zen-sub-dot"></div>
+                          <div class="zen-sub-dot"></div>
+                          <div class="zen-sub-dot"></div>
+                        </div>
+                      </div>
+                      <div class="zen-beat-group">
+                        <div class="zen-beat"></div>
+                        <div class="zen-sub-dots">
+                          <div class="zen-sub-dot"></div>
+                          <div class="zen-sub-dot"></div>
+                          <div class="zen-sub-dot"></div>
+                          <div class="zen-sub-dot"></div>
+                        </div>
+                      </div>
+                      <div class="zen-beat-group">
+                        <div class="zen-beat"></div>
+                        <div class="zen-sub-dots">
+                          <div class="zen-sub-dot"></div>
+                          <div class="zen-sub-dot"></div>
+                          <div class="zen-sub-dot"></div>
+                          <div class="zen-sub-dot"></div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="zen-preview-controls">
+                    <button class="zen-ctrl-btn">−5</button>
+                    <button class="zen-ctrl-btn">−1</button>
+                    <button class="zen-ctrl-btn zen-ctrl-sub">♩</button>
+                    <button class="zen-play-btn" aria-label="Play">
+                      <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor"><path d="M4 2.5v15l13-7.5z"/></svg>
+                    </button>
+                    <button class="zen-ctrl-btn zen-ctrl-sub">4/4</button>
+                    <button class="zen-ctrl-btn">+1</button>
+                    <button class="zen-ctrl-btn">+5</button>
+                  </div>
+                </div>
               </div>
               <div class="widget-overlay" id="widget-overlay">
                 <img
@@ -419,8 +475,8 @@
             <button class="tab-btn" data-tab="zen">Zen</button>
           </div>
 
-          <!-- Zen style picker — visible only when Zen tab is active -->
-          <div class="zen-style-selector" id="zen-style-selector">
+          <!-- Zen style picker (visible when Zen tab is active) -->
+          <div id="zen-style-selector" class="zen-style-selector">
             <div class="swatch-row">
               <button class="zen-swatch active" data-style="cosmos" data-tooltip="Cosmos">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="6" cy="8" r="1.5"/><circle cx="18" cy="6" r="1"/><circle cx="12" cy="16" r="1.5"/><circle cx="4" cy="18" r="1"/><circle cx="19" cy="15" r="1.2"/></svg>
@@ -634,6 +690,10 @@
       let currentTab = localStorage.getItem("yames-tab") || "metronome";
       let currentTheme = localStorage.getItem("yames-theme") || "aurora";
       let currentZenStyle = localStorage.getItem("yames-zen-style") || "cosmos";
+      let zenMode = false;
+      let currentAnim = 'none'; // token prevents zombie animation loops
+      let animCx = 0, animCy = 0; // center of zen preview in viewport coords
+      let amplifyId = null;
 
       // Theme accent colors (from --c2 of each swatch)
       const themeAccents = {
@@ -672,17 +732,33 @@
         "prism",
       ]);
 
+      const themeFonts = {
+        mono:      { family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", weight: "400" },
+        obsidian:  { family: "'SF Mono', 'Fira Code', 'JetBrains Mono', monospace",               weight: "400" },
+        velvet:    { family: "'Comfortaa', 'Nunito', system-ui, sans-serif",                       weight: "600" },
+        neon:      { family: "'Orbitron', 'Rajdhani', 'Exo 2', monospace",                         weight: "500" },
+        aurora:    { family: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",             weight: "500" },
+        ivory:     { family: "'Georgia', 'Palatino', 'Times New Roman', serif",                   weight: "500" },
+        arctic:    { family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", weight: "500" },
+        sand:      { family: "'Avenir Next', 'Avenir', -apple-system, sans-serif",                weight: "500" },
+        lavender:  { family: "'Quicksand', 'Nunito', system-ui, sans-serif",                       weight: "600" },
+        prism:     { family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", weight: "500" },
+      };
+
       function setAccent(theme) {
         const root = document.documentElement;
         const accent = themeAccents[theme] || "#f59e0b";
         const bg = themeBgs[theme] || "#0a0a0f";
         const isLight = lightThemes.has(theme);
+        const tf = themeFonts[theme] || { family: "'Inter', sans-serif", weight: "500" };
 
         root.style.setProperty("--accent", accent);
         root.style.setProperty("--accent-hover", accent);
         root.style.setProperty("--bg", bg);
         root.style.setProperty("--text", isLight ? "#1a1a2e" : "#f0f0f5");
         root.style.setProperty("--text-dim", isLight ? "#555570" : "#8888a0");
+        root.style.setProperty("--font-family", tf.family);
+        root.style.setProperty("--font-weight-theme", tf.weight);
 
         // Button text: dark on light accents, dark on all (accent is the bg)
         const btn = document.getElementById("download-btn");
@@ -722,18 +798,7 @@
           lavender: "img/drill/lavender-drill.png",
           prism: "img/drill/prism-drill.png",
         },
-        zen: {
-          obsidian: { focus: "img/zen/obsidian-focus.png", pulse: "img/zen/obsidian-pulse.png", gravity: "img/zen/obsidian-gravity.png", sweep: "img/zen/obsidian-sweep.png", cosmos: "img/zen/obsidian-cosmos.png", warp: "img/zen/obsidian-warp.png", rain: "img/zen/obsidian-rain.png" },
-          mono:     { focus: "img/zen/mono-focus.png",     pulse: "img/zen/mono-pulse.png",     gravity: "img/zen/mono-gravity.png",     sweep: "img/zen/mono-sweep.png",     cosmos: "img/zen/mono-cosmos.png",     warp: "img/zen/mono-warp.png",     rain: "img/zen/mono-rain.png" },
-          velvet:   { focus: "img/zen/velvet-focus.png",   pulse: "img/zen/velvet-pulse.png",   gravity: "img/zen/velvet-gravity.png",   sweep: "img/zen/velvet-sweep.png",   cosmos: "img/zen/velvet-cosmos.png",   warp: "img/zen/velvet-warp.png",   rain: "img/zen/velvet-rain.png" },
-          neon:     { focus: "img/zen/neon-focus.png",     pulse: "img/zen/neon-pulse.png",     gravity: "img/zen/neon-gravity.png",     sweep: "img/zen/neon-sweep.png",     cosmos: "img/zen/neon-cosmos.png",     warp: "img/zen/neon-warp.png",     rain: "img/zen/neon-rain.png" },
-          aurora:   { focus: "img/zen/aurora-focus.png",   pulse: "img/zen/aurora-pulse.png",   gravity: "img/zen/aurora-gravity.png",   sweep: "img/zen/aurora-sweep.png",   cosmos: "img/zen/aurora-cosmos.png",   warp: "img/zen/aurora-warp.png",   rain: "img/zen/aurora-rain.png" },
-          ivory:    { focus: "img/zen/ivory-focus.png",    pulse: "img/zen/ivory-pulse.png",    gravity: "img/zen/ivory-gravity.png",    sweep: "img/zen/ivory-sweep.png",    cosmos: "img/zen/ivory-cosmos.png",    warp: "img/zen/ivory-warp.png",    rain: "img/zen/ivory-rain.png" },
-          arctic:   { focus: "img/zen/arctic-focus.png",   pulse: "img/zen/arctic-pulse.png",   gravity: "img/zen/arctic-gravity.png",   sweep: "img/zen/arctic-sweep.png",   cosmos: "img/zen/arctic-cosmos.png",   warp: "img/zen/arctic-warp.png",   rain: "img/zen/arctic-rain.png" },
-          sand:     { focus: "img/zen/sand-focus.png",     pulse: "img/zen/sand-pulse.png",     gravity: "img/zen/sand-gravity.png",     sweep: "img/zen/sand-sweep.png",     cosmos: "img/zen/sand-cosmos.png",     warp: "img/zen/sand-warp.png",     rain: "img/zen/sand-rain.png" },
-          lavender: { focus: "img/zen/lavender-focus.png", pulse: "img/zen/lavender-pulse.png", gravity: "img/zen/lavender-gravity.png", sweep: "img/zen/lavender-sweep.png", cosmos: "img/zen/lavender-cosmos.png", warp: "img/zen/lavender-warp.png", rain: "img/zen/lavender-rain.png" },
-          prism:    { focus: "img/zen/prism-focus.png",    pulse: "img/zen/prism-pulse.png",    gravity: "img/zen/prism-gravity.png",    sweep: "img/zen/prism-sweep.png",    cosmos: "img/zen/prism-cosmos.png",    warp: "img/zen/prism-warp.png",    rain: "img/zen/prism-rain.png" },
-        },
+        zen: {},
       };
 
       // Widget images available
@@ -797,36 +862,47 @@
 
       function updatePreview() {
         updateSwatches();
-        let src;
-        if (currentTab === "zen") {
-          const zenStyles = images.zen[currentTheme];
-          src = zenStyles && zenStyles[currentZenStyle];
+        const isZen = currentTab === "zen";
+        const zenLive = document.getElementById("zen-live-preview");
+        if (isZen) {
+          zenMode = true;
+          previewImg.style.visibility = "hidden";
+          if (zenLive) zenLive.classList.add("active");
+          startZenAnim(currentZenStyle, themeAccents[currentTheme] || "#00d4ff");
         } else {
+          if (zenMode) {
+            zenMode = false;
+            stopZenAnim();
+            // Restore theme-based particle effect if applicable
+            const tc = particleThemes[currentTheme];
+            if (tc) startParticles(tc);
+          }
+          if (zenLive) zenLive.classList.remove("active");
+          previewImg.style.visibility = "";
           const tabImages = images[currentTab];
-          src = tabImages && tabImages[currentTheme];
-        }
-        if (src) {
-          previewImg.src = src;
-          previewImg.style.opacity = "1";
-        } else {
-          // Fallback: show any available image for this theme, or keep current
-          for (const tab of ["metronome", "drill"]) {
-            if (images[tab] && images[tab][currentTheme]) {
-              previewImg.src = images[tab][currentTheme];
-              previewImg.style.opacity = "0.6";
-              break;
+          const src = tabImages && tabImages[currentTheme];
+          if (src) {
+            previewImg.src = src;
+            previewImg.style.opacity = "1";
+          } else {
+            for (const tab of ["metronome", "drill"]) {
+              if (images[tab] && images[tab][currentTheme]) {
+                previewImg.src = images[tab][currentTheme];
+                previewImg.style.opacity = "0.6";
+                break;
+              }
             }
           }
         }
         updateWidget();
-        // Show/hide zen style selector + zen glow on frame + hide theme swatches in zen
-        const isZen = currentTab === "zen";
-        const zenSel = document.getElementById("zen-style-selector");
-        if (zenSel) zenSel.classList.toggle("visible", isZen);
         const previewFrame = document.querySelector(".preview-frame");
         if (previewFrame) previewFrame.classList.toggle("zen-active", isZen);
+        const previewWrapper = document.querySelector(".preview-wrapper");
+        if (previewWrapper) previewWrapper.classList.toggle("zen-active", isZen);
         const themeSwatchContainer = document.querySelector(".theme-swatches");
         if (themeSwatchContainer) themeSwatchContainer.classList.toggle("zen-hidden", isZen);
+        const zenSel = document.getElementById("zen-style-selector");
+        if (zenSel) zenSel.classList.toggle("visible", isZen);
       }
 
       // Preload all images for instant theme/tab switching.
@@ -893,15 +969,27 @@
         b.classList.toggle("active", b.dataset.tab === currentTab),
       );
       setAccent(currentTheme);
-      updatePreview();
-      updateWidget();
 
       // ─── Particles effect for Aurora & Prism ───
       const canvas = document.getElementById("particles-canvas");
       const ctx = canvas.getContext("2d");
+      // ─── Contained zen canvas (inside zen-live-preview) ───
+      const zenCanvas = document.getElementById("zen-canvas");
+      const zenCtx = zenCanvas.getContext("2d");
+      function resizeZenCanvas() {
+        const r = document.getElementById("zen-live-preview")?.getBoundingClientRect();
+        if (r && r.width > 0) { zenCanvas.width = r.width; zenCanvas.height = r.height; }
+      }
       let particles = [];
       let animId = null;
       let particleColor = "#00d4ff";
+      // Zen animation state
+      let rainDrops = [];
+      let warpAngle = 0;
+      let gravDots = [];
+      let pulseRings = [], pulseTick = 0;
+      let sweepAngle = 0, sweepDots = [];
+      let focusPulse = 0;
 
       function resizeCanvas() {
         canvas.width = window.innerWidth;
@@ -909,11 +997,12 @@
       }
       resizeCanvas();
       window.addEventListener("resize", resizeCanvas);
+      window.addEventListener("resize", resizeZenCanvas);
 
-      function createParticle() {
+      function createParticle(w, h) {
         return {
-          x: Math.random() * canvas.width,
-          y: Math.random() * canvas.height,
+          x: Math.random() * w,
+          y: Math.random() * h,
           vx: (Math.random() - 0.5) * 0.4,
           vy: (Math.random() - 0.5) * 0.4,
           size: Math.random() * 2.5 + 0.5,
@@ -922,57 +1011,55 @@
         };
       }
 
-      function initParticles() {
+      function initParticles(w, h) {
+        w = w || canvas.width; h = h || canvas.height;
         particles = [];
-        for (let i = 0; i < 80; i++) {
-          particles.push(createParticle());
-        }
+        for (let i = 0; i < 80; i++) particles.push(createParticle(w, h));
       }
 
       function drawParticles() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const _ctx = ctx;
+        const _w = canvas.width;
+        const _h = canvas.height;
+        _ctx.clearRect(0, 0, _w, _h);
         for (const p of particles) {
           p.x += p.vx;
           p.y += p.vy;
           p.pulse += 0.02;
-
-          // Wrap around
-          if (p.x < 0) p.x = canvas.width;
-          if (p.x > canvas.width) p.x = 0;
-          if (p.y < 0) p.y = canvas.height;
-          if (p.y > canvas.height) p.y = 0;
-
+          if (p.x < 0) p.x = _w;
+          if (p.x > _w) p.x = 0;
+          if (p.y < 0) p.y = _h;
+          if (p.y > _h) p.y = 0;
           const alpha = p.alpha * (0.6 + 0.4 * Math.sin(p.pulse));
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-          ctx.fillStyle = particleColor;
-          ctx.globalAlpha = alpha;
-          ctx.fill();
+          _ctx.beginPath();
+          _ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+          _ctx.fillStyle = particleColor;
+          _ctx.globalAlpha = alpha;
+          _ctx.fill();
         }
-        ctx.globalAlpha = 1;
-
-        // Draw connections
+        _ctx.globalAlpha = 1;
         for (let i = 0; i < particles.length; i++) {
           for (let j = i + 1; j < particles.length; j++) {
             const dx = particles[i].x - particles[j].x;
             const dy = particles[i].y - particles[j].y;
             const dist = Math.sqrt(dx * dx + dy * dy);
             if (dist < 120) {
-              ctx.beginPath();
-              ctx.moveTo(particles[i].x, particles[i].y);
-              ctx.lineTo(particles[j].x, particles[j].y);
-              ctx.strokeStyle = particleColor;
-              ctx.globalAlpha = 0.08 * (1 - dist / 120);
-              ctx.lineWidth = 0.5;
-              ctx.stroke();
+              _ctx.beginPath();
+              _ctx.moveTo(particles[i].x, particles[i].y);
+              _ctx.lineTo(particles[j].x, particles[j].y);
+              _ctx.strokeStyle = particleColor;
+              _ctx.globalAlpha = 0.08 * (1 - dist / 120);
+              _ctx.lineWidth = 0.5;
+              _ctx.stroke();
             }
           }
         }
-        ctx.globalAlpha = 1;
-        animId = requestAnimationFrame(drawParticles);
+        _ctx.globalAlpha = 1;
+        if (currentAnim === 'cosmos' || currentAnim === 'particles') animId = requestAnimationFrame(drawParticles);
       }
 
       function startParticles(color) {
+        currentAnim = 'particles';
         particleColor = color;
         canvas.classList.add("active");
         if (!animId) {
@@ -982,6 +1069,7 @@
       }
 
       function stopParticles() {
+        currentAnim = 'none';
         canvas.classList.remove("active");
         if (animId) {
           cancelAnimationFrame(animId);
@@ -989,10 +1077,267 @@
         }
       }
 
+      // ─── Zen animation functions ───
+
+      function initRain() {
+        rainDrops = [];
+        for (let i = 0; i < 80; i++) {
+          const depth = Math.random();
+          const ds = 0.3 + depth * 0.7;
+          rainDrops.push({
+            x: Math.random() * canvas.width,
+            y: Math.random() * canvas.height,
+            speed: (3 + depth * 7) * ds,
+            length: (12 + depth * 25) * ds,
+            opacity: 0.1 + depth * 0.35,
+            depth,
+          });
+        }
+      }
+      function drawRain() {
+        ctx.fillStyle = "rgba(0,0,0,0.18)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        for (const d of rainDrops) {
+          d.y += d.speed;
+          if (d.y > canvas.height * (0.55 + d.depth * 0.4)) {
+            d.y = -d.length;
+            d.x = Math.random() * canvas.width;
+          }
+          ctx.beginPath();
+          ctx.moveTo(d.x, d.y);
+          ctx.lineTo(d.x + Math.sin(0.04) * d.length, d.y - d.length);
+          ctx.strokeStyle = particleColor;
+          ctx.globalAlpha = d.opacity;
+          ctx.lineWidth = 0.5 + d.depth * 1.2;
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+        if (currentAnim === 'rain') animId = requestAnimationFrame(drawRain);
+      }
+
+      function drawWarp() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const cx = animCx, cy = animCy;
+        warpAngle += 0.005;
+        const maxR = Math.hypot(Math.max(cx, canvas.width - cx), Math.max(cy, canvas.height - cy)) + 60;
+        for (let r = 50; r < maxR; r += 55) {
+          const tilt = warpAngle + (r / maxR) * Math.PI * 0.5;
+          ctx.beginPath();
+          for (let i = 0; i <= 4; i++) {
+            const a = (i / 4) * Math.PI * 2 + tilt;
+            const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          ctx.strokeStyle = particleColor;
+          ctx.globalAlpha = 0.05 + 0.18 * (1 - r / maxR);
+          ctx.lineWidth = 0.8;
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+        if (currentAnim === 'warp') animId = requestAnimationFrame(drawWarp);
+      }
+
+      function initGravity() {
+        gravDots = [];
+        const cx = animCx, cy = animCy;
+        const maxR = Math.hypot(Math.max(cx, canvas.width - cx), Math.max(cy, canvas.height - cy));
+        for (let i = 0; i < 150; i++) {
+          gravDots.push({
+            angle: Math.random() * Math.PI * 2,
+            r: 30 + Math.random() * maxR,
+            speed: (0.003 + Math.random() * 0.009) * (Math.random() < 0.5 ? 1 : -1),
+            size: 1 + Math.random() * 2.5,
+            alpha: 0.15 + Math.random() * 0.5,
+          });
+        }
+      }
+      function drawGravity() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const cx = animCx, cy = animCy;
+        for (const d of gravDots) {
+          d.angle += d.speed;
+          ctx.beginPath();
+          ctx.arc(cx + Math.cos(d.angle) * d.r, cy + Math.sin(d.angle) * d.r, d.size, 0, Math.PI * 2);
+          ctx.fillStyle = particleColor;
+          ctx.globalAlpha = d.alpha;
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        if (currentAnim === 'gravity') animId = requestAnimationFrame(drawGravity);
+      }
+
+      function initPulse() {
+        const cx = animCx, cy = animCy;
+        const maxR = Math.hypot(Math.max(cx, canvas.width - cx), Math.max(cy, canvas.height - cy));
+        pulseRings = Array.from({ length: 5 }, (_, i) => ({
+          r: (i / 5) * maxR * 0.75,
+          a0: 0.65,
+        }));
+        pulseTick = 0;
+      }
+      function drawPulse() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const cx = animCx, cy = animCy;
+        const maxR = Math.hypot(Math.max(cx, canvas.width - cx), Math.max(cy, canvas.height - cy));
+        pulseTick++;
+        if (pulseTick % 55 === 0) pulseRings.push({ r: 0, a0: 0.65 });
+        for (let i = pulseRings.length - 1; i >= 0; i--) {
+          const ring = pulseRings[i];
+          ring.r += 3.0;
+          if (ring.r >= maxR) { pulseRings.splice(i, 1); continue; }
+          const alpha = ring.a0 * Math.pow(1 - ring.r / maxR, 1.5);
+          ctx.beginPath();
+          ctx.arc(cx, cy, ring.r, 0, Math.PI * 2);
+          ctx.strokeStyle = particleColor;
+          ctx.globalAlpha = alpha;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+        if (currentAnim === 'pulse') animId = requestAnimationFrame(drawPulse);
+      }
+
+      function initSweep() {
+        sweepAngle = 0;
+        sweepDots = [];
+        for (let i = 0; i < 50; i++) {
+          sweepDots.push({ x: Math.random() * canvas.width, y: Math.random() * canvas.height, a: 0 });
+        }
+      }
+      function drawSweep() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const cx = animCx, cy = animCy;
+        const maxR = Math.hypot(Math.max(cx, canvas.width - cx), Math.max(cy, canvas.height - cy));
+        sweepAngle += 0.018;
+        // Trail
+        for (let t = 1; t < 35; t++) {
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          const ang = sweepAngle - t * 0.018;
+          ctx.lineTo(cx + Math.cos(ang) * maxR, cy + Math.sin(ang) * maxR);
+          ctx.strokeStyle = particleColor;
+          ctx.globalAlpha = 0.012 * (1 - t / 35);
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+        // Active line
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + Math.cos(sweepAngle) * maxR, cy + Math.sin(sweepAngle) * maxR);
+        ctx.strokeStyle = particleColor;
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        // Lit dots
+        for (const d of sweepDots) {
+          const diff = ((sweepAngle - Math.atan2(d.y - cy, d.x - cx)) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+          if (diff < 0.12) d.a = 0.85;
+          d.a *= 0.96;
+          if (d.a > 0.02) {
+            ctx.beginPath();
+            ctx.arc(d.x, d.y, 2, 0, Math.PI * 2);
+            ctx.fillStyle = particleColor;
+            ctx.globalAlpha = d.a;
+            ctx.fill();
+          }
+        }
+        ctx.globalAlpha = 1;
+        if (currentAnim === 'sweep') animId = requestAnimationFrame(drawSweep);
+      }
+
+      function drawFocus() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const cx = animCx, cy = animCy;
+        focusPulse += 0.025;
+        const s = 0.6 + 0.4 * Math.sin(focusPulse);
+        // Outer glow
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, 130 * s);
+        g.addColorStop(0, particleColor + '33');
+        g.addColorStop(1, particleColor + '00');
+        ctx.beginPath();
+        ctx.arc(cx, cy, 130 * s, 0, Math.PI * 2);
+        ctx.fillStyle = g;
+        ctx.globalAlpha = s;
+        ctx.fill();
+        // Core
+        ctx.beginPath();
+        ctx.arc(cx, cy, 7 * s, 0, Math.PI * 2);
+        ctx.fillStyle = particleColor;
+        ctx.globalAlpha = 0.9;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        if (currentAnim === 'focus') animId = requestAnimationFrame(drawFocus);
+      }
+
+      function startZenAnim(style, color) {
+        currentAnim = style;
+        particleColor = color;
+        if (animId) { cancelAnimationFrame(animId); animId = null; }
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        canvas.classList.add("active");
+        canvas.classList.add("zen");
+        updateAnimCenter();
+        resizeZenCanvas();
+        if (!amplifyId) amplifyId = requestAnimationFrame(amplifyZenArea);
+        switch (style) {
+          case 'cosmos':  initParticles(); animId = requestAnimationFrame(drawParticles); break;
+          case 'rain':    initRain();      animId = requestAnimationFrame(drawRain);      break;
+          case 'warp':    warpAngle = 0;   animId = requestAnimationFrame(drawWarp);      break;
+          case 'gravity': initGravity();   animId = requestAnimationFrame(drawGravity);   break;
+          case 'pulse':   initPulse();     animId = requestAnimationFrame(drawPulse);     break;
+          case 'sweep':   initSweep();     animId = requestAnimationFrame(drawSweep);     break;
+          case 'focus':   focusPulse = 0;  animId = requestAnimationFrame(drawFocus);     break;
+        }
+      }
+
+      function stopZenAnim() {
+        currentAnim = 'none';
+        if (animId) { cancelAnimationFrame(animId); animId = null; }
+        if (amplifyId) { cancelAnimationFrame(amplifyId); amplifyId = null; }
+        canvas.classList.remove("active");
+        canvas.classList.remove("zen");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        zenCtx.clearRect(0, 0, zenCanvas.width, zenCanvas.height);
+      }
+
+      function amplifyZenArea() {
+        const zenLive = document.getElementById("zen-live-preview");
+        if (zenLive && zenLive.classList.contains("active")) {
+          const r = zenLive.getBoundingClientRect();
+          zenCtx.clearRect(0, 0, zenCanvas.width, zenCanvas.height);
+          zenCtx.drawImage(canvas, Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), 0, 0, zenCanvas.width, zenCanvas.height);
+        }
+        amplifyId = requestAnimationFrame(amplifyZenArea);
+      }
+
+      function updateAnimCenter() {
+        const zenLive = document.getElementById("zen-live-preview");
+        if (zenLive) {
+          const r = zenLive.getBoundingClientRect();
+          animCx = r.left + r.width / 2;
+          animCy = r.top + r.height / 2;
+        }
+      }
+
+      let _animCenterPending = false;
+      function _scheduleAnimCenter() {
+        if (!_animCenterPending) {
+          _animCenterPending = true;
+          requestAnimationFrame(() => { updateAnimCenter(); _animCenterPending = false; });
+        }
+      }
+      window.addEventListener('resize', _scheduleAnimCenter);
+      window.addEventListener('scroll', _scheduleAnimCenter, { passive: true });
+
       // Integrate with theme switching
       const particleThemes = { aurora: "#00d4ff", prism: "#ff3d8a" };
 
       function updateParticles(theme) {
+        if (zenMode) {
+          // Update animation color when theme changes while zen is active
+          particleColor = themeAccents[theme] || "#00d4ff";
+          return;
+        }
         if (particleThemes[theme]) {
           startParticles(particleThemes[theme]);
         } else {
@@ -1006,6 +1351,12 @@
         _origSetAccent(theme);
         updateParticles(theme);
       };
+      // Initialize particle state for current theme on page load
+      if (currentTab !== "zen") updateParticles(currentTheme);
+      // Initialize animation center so first zen start isn't at (0,0)
+      updateAnimCenter();
+      // Initial render — called after all canvas/particle/animation state is ready
+      updatePreview();
 
       // ─── Changelog modal ───
       let changelogLoaded = false;
