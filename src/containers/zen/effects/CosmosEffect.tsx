@@ -170,6 +170,28 @@ export function CosmosEffect({ currentBeat, isPlaying }: { currentBeat: BeatEven
         }
       }
 
+      // Connection lines between nearby particles
+      const ps = particlesRef.current;
+      const maxDist = 150;
+      for (let i = 0; i < ps.length; i++) {
+        for (let j = i + 1; j < ps.length; j++) {
+          const dx = ps[i].x - ps[j].x;
+          const dy = ps[i].y - ps[j].y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < maxDist) {
+            const avgHue = (ps[i].hue + ps[j].hue) / 2;
+            const depthFactor = Math.min(ps[i].depth + 0.3, 1) * Math.min(ps[j].depth + 0.3, 1);
+            const alpha = 0.15 * (1 - dist / maxDist) * depthFactor;
+            ctx.beginPath();
+            ctx.moveTo(ps[i].x, ps[i].y);
+            ctx.lineTo(ps[j].x, ps[j].y);
+            ctx.strokeStyle = `hsla(${avgHue}, 80%, 65%, ${alpha})`;
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+          }
+        }
+      }
+
       rafRef.current = requestAnimationFrame(animate);
     };
 
