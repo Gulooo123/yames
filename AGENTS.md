@@ -79,6 +79,24 @@ actually opens.
   (`../../../ipc`, `../../../types`, etc.). Run `tsc --noEmit` after
   moving files; TS `noUnusedLocals` will flag any orphaned imports.
 
+## Coaching pipeline — latency tiers
+
+Every coach feature belongs to exactly one tier. When adding pitch analysis,
+coach messages, or new DSP features, use this to decide where it fits.
+
+| Tier | Acceptable delay | Trigger | Examples |
+|------|-----------------|---------|---------|
+| **Real-time** | < 30 ms | Continuous, per audio hop | Onset dots, live timing ring, metronome click sync |
+| **Mid-session tip** | 1–3 s | Fires while the user is actively playing | "Dragging the last 8 bars", dead note alert, legato credit |
+| **Mid-session report** | 3–8 s | User finishes an exercise — hits Stop on the metronome | Segment mini-report, pitch technique summary for that exercise |
+| **Post-session report** | 5–15 s | User ends a full practice session | Full session analysis, bend accuracy, key inference, coach narrative |
+
+Key rules:
+- **Real-time tier**: no I/O, no LLM, no model inference — DSP only.
+- **Mid-session tips**: gatekeeper + template engine only. No model inference on this path.
+- **Mid-session / post-session reports**: correct home for ONNX pitch analysis (Basic-pitch processes a 30 s session in ~3–6 s; user is already reading the timing score — no perceived delay).
+- The post-session window is **free real estate**: the coach LLM summary already runs here. Pitch analysis merges into the same report in parallel with zero additional perceived latency.
+
 ## Commit / branch hygiene
 
 - Conventional prefixes: `feat:`, `fix:`, `refactor:`, `chore:`, `docs:`.
