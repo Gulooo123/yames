@@ -109,9 +109,9 @@ An AI-powered practice companion that listens to your playing and gives real-tim
 Press `Z` and everything else disappears. Fullscreen immersive visuals that pulse with the beat — particles, waves, cosmos. No UI chrome, no distractions. Just rhythm and breath. This is where deep practice happens.
 
 <p align="center">
-  <img src="docs/img/zen/obsidian-cosmos-zen.png" alt="Yames zen mode — Cosmos" width="380">
+  <img src="docs/img/zen/obsidian-cosmos.png" alt="Yames zen mode — Obsidian Cosmos" width="380">
   &nbsp;&nbsp;
-  <img src="docs/img/zen/neon-pulse-zen.png" alt="Yames zen mode — Neon Pulse" width="380">
+  <img src="docs/img/zen/neon-cosmos.png" alt="Yames zen mode — Neon Cosmos" width="380">
 </p>
 
 <br>
