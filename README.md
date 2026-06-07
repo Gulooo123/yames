@@ -24,7 +24,6 @@
 - [Designed for Practice](#designed-for-practice)
 - [The Metronome](#the-metronome)
 - [Speed Drill](#speed-drill)
-- [Pocket Check](#pocket-check)
 - [Zen Mode](#zen-mode)
 - [Floating Widget](#floating-widget)
 - [Hands-Free Control](#hands-free-control)
@@ -91,18 +90,6 @@ If you're working on a passage, building speed on scales, or training endurance,
 
 <br>
 
-## Pocket Check
-
-Practice keeping tempo by tapping along. Yames tracks your accuracy — how consistent your taps are — so you can see your internal clock improving over time.
-
-<p align="center">
-  <img src="docs/img/tapit/obsidian-tap.png" alt="Yames pocket check" height="310">
-  &nbsp;&nbsp;
-  <img src="docs/img/tapit/prism-tap.png" alt="Yames pocket check — Prism theme" height="310">
-</p>
-
-<br>
-
 ## Zen Mode
 
 Press `Z` and everything else disappears. Fullscreen immersive visuals that pulse with the beat — particles, waves, cosmos. No UI chrome, no distractions. Just rhythm and breath. This is where deep practice happens.
@@ -143,7 +130,7 @@ Everything is a hotkey. MIDI controllers and footswitches are first-class. You n
 | `Z` | Zen mode (fullscreen visuals) |
 | `F` | OS fullscreen |
 | `W` | Toggle floating widget |
-| `1` / `2` / `3` | Switch tabs (Metronome / Drill / Pocket Check) |
+| `1` / `2` | Switch tabs (Metronome / Drill) |
 | `S` | Settings |
 
 All keyboard shortcuts are rebindable. MIDI bindings are fully customizable — connect any controller and map CC, Note, or Program Change messages to any action.
