@@ -2,12 +2,18 @@
 
 **Yet Another Metronome Everyone Skips** — except this one, you won't.
 
-[Website](https://yames.app) &nbsp;·&nbsp; [Download](https://github.com/turutupa/yames/releases/latest) &nbsp;·&nbsp; [Request a Feature](https://github.com/turutupa/yames/issues/new) &nbsp;·&nbsp; [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[Website](https://yames.app) &nbsp;·&nbsp; [Download](https://github.com/turutupa/yames/releases/latest) &nbsp;·&nbsp; [Request a Feature](https://github.com/turutupa/yames/issues/new) &nbsp;·&nbsp; [![GitHub Release](https://img.shields.io/github/v/release/turutupa/yames?color=e94560&label=latest)](https://github.com/turutupa/yames/releases/latest) &nbsp;·&nbsp; [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 <br>
 
 <p align="center">
-  <img src="docs/img/zen/obsidian-cosmos-zen.png" alt="Yames zen mode — immersive fullscreen metronome" width="600">
+  <img src="docs/img/metronome/obsidian-metronome.png" alt="Yames — metronome with practice coach" width="700">
+</p>
+
+<p align="center">
+  <img src="docs/img/zen/velvet-cosmos.png" alt="Zen mode — Velvet theme" width="380">
+  &nbsp;
+  <img src="docs/img/drill/aurora-drill.png" alt="Speed drill — Aurora theme" width="380">
 </p>
 
 <br>
@@ -260,8 +266,24 @@ Requires [Rust](https://rustup.rs/) (stable) and [Node.js](https://nodejs.org/) 
 
 ## Contributing
 
-Found a bug? Want a feature? [Open an issue](https://github.com/turutupa/yames/issues/new). PRs welcome.
+Contributions are welcome. Here's where help would make the biggest impact:
+
+- **Practice Coach** — LLM inference pipeline, session analysis, adaptive tempo logic
+- **New themes** — add your own visual style to the theme system (CSS variables + a name in settings)
+- **Bug fixes & platform polish** — especially Windows and Linux edge cases
+- **Tests** — Rust unit tests for the audio engine; TypeScript tests for UI logic
+
+**Getting started:**
+
+```sh
+npm install
+npm run tauri dev   # requires Rust stable + Node.js 18+
+```
+
+Run `npm run tsc -- --noEmit` after changes to catch type errors. See [`AGENTS.md`](AGENTS.md) for the full dev workflow.
+
+Found a bug or have a feature idea? [Open an issue](https://github.com/turutupa/yames/issues/new). PRs are welcome — keep them focused and include a short description of what changed and why.
 
 ## License
 
-[MIT](LICENSE) — free to use, modify, and distribute.
+[GPL-3.0](LICENSE) — free to use, modify, and distribute. See [LICENSE](LICENSE) for details.
