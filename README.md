@@ -52,6 +52,7 @@ Built with Rust for sub-millisecond precision. No drift. No jitter. No Electron.
 
 Yames is built around one principle: **your hands stay on the instrument.** Everything is designed so you never have to break your flow to interact with the app.
 
+- **Practice coach** — an AI-powered companion that listens to your playing, gives real-time feedback, session reports, and adaptive tempo coaching. Runs fully local — no internet, no data sent anywhere.
 - **MIDI controller & footswitch support** — map any MIDI CC, note, or program change to play/stop, BPM adjust, subdivisions, and more. Assign a footswitch and control everything without looking up.
 - **Full keyboard shortcuts** — every action has a hotkey. Rebindable in settings.
 - **Presets** — save your exercise configurations (BPM, subdivision, time signature) and switch between them instantly. No setup time between exercises.
