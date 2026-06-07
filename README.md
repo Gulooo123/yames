@@ -67,9 +67,9 @@ The metronome is a background tool. You should be focused on playing, not on the
 The classic view. BPM control, subdivisions, time signatures, and a clean visual pulse that tracks every beat. Pick from 10+ handcrafted themes — dark, light, vibrant, minimal — and make it feel like yours.
 
 <p align="center">
-  <img src="docs/img/metronome/obsidian-metronome.png" alt="Yames metronome — Obsidian theme" height="310">
+  <img src="docs/img/metronome/obsidian-metronome.png" alt="Yames metronome — Obsidian theme" width="380">
   &nbsp;&nbsp;
-  <img src="docs/img/metronome/aurora-metronome.png" alt="Yames metronome — Aurora theme" height="310">
+  <img src="docs/img/metronome/aurora-metronome.png" alt="Yames metronome — Aurora theme" width="380">
 </p>
 
 <br>
@@ -83,9 +83,9 @@ Choose your ramp strategy: **Linear** (steady climb), **Zigzag** (push and pull)
 If you're working on a passage, building speed on scales, or training endurance, Drill is the single best reason to use Yames.
 
 <p align="center">
-  <img src="docs/img/drill/obsidian-drill.png" alt="Yames speed drill mode" height="310">
+  <img src="docs/img/drill/obsidian-drill.png" alt="Yames speed drill mode" width="380">
   &nbsp;&nbsp;
-  <img src="docs/img/drill/neon-drill.png" alt="Yames drill mode — Neon theme" height="310">
+  <img src="docs/img/drill/neon-drill.png" alt="Yames drill mode — Neon theme" width="380">
 </p>
 
 <br>
@@ -95,9 +95,9 @@ If you're working on a passage, building speed on scales, or training endurance,
 Press `Z` and everything else disappears. Fullscreen immersive visuals that pulse with the beat — particles, waves, cosmos. No UI chrome, no distractions. Just rhythm and breath. This is where deep practice happens.
 
 <p align="center">
-  <img src="docs/img/zen/obsidian-cosmos-zen.png" alt="Yames zen mode — Cosmos" height="310">
+  <img src="docs/img/zen/obsidian-cosmos-zen.png" alt="Yames zen mode — Cosmos" width="380">
   &nbsp;&nbsp;
-  <img src="docs/img/zen/neon-pulse-zen.png" alt="Yames zen mode — Neon Pulse" height="310">
+  <img src="docs/img/zen/neon-pulse-zen.png" alt="Yames zen mode — Neon Pulse" width="380">
 </p>
 
 <br>
@@ -123,15 +123,18 @@ Everything is a hotkey. MIDI controllers and footswitches are first-class. You n
 | Key | Action |
 |-----|--------|
 | `Space` | Play / Stop |
-| `K` / `J` | BPM +5 / -5 |
-| `Shift+K` / `Shift+J` | BPM +1 / -1 |
-| `I` / `U` | Subdivision +/- |
-| `L` / `H` | Time signature +/- |
-| `Z` | Zen mode (fullscreen visuals) |
+| `↑` / `↓` | BPM +5 / −5 |
+| `Shift+↑` / `Shift+↓` | BPM +1 / −1 |
+| `]` / `[` | Subdivision + / − |
+| `1` / `2` / `3` / `4` | Subdivision: quarter / eighth / triplet / sixteenth |
+| `T` / `Shift+T` | Time signature + / − |
+| `Z` | Zen mode |
 | `F` | OS fullscreen |
 | `W` | Toggle floating widget |
-| `1` / `2` | Switch tabs (Metronome / Drill) |
-| `S` | Settings |
+| `B` | Toggle presets sidebar |
+| `C` | Toggle practice coach |
+| `Cmd+1` / `Cmd+2` | Switch tab: Metronome / Drill |
+| `Cmd+,` | Settings |
 
 All keyboard shortcuts are rebindable. MIDI bindings are fully customizable — connect any controller and map CC, Note, or Program Change messages to any action.
 
