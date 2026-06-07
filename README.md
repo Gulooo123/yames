@@ -134,20 +134,40 @@ A tiny always-on-top mini-player that sits over your DAW, sheet music, tabs, or 
 
 Everything is a hotkey. MIDI controllers and footswitches are first-class. You never have to reach for the mouse during practice.
 
+**Metronome**
+
 | Key | Action |
 |-----|--------|
 | `Space` | Play / Stop |
-| `↑` / `↓` | BPM +5 / −5 |
-| `Shift+↑` / `Shift+↓` | BPM +1 / −1 |
-| `]` / `[` | Subdivision + / − |
-| `1` / `2` / `3` / `4` | Subdivision: quarter / eighth / triplet / sixteenth |
-| `T` / `Shift+T` | Time signature + / − |
+| `↑` | BPM +5 |
+| `↓` | BPM −5 |
+| `Shift+↑` | BPM +1 |
+| `Shift+↓` | BPM −1 |
+| `]` | Subdivision + |
+| `[` | Subdivision − |
+| `1` | Quarter notes |
+| `2` | Eighth notes |
+| `3` | Triplets |
+| `4` | Sixteenth notes |
+| `T` | Time signature + |
+| `Shift+T` | Time signature − |
+
+**View**
+
+| Key | Action |
+|-----|--------|
 | `Z` | Zen mode |
 | `F` | OS fullscreen |
+
+**Navigation**
+
+| Key | Action |
+|-----|--------|
 | `W` | Toggle floating widget |
 | `B` | Toggle presets sidebar |
 | `C` | Toggle practice coach |
-| `Cmd+1` / `Cmd+2` | Switch tab: Metronome / Drill |
+| `Cmd+1` | Metronome tab |
+| `Cmd+2` | Drill tab |
 | `Cmd+,` | Settings |
 
 All keyboard shortcuts are rebindable. MIDI bindings are fully customizable — connect any controller and map CC, Note, or Program Change messages to any action.
