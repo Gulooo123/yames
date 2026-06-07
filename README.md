@@ -24,10 +24,10 @@
 - [Designed for Practice](#designed-for-practice)
 - [The Metronome](#the-metronome)
 - [Speed Drill](#speed-drill)
+- [Practice Coach](#practice-coach)
 - [Zen Mode](#zen-mode)
 - [Floating Widget](#floating-widget)
 - [Hands-Free Control](#hands-free-control)
-- [Practice Coach (coming soon)](#practice-coach-coming-soon)
 - [Screenshots](#screenshots)
 - [Install](#install)
 - [Built With](#built-with)
@@ -90,6 +90,20 @@ If you're working on a passage, building speed on scales, or training endurance,
 
 <br>
 
+## Practice Coach
+
+An AI-powered practice companion that listens to your playing and gives real-time feedback — without you ever looking at the screen.
+
+- **Live coaching during practice** — audio notifications (chime or natural voice) when the coach has feedback. Comments appear in a chat-like feed for you to read when you pause.
+- **Automatic detection** — the coach knows if you're doing grid exercises or playing freely. Feedback adapts: timing accuracy for exercises, groove and tempo stability for musical playing.
+- **Session reports** — timeline-based breakdown of your practice with stats per segment. Not just numbers — natural language summaries that tell you what to work on.
+- **Adaptive drill mode** — set a start BPM and a target (or no ceiling). The coach adjusts tempo based on your accuracy: pushes you when you're comfortable, backs off when you struggle.
+- **Preset history** — track your progress on specific exercises over weeks and months. See how your comfortable BPM and accuracy improve over time.
+- **Conversational** — ask the coach questions about your session: "How was my timing?" "What should I focus on?"
+- **Fully local** — runs entirely on your machine. No internet required, no data sent anywhere.
+
+<br>
+
 ## Zen Mode
 
 Press `Z` and everything else disappears. Fullscreen immersive visuals that pulse with the beat — particles, waves, cosmos. No UI chrome, no distractions. Just rhythm and breath. This is where deep practice happens.
@@ -137,20 +151,6 @@ Everything is a hotkey. MIDI controllers and footswitches are first-class. You n
 | `Cmd+,` | Settings |
 
 All keyboard shortcuts are rebindable. MIDI bindings are fully customizable — connect any controller and map CC, Note, or Program Change messages to any action.
-
-<br>
-
-## Practice Coach (coming soon)
-
-An AI-powered practice companion that listens to your playing and gives real-time feedback — without you ever looking at the screen.
-
-- **Live coaching during practice** — audio notifications (chime or natural voice) when the coach has feedback. Comments appear in a chat-like feed for you to read when you pause.
-- **Automatic detection** — the coach knows if you're doing grid exercises or playing freely. Feedback adapts: timing accuracy for exercises, groove and tempo stability for musical playing.
-- **Session reports** — timeline-based breakdown of your practice with stats per segment. Not just numbers — natural language summaries that tell you what to work on.
-- **Adaptive drill mode** — set a start BPM and a target (or no ceiling). The coach adjusts tempo based on your accuracy: pushes you when you're comfortable, backs off when you struggle.
-- **Preset history** — track your progress on specific exercises over weeks and months. See how your comfortable BPM and accuracy improve over time.
-- **Conversational** — ask the coach questions about your session: "How was my timing?" "What should I focus on?"
-- **Fully local** — runs entirely on your machine. No internet required, no data sent anywhere.
 
 <br>
 
