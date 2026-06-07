@@ -134,6 +134,10 @@ A tiny always-on-top mini-player that sits over your DAW, sheet music, tabs, or 
 
 Everything is a hotkey. MIDI controllers and footswitches are first-class. You never have to reach for the mouse during practice.
 
+<table>
+<tr>
+<td valign="top">
+
 **Metronome**
 
 | Key | Action |
@@ -152,6 +156,9 @@ Everything is a hotkey. MIDI controllers and footswitches are first-class. You n
 | `T` | Time signature + |
 | `Shift+T` | Time signature − |
 
+</td>
+<td valign="top">
+
 **View**
 
 | Key | Action |
@@ -169,6 +176,10 @@ Everything is a hotkey. MIDI controllers and footswitches are first-class. You n
 | `Cmd+1` | Metronome tab |
 | `Cmd+2` | Drill tab |
 | `Cmd+,` | Settings |
+
+</td>
+</tr>
+</table>
 
 All keyboard shortcuts are rebindable. MIDI bindings are fully customizable — connect any controller and map CC, Note, or Program Change messages to any action.
 
