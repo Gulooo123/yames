@@ -44,17 +44,17 @@ export const SOUND_TYPES = [
 
 export const INSTRUMENTS: Array<{ id: string; name: string; soon?: boolean }> =
   [
-    { id: "drums", name: "Drums" },
+    // Fully calibrated: monophonic instruments where aubio onset + YINFFT pitch
+    // detection work reliably. Practice coach pitch features target these first.
     { id: "electric-guitar", name: "Electric Guitar" },
     { id: "acoustic-guitar", name: "Acoustic Guitar" },
-    // Bass onset detection via aubio is planned — mark as coming soon until
-    // the instrument profile is fully calibrated.
-    { id: "bass", name: "Bass", soon: true },
-    { id: "piano", name: "Piano" },
-    // "Other" is the neutral fallback for users whose instrument isn't in the
-    // calibrated list. DSP runs on moderate defaults; coach vocabulary stays
-    // generic.
-    { id: "other", name: "Other" },
+    { id: "bass", name: "Bass" },
+    // Coming soon: drums are non-pitched (pitch pipeline adds no value today);
+    // piano is polyphonic by nature and requires ONNX-based chord detection
+    // rather than YINFFT. "Other" is too generic to calibrate pitch feedback for.
+    { id: "drums", name: "Drums", soon: true },
+    { id: "piano", name: "Piano", soon: true },
+    { id: "other", name: "Other", soon: true },
   ];
 
 export const TIME_SIGNATURES = [

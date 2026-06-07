@@ -125,7 +125,27 @@ pub fn run() {
                     s.time_signature = v as u8;
                 }
                 if let Some(v) = store.get("instrument").and_then(|v| v.as_str().map(String::from)) {
-                    s.instrument = instrument::Instrument::from_id(&v);
+                    let loaded = instrument::Instrument::from_id(&v);
+                    // Migration guard: drums, piano, and "other" are now
+                    // marked "coming soon" in the UI (pitch pipeline is
+                    // calibrated for monophonic string instruments only).
+                    // Silently promote any stored soon-instrument to
+                    // electric-guitar so the user starts in a supported state.
+                    s.instrument = match loaded {
+                        instrument::Instrument::Drums
+                        | instrument::Instrument::Piano
+                        | instrument::Instrument::Other => instrument::Instrument::ElectricGuitar,
+                        other => other,
+                    };
+                    // Persist the migrated value so the store doesn't re-load
+                    // the legacy instrument on next launch.
+                    if s.instrument.id() != v.as_str() {
+                        store.set("instrument", serde_json::json!(s.instrument.id()));
+                        eprintln!(
+                            "[setup] migrated stored instrument '{}' → '{}' (instrument now coming-soon)",
+                            v, s.instrument.id()
+                        );
+                    }
                 }
                 if let Some(v) = store.get("speedRamp") {
                     if let Some(sb) = v.get("startBpm").and_then(|x| x.as_u64()) {
