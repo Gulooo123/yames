@@ -901,6 +901,19 @@ body {
     overflow: hidden;
   }
 
+  .content {
+    align-self: flex-start;
+    margin-top: -1.5vh;
+  }
+
+  .features {
+    gap: 20px;
+  }
+
+  .download-section {
+    margin-top: 20px;
+  }
+
   .layout {
     display: flex;
     flex-direction: row;

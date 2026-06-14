@@ -329,7 +329,7 @@
             </div>
             <div class="install-note" id="install-note">
               <div class="brew-install" id="cli-install">
-                <span class="brew-label">or install via terminal (recommended):</span>
+                <span class="brew-label">or install via terminal:</span>
                 <code class="brew-cmd" id="cli-cmd" onclick="if(!this.classList.contains('disabled'))navigator.clipboard.writeText(this.textContent).then(()=>{this.classList.add('copied');setTimeout(()=>this.classList.remove('copied'),1500)})">brew install --cask turutupa/tap/yames</code>
               </div>
             </div>
@@ -650,10 +650,10 @@
       };
 
       const CLI_LABELS = {
-        "macos-silicon": "or install via Homebrew (recommended):",
-        "macos-intel": "or install via Homebrew (recommended):",
-        "windows": "or install via winget (recommended):",
-        "linux": "or install via Snap (recommended):",
+        "macos-silicon": "or install via Homebrew:",
+        "macos-intel": "or install via Homebrew:",
+        "windows": "or install via winget:",
+        "linux": "or install via Snap:",
       };
 
       const COMING_SOON = { "linux": true };
