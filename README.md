@@ -7,13 +7,13 @@
 <br>
 
 <p align="center">
-  <img src="docs/img/metronome/obsidian-metronome.png" alt="Yames — metronome with practice coach" width="700">
+  <img src="docs/img/metronome/obsidian-metronome.webp" alt="Yames — metronome with practice coach" width="700">
 </p>
 
 <p align="center">
-  <img src="docs/img/zen/velvet-cosmos.png" alt="Zen mode — Velvet theme" width="380">
+  <img src="docs/img/zen/velvet-cosmos.webp" alt="Zen mode — Velvet theme" width="380">
   &nbsp;
-  <img src="docs/img/drill/aurora-drill.png" alt="Speed drill — Aurora theme" width="380">
+  <img src="docs/img/drill/aurora-drill.webp" alt="Speed drill — Aurora theme" width="380">
 </p>
 
 <br>
@@ -67,9 +67,9 @@ The metronome is a background tool. You should be focused on playing, not on the
 The classic view. BPM control, subdivisions, time signatures, and a clean visual pulse that tracks every beat. Pick from 10+ handcrafted themes — dark, light, vibrant, minimal — and make it feel like yours.
 
 <p align="center">
-  <img src="docs/img/metronome/obsidian-metronome.png" alt="Yames metronome — Obsidian theme" width="380">
+  <img src="docs/img/metronome/obsidian-metronome.webp" alt="Yames metronome — Obsidian theme" width="380">
   &nbsp;&nbsp;
-  <img src="docs/img/metronome/aurora-metronome.png" alt="Yames metronome — Aurora theme" width="380">
+  <img src="docs/img/metronome/aurora-metronome.webp" alt="Yames metronome — Aurora theme" width="380">
 </p>
 
 <br>
@@ -83,9 +83,9 @@ Choose your ramp strategy: **Linear** (steady climb), **Zigzag** (push and pull)
 If you're working on a passage, building speed on scales, or training endurance, Drill is the single best reason to use Yames.
 
 <p align="center">
-  <img src="docs/img/drill/obsidian-drill.png" alt="Yames speed drill mode" width="380">
+  <img src="docs/img/drill/obsidian-drill.webp" alt="Yames speed drill mode" width="380">
   &nbsp;&nbsp;
-  <img src="docs/img/drill/neon-drill.png" alt="Yames drill mode — Neon theme" width="380">
+  <img src="docs/img/drill/neon-drill.webp" alt="Yames drill mode — Neon theme" width="380">
 </p>
 
 <br>
@@ -109,9 +109,9 @@ An AI-powered practice companion that listens to your playing and gives real-tim
 Press `Z` and everything else disappears. Fullscreen immersive visuals that pulse with the beat — particles, waves, cosmos. No UI chrome, no distractions. Just rhythm and breath. This is where deep practice happens.
 
 <p align="center">
-  <img src="docs/img/zen/obsidian-cosmos.png" alt="Yames zen mode — Obsidian Cosmos" width="380">
+  <img src="docs/img/zen/obsidian-cosmos.webp" alt="Yames zen mode — Obsidian Cosmos" width="380">
   &nbsp;&nbsp;
-  <img src="docs/img/zen/neon-cosmos.png" alt="Yames zen mode — Neon Cosmos" width="380">
+  <img src="docs/img/zen/neon-cosmos.webp" alt="Yames zen mode — Neon Cosmos" width="380">
 </p>
 
 <br>
@@ -121,11 +121,11 @@ Press `Z` and everything else disappears. Fullscreen immersive visuals that puls
 A tiny always-on-top mini-player that sits over your DAW, sheet music, tabs, or whatever you're reading. It's draggable, transparent, and gets out of your way. Toggle it with `W`.
 
 <p align="center">
-  <img src="docs/img/widget/neon-widget.png" alt="Yames floating widget — Neon" width="280">
+  <img src="docs/img/widget/neon-widget.webp" alt="Yames floating widget — Neon" width="280">
   &nbsp;&nbsp;
-  <img src="docs/img/widget/obsidian-widget.png" alt="Yames floating widget — Obsidian" width="280">
+  <img src="docs/img/widget/obsidian-widget.webp" alt="Yames floating widget — Obsidian" width="280">
   &nbsp;&nbsp;
-  <img src="docs/img/widget/aurora-widget.png" alt="Yames floating widget — Aurora" width="280">
+  <img src="docs/img/widget/aurora-widget.webp" alt="Yames floating widget — Aurora" width="280">
 </p>
 
 <br>
@@ -193,19 +193,19 @@ All keyboard shortcuts are rebindable. MIDI bindings are fully customizable — 
 <summary>Metronome themes</summary>
 <br>
 <p align="center">
-  <img src="docs/img/metronome/neon-metronome.png" width="260">
-  <img src="docs/img/metronome/lavender-metronome.png" width="260">
-  <img src="docs/img/metronome/prism-metronome.png" width="260">
+  <img src="docs/img/metronome/neon-metronome.webp" width="260">
+  <img src="docs/img/metronome/lavender-metronome.webp" width="260">
+  <img src="docs/img/metronome/prism-metronome.webp" width="260">
 </p>
 <p align="center">
-  <img src="docs/img/metronome/ivory-metronome.png" width="260">
-  <img src="docs/img/metronome/arctic-metronome.png" width="260">
-  <img src="docs/img/metronome/mono-metronome.png" width="260">
+  <img src="docs/img/metronome/ivory-metronome.webp" width="260">
+  <img src="docs/img/metronome/arctic-metronome.webp" width="260">
+  <img src="docs/img/metronome/mono-metronome.webp" width="260">
 </p>
 <p align="center">
-  <img src="docs/img/metronome/sand-metronome.png" width="260">
-  <img src="docs/img/metronome/velvet-metronome.png" width="260">
-  <img src="docs/img/metronome/aurora-metronome.png" width="260">
+  <img src="docs/img/metronome/sand-metronome.webp" width="260">
+  <img src="docs/img/metronome/velvet-metronome.webp" width="260">
+  <img src="docs/img/metronome/aurora-metronome.webp" width="260">
 </p>
 </details>
 
@@ -213,19 +213,19 @@ All keyboard shortcuts are rebindable. MIDI bindings are fully customizable — 
 <summary>Drill themes</summary>
 <br>
 <p align="center">
-  <img src="docs/img/drill/neon-drill.png" width="260">
-  <img src="docs/img/drill/lavender-drill.png" width="260">
-  <img src="docs/img/drill/prism-drill.png" width="260">
+  <img src="docs/img/drill/neon-drill.webp" width="260">
+  <img src="docs/img/drill/lavender-drill.webp" width="260">
+  <img src="docs/img/drill/prism-drill.webp" width="260">
 </p>
 <p align="center">
-  <img src="docs/img/drill/ivory-drill.png" width="260">
-  <img src="docs/img/drill/arctic-drill.png" width="260">
-  <img src="docs/img/drill/mono-drill.png" width="260">
+  <img src="docs/img/drill/ivory-drill.webp" width="260">
+  <img src="docs/img/drill/arctic-drill.webp" width="260">
+  <img src="docs/img/drill/mono-drill.webp" width="260">
 </p>
 <p align="center">
-  <img src="docs/img/drill/sand-drill.png" width="260">
-  <img src="docs/img/drill/velvet-drill.png" width="260">
-  <img src="docs/img/drill/aurora-drill.png" width="260">
+  <img src="docs/img/drill/sand-drill.webp" width="260">
+  <img src="docs/img/drill/velvet-drill.webp" width="260">
+  <img src="docs/img/drill/aurora-drill.webp" width="260">
 </p>
 </details>
 
@@ -233,16 +233,16 @@ All keyboard shortcuts are rebindable. MIDI bindings are fully customizable — 
 <summary>Floating widgets</summary>
 <br>
 <p align="center">
-  <img src="docs/img/widget/neon-widget.png" width="200">
-  <img src="docs/img/widget/obsidian-widget.png" width="200">
-  <img src="docs/img/widget/aurora-widget.png" width="200">
-  <img src="docs/img/widget/lavender-widget.png" width="200">
+  <img src="docs/img/widget/neon-widget.webp" width="200">
+  <img src="docs/img/widget/obsidian-widget.webp" width="200">
+  <img src="docs/img/widget/aurora-widget.webp" width="200">
+  <img src="docs/img/widget/lavender-widget.webp" width="200">
 </p>
 <p align="center">
-  <img src="docs/img/widget/prism-widget.png" width="200">
-  <img src="docs/img/widget/ivory-widget.png" width="200">
-  <img src="docs/img/widget/mono-widget.png" width="200">
-  <img src="docs/img/widget/sand-widget.png" width="200">
+  <img src="docs/img/widget/prism-widget.webp" width="200">
+  <img src="docs/img/widget/ivory-widget.webp" width="200">
+  <img src="docs/img/widget/mono-widget.webp" width="200">
+  <img src="docs/img/widget/sand-widget.webp" width="200">
 </p>
 </details>
 
