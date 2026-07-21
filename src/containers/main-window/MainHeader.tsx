@@ -1,7 +1,90 @@
-import { useState, type Ref } from "react";
+import { useEffect, useRef, type Ref } from "react";
 import { setSoundType, setVolume, showFloating } from "../../ipc";
 import { SOUND_TYPES } from "../../constants/metronome";
 import type { AppState } from "../../types";
+
+/** Custom vertical fader — replaces <input type="range"> to avoid WebKit
+ *  performance issues with writing-mode on range inputs. Uses pointer capture
+ *  for reliable drag tracking even when cursor leaves the element. */
+function VolumeFader({
+  label,
+  value,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  value: number; // 0–100
+  onChange: (v: number) => void;
+  disabled?: boolean;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const fillRef = useRef<HTMLDivElement>(null);
+  const valueRef = useRef<HTMLSpanElement>(null);
+  const dragging = useRef(false);
+  const cachedRect = useRef<DOMRect | null>(null);
+  const pendingY = useRef<number | null>(null);
+  const rafId = useRef<number>(0);
+
+  useEffect(() => {
+    if (fillRef.current) fillRef.current.style.height = `${value}%`;
+    if (valueRef.current) valueRef.current.textContent = String(value);
+  }, [value]);
+
+  function calcValue(clientY: number): number {
+    const rect = cachedRect.current!;
+    const ratio = 1 - Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+    return Math.round(ratio * 100);
+  }
+
+  function updateDisplay(v: number) {
+    if (fillRef.current) fillRef.current.style.height = `${v}%`;
+    if (valueRef.current) valueRef.current.textContent = String(v);
+  }
+
+  return (
+    <div className={`volume-fader${disabled ? " volume-fader-disabled" : ""}`}>
+      <span ref={valueRef} className="volume-fader-value">{value}</span>
+      <div
+        ref={trackRef}
+        className="volume-fader-track"
+        style={{ cursor: disabled ? "not-allowed" : "grab", touchAction: "none" }}
+        onPointerDown={(e) => {
+          if (disabled) return;
+          e.preventDefault();
+          dragging.current = true;
+          cachedRect.current = trackRef.current!.getBoundingClientRect();
+          (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+          e.currentTarget.style.cursor = "grabbing";
+          updateDisplay(calcValue(e.clientY));
+        }}
+        onPointerMove={(e) => {
+          if (!dragging.current) return;
+          // Coalesce rapid pointer events — only repaint once per animation frame
+          pendingY.current = e.clientY;
+          if (!rafId.current) {
+            rafId.current = requestAnimationFrame(() => {
+              rafId.current = 0;
+              if (pendingY.current !== null) updateDisplay(calcValue(pendingY.current));
+            });
+          }
+        }}
+        onPointerUp={(e) => {
+          if (!dragging.current) return;
+          dragging.current = false;
+          cancelAnimationFrame(rafId.current);
+          rafId.current = 0;
+          e.currentTarget.style.cursor = "grab";
+          const v = calcValue(e.clientY);
+          updateDisplay(v);
+          onChange(v / 100);
+        }}
+      >
+        <div ref={fillRef} className="volume-fader-fill" style={{ height: `${value}%` }} />
+      </div>
+      <span className="volume-fader-label">{label}</span>
+    </div>
+  );
+}
 
 export type MainView = "beat" | "drill" | "track" | "settings";
 
@@ -58,11 +141,8 @@ export function MainHeader({
   setTtsVolume,
   voiceEnabled,
 }: MainHeaderProps) {
-  const [localVolume, setLocalVolume] = useState<number | null>(null);
-  const [localTtsVolume, setLocalTtsVolume] = useState<number | null>(null);
   const ttsVolumePercent = Math.round(ttsVolume * 100);
-  const displayVolume = localVolume ?? volumePercent;
-  const displayTtsVolume = localTtsVolume ?? ttsVolumePercent;
+
   return (
     <header className="main-header">
       {view !== "settings" && (
@@ -158,61 +238,24 @@ export function MainHeader({
             </svg>
           </button>
           <div className="header-volume-popover">
-            <div className="volume-fader">
-              <span className="volume-fader-value">{displayVolume}</span>
-              <div className="volume-fader-track">
-                <div
-                  className="volume-fader-fill"
-                  style={{ height: `${displayVolume}%` }}
-                />
-                <input
-                  type="range"
-                  className="volume-slider"
-                  min={0}
-                  max={100}
-                  value={displayVolume}
-                  onChange={(e) => setLocalVolume(parseInt(e.target.value))}
-                  onMouseUp={(e) => {
-                    const v = parseInt((e.target as HTMLInputElement).value) / 100;
-                    setLocalVolume(null);
-                    setVolume(v);
-                  }}
-                  aria-label="Metronome volume"
-                />
-              </div>
-              <span className="volume-fader-label">Metronome</span>
-            </div>
+            <VolumeFader
+              label="Metronome"
+              value={volumePercent}
+              onChange={(v) => setVolume(v)}
+            />
             <div
-              className={`volume-fader ${voiceEnabled ? "" : "volume-fader-disabled"}`}
               data-tooltip={
                 voiceEnabled
                   ? undefined
                   : "Enable Practice Coach voice in Settings"
               }
             >
-              <span className="volume-fader-value">{displayTtsVolume}</span>
-              <div className="volume-fader-track">
-                <div
-                  className="volume-fader-fill"
-                  style={{ height: `${displayTtsVolume}%` }}
-                />
-                <input
-                  type="range"
-                  className="volume-slider"
-                  min={0}
-                  max={100}
-                  value={displayTtsVolume}
-                  disabled={!voiceEnabled}
-                  onChange={(e) => setLocalTtsVolume(parseInt(e.target.value))}
-                  onMouseUp={(e) => {
-                    const v = parseInt((e.target as HTMLInputElement).value) / 100;
-                    setLocalTtsVolume(null);
-                    setTtsVolume(v);
-                  }}
-                  aria-label="Voice volume"
-                />
-              </div>
-              <span className="volume-fader-label">Voice</span>
+              <VolumeFader
+                label="Voice"
+                value={ttsVolumePercent}
+                onChange={(v) => setTtsVolume(v)}
+                disabled={!voiceEnabled}
+              />
             </div>
           </div>
         </div>
