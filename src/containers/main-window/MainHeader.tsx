@@ -1,4 +1,4 @@
-import type { Ref } from "react";
+import { useState, type Ref } from "react";
 import { setSoundType, setVolume, showFloating } from "../../ipc";
 import { SOUND_TYPES } from "../../constants/metronome";
 import type { AppState } from "../../types";
@@ -58,7 +58,11 @@ export function MainHeader({
   setTtsVolume,
   voiceEnabled,
 }: MainHeaderProps) {
+  const [localVolume, setLocalVolume] = useState<number | null>(null);
+  const [localTtsVolume, setLocalTtsVolume] = useState<number | null>(null);
   const ttsVolumePercent = Math.round(ttsVolume * 100);
+  const displayVolume = localVolume ?? volumePercent;
+  const displayTtsVolume = localTtsVolume ?? ttsVolumePercent;
   return (
     <header className="main-header">
       {view !== "settings" && (
@@ -155,21 +159,24 @@ export function MainHeader({
           </button>
           <div className="header-volume-popover">
             <div className="volume-fader">
-              <span className="volume-fader-value">{volumePercent}</span>
+              <span className="volume-fader-value">{displayVolume}</span>
               <div className="volume-fader-track">
                 <div
                   className="volume-fader-fill"
-                  style={{ height: `${volumePercent}%` }}
+                  style={{ height: `${displayVolume}%` }}
                 />
                 <input
                   type="range"
                   className="volume-slider"
                   min={0}
                   max={100}
-                  value={volumePercent}
-                  onChange={(e) =>
-                    setVolume(parseInt(e.target.value) / 100)
-                  }
+                  value={displayVolume}
+                  onChange={(e) => setLocalVolume(parseInt(e.target.value))}
+                  onMouseUp={(e) => {
+                    const v = parseInt((e.target as HTMLInputElement).value) / 100;
+                    setLocalVolume(null);
+                    setVolume(v);
+                  }}
                   aria-label="Metronome volume"
                 />
               </div>
@@ -183,22 +190,25 @@ export function MainHeader({
                   : "Enable Practice Coach voice in Settings"
               }
             >
-              <span className="volume-fader-value">{ttsVolumePercent}</span>
+              <span className="volume-fader-value">{displayTtsVolume}</span>
               <div className="volume-fader-track">
                 <div
                   className="volume-fader-fill"
-                  style={{ height: `${ttsVolumePercent}%` }}
+                  style={{ height: `${displayTtsVolume}%` }}
                 />
                 <input
                   type="range"
                   className="volume-slider"
                   min={0}
                   max={100}
-                  value={ttsVolumePercent}
+                  value={displayTtsVolume}
                   disabled={!voiceEnabled}
-                  onChange={(e) =>
-                    setTtsVolume(parseInt(e.target.value) / 100)
-                  }
+                  onChange={(e) => setLocalTtsVolume(parseInt(e.target.value))}
+                  onMouseUp={(e) => {
+                    const v = parseInt((e.target as HTMLInputElement).value) / 100;
+                    setLocalTtsVolume(null);
+                    setTtsVolume(v);
+                  }}
                   aria-label="Voice volume"
                 />
               </div>
