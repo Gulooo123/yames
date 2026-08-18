@@ -16,6 +16,9 @@ function isInteractive(el: HTMLElement | null): boolean {
  * Hybrid drag: tries native startDragging() first (perfect multi-monitor),
  * falls back to manual incremental drag when the window is already focused
  * (macOS bug: startDragging doesn't work on focused undecorated windows).
+ *
+ * The manual fallback detects devicePixelRatio changes (monitor boundary
+ * crossings) and re-syncs position from outerPosition() to prevent drift.
  */
 export function useDrag() {
   useEffect(() => {
@@ -25,6 +28,7 @@ export function useDrag() {
     let lastScreenY = 0;
     let winX = 0;
     let winY = 0;
+    let lastDpr = 1;
     let rafId = 0;
     let dirty = false;
 
@@ -38,6 +42,7 @@ export function useDrag() {
       nativeTookOver = false;
       lastScreenX = e.screenX;
       lastScreenY = e.screenY;
+      lastDpr = window.devicePixelRatio || 1;
       const win = getCurrentWindow();
       const pos = await win.outerPosition();
       winX = pos.x;
@@ -69,7 +74,22 @@ export function useDrag() {
     function onMouseMove(e: MouseEvent) {
       if (!dragging || nativeTookOver) return;
       e.preventDefault();
-      const scale = window.devicePixelRatio || 1;
+
+      const currentDpr = window.devicePixelRatio || 1;
+
+      // Monitor boundary detected (DPR changed).
+      // Cancel pending RAF so stale coords don't fire, reset delta baseline,
+      // and continue tracking with the new DPR. winX/winY stay valid — physical
+      // coordinates are in a unified global space across monitors.
+      if (currentDpr !== lastDpr) {
+        if (rafId) { cancelAnimationFrame(rafId); rafId = 0; dirty = false; }
+        lastDpr = currentDpr;
+        lastScreenX = e.screenX;
+        lastScreenY = e.screenY;
+        return; // skip one frame to absorb the DPR transition
+      }
+
+      const scale = currentDpr;
       const dx = (e.screenX - lastScreenX) * scale;
       const dy = (e.screenY - lastScreenY) * scale;
       lastScreenX = e.screenX;

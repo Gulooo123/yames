@@ -37,7 +37,7 @@ use commands::{
     save_window_position, set_active_tab, set_adaptive_decision, set_always_on_top,
     set_audio_output_device, set_bpm, set_calibration_offset, set_input_gain, set_instrument,
     set_midi_binding, set_playing, set_sound_type, set_subdivision, set_theme, set_time_signature,
-    set_volume, set_widget_always_on_top, set_widget_mode, show_floating, show_main,
+    app_ready, set_volume, set_widget_always_on_top, set_widget_mode, show_floating, show_main,
     start_evaluation, start_model_download, start_playback, start_recording, start_speed_ramp,
     start_speed_ramp_from, start_voice_repair, stop_evaluation, stop_playback, stop_recording,
     stop_speed_ramp, toggle_playback, tts_list_voices, tts_set_voice, tts_set_volume, tts_speak,
@@ -48,7 +48,10 @@ use midi::create_shared_midi;
 use onset::{create_shared_onset_detector, SharedTempoContext, TempoContext};
 use session::create_shared_session_accumulator;
 use state::{create_shared_state, SharedState};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -78,11 +81,17 @@ pub fn run() {
         eprintln!("[yames] session-audio recording disabled.");
     }
 
+    // Startup-complete flag: gates the WindowEvent::Moved handler so that
+    // position moves that happen during app initialization (centering, set_position
+    // restore) don't overwrite the persisted position in the store.
+    let startup_complete = Arc::new(AtomicBool::new(false));
+    let startup_complete_events = Arc::clone(&startup_complete);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .setup(|app| {
+        .setup(move |app| {
             let shared_state = create_shared_state();
 
             // Restore saved settings from store
@@ -364,46 +373,49 @@ pub fn run() {
             };
 
             if let Some(main_win) = app.get_webview_window("main") {
-                if last_window == "main" {
-                    let _ = main_win.show();
-                    let _ = main_win.set_focus();
-                } else {
-                    let _ = main_win.hide();
-                }
-                // Apply saved always-on-top setting for main window
+                // Apply size and attempt an initial position while hidden. The window
+                // stays hidden until app_ready fires (see commands.rs), which re-applies
+                // the position and calls show() after macOS restoration has settled.
                 let aot = { app.state::<SharedState>().lock().unwrap().always_on_top };
                 let _ = main_win.set_always_on_top(aot);
 
-                // Restore saved main window size
                 let store = app.store("settings.json")?;
                 if let Some(size) = store.get("window_size_main") {
                     if let (Some(w), Some(h)) = (size.get("width").and_then(|v| v.as_u64()), size.get("height").and_then(|v| v.as_u64())) {
                         let _ = main_win.set_size(tauri::PhysicalSize::new(w as u32, h as u32));
                     }
                 }
-                // Restore saved main window position (with bounds check)
-                if let Some(pos) = store.get("window_position_main") {
-                    if let (Some(x), Some(y)) = (pos.get("x").and_then(|v| v.as_i64()), pos.get("y").and_then(|v| v.as_i64())) {
-                        if is_position_visible(x as i32, y as i32, &main_win) {
-                            let _ = main_win.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
-                        } else {
-                            let _ = main_win.center();
-                        }
-                    }
+
+                // Resolve target position once so it can be re-applied after show().
+                let target_pos: Option<(i32, i32)> = store
+                    .get("window_position_main")
+                    .and_then(|pos| {
+                        let x = pos.get("x").and_then(|v| v.as_i64())? as i32;
+                        let y = pos.get("y").and_then(|v| v.as_i64())? as i32;
+                        if is_position_visible(x, y, &main_win) { Some((x, y)) } else { None }
+                    });
+
+                // Initial set_position attempt before show(). On macOS this may be
+                // ignored for hidden windows, but it's harmless to try.
+                if let Some((x, y)) = target_pos {
+                    let _ = main_win.set_position(tauri::PhysicalPosition::new(x, y));
+                } else {
+                    let _ = main_win.center();
                 }
 
+                // Keep the main window hidden here. The frontend calls `app_ready`
+                // after React has fully mounted; that command re-applies the saved
+                // position and calls show(). This eliminates the race with macOS
+                // NSWindowRestoration, which settles long before React is ready.
+                let _ = main_win.hide();
             }
 
             // Restore saved floating widget position (and visibility)
             if let Some(float_win) = app.get_webview_window("floating") {
-                if last_window != "main" {
-                    let _ = float_win.show();
-                } else {
-                    let _ = float_win.hide();
-                }
-                // Apply saved widget always-on-top
                 let widget_aot = { app.state::<SharedState>().lock().unwrap().widget_always_on_top };
                 let _ = float_win.set_always_on_top(widget_aot);
+
+                // Restore position before show() for the same reason as main_win.
                 let store = app.store("settings.json")?;
                 if let Some(pos) = store.get("window_position_floating") {
                     if let (Some(x), Some(y)) = (pos.get("x").and_then(|v| v.as_i64()), pos.get("y").and_then(|v| v.as_i64())) {
@@ -414,6 +426,12 @@ pub fn run() {
                         }
                     }
                 }
+
+                if last_window != "main" {
+                    let _ = float_win.show();
+                } else {
+                    let _ = float_win.hide();
+                }
             }
 
             // NOTE: capture_image() + png-based trigger helper was removed here.
@@ -421,6 +439,9 @@ pub fn run() {
             // and the `png` crate; the screenshot script (scripts/take-screenshots.sh)
             // uses macOS screencapture directly and does not need this trigger path.
             // Re-enable when Tauri image capture support is properly wired up.
+
+            // Mark startup complete so the Moved handler begins persisting positions.
+            startup_complete.store(true, Ordering::Release);
 
             Ok(())
         })
@@ -436,6 +457,7 @@ pub fn run() {
             set_theme,
             set_instrument,
             set_volume,
+            app_ready,
             show_main,
             show_floating,
             save_window_position,
@@ -507,9 +529,29 @@ pub fn run() {
             tts_voice_diagnostics,
             start_voice_repair,
         ])
-        .on_window_event(|window, event| {
+        .on_window_event(move |window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { .. } => {
+                    // Authoritative position save: read outer_position() right before
+                    // exit so the exact on-screen location is persisted regardless of
+                    // what the Moved handler may have captured during the session.
+                    {
+                        use tauri_plugin_store::StoreExt;
+                        if let Ok(store) = window.app_handle().store("settings.json") {
+                            let app_handle = window.app_handle();
+                            if let Some(main_win) = app_handle.get_webview_window("main") {
+                                if let Ok(pos) = main_win.outer_position() {
+                                    store.set("window_position_main", serde_json::json!({ "x": pos.x, "y": pos.y }));
+                                }
+                            }
+                            if let Some(float_win) = app_handle.get_webview_window("floating") {
+                                if let Ok(pos) = float_win.outer_position() {
+                                    store.set("window_position_floating", serde_json::json!({ "x": pos.x, "y": pos.y }));
+                                }
+                            }
+                            let _ = store.save(); // flush to disk before exit
+                        }
+                    }
                     // Quit the entire app when user closes ANY window. The
                     // engine shutdown is destructive (rips down the audio
                     // thread); we gate it to the "main" window so closing
@@ -536,11 +578,18 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Moved(pos) => {
-                    // Save main window position on move
-                    if window.label() == "main" {
+                    // Only save after startup is complete; moves that happen
+                    // during app initialisation (centering, set_position restore)
+                    // must not overwrite the persisted position.
+                    if !startup_complete_events.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let label = window.label();
+                    if label == "main" || label == "floating" {
                         use tauri_plugin_store::StoreExt;
                         if let Ok(store) = window.app_handle().store("settings.json") {
-                            store.set("window_position_main", serde_json::json!({ "x": pos.x, "y": pos.y }));
+                            let key = format!("window_position_{}", label);
+                            store.set(key, serde_json::json!({ "x": pos.x, "y": pos.y }));
                         }
                     }
                 }
@@ -562,33 +611,32 @@ pub fn run() {
 
 /// Check if a window position is at least partially visible on any available monitor.
 /// Returns false if the position would place the window entirely off-screen.
-fn is_position_visible(x: i32, y: i32, window: &tauri::WebviewWindow) -> bool {
-    if let Ok(Some(monitor)) = window.current_monitor() {
-        let pos = monitor.position();
-        let size = monitor.size();
-        let margin = 100; // At least 100px must be visible
-        let screen_left = pos.x;
-        let screen_top = pos.y;
-        let screen_right = pos.x + size.width as i32;
-        let screen_bottom = pos.y + size.height as i32;
-        x > screen_left - (size.width as i32 - margin)
-            && x < screen_right - margin
-            && y > screen_top - (size.height as i32 - margin)
-            && y < screen_bottom - margin
-    } else if let Ok(monitors) = window.available_monitors() {
-        // Check against all monitors
+///
+/// Always iterates all monitors (not just current_monitor) so that positions saved
+/// on secondary monitors are correctly accepted when the window starts hidden on
+/// the primary monitor.
+pub(crate) fn is_position_visible(x: i32, y: i32, window: &tauri::WebviewWindow) -> bool {
+    let margin = 100i32; // At least 100px of the window must remain on-screen
+    if let Ok(monitors) = window.available_monitors() {
+        if monitors.is_empty() {
+            return true; // Can't determine monitors — allow the position
+        }
         for monitor in monitors {
             let pos = monitor.position();
             let size = monitor.size();
-            let screen_right = pos.x + size.width as i32;
-            let screen_bottom = pos.y + size.height as i32;
-            if x >= pos.x - 200 && x < screen_right && y >= pos.y - 200 && y < screen_bottom {
+            let w = size.width as i32;
+            let h = size.height as i32;
+            // Window top-left (x, y) is acceptable if at least `margin` px of
+            // the window's leading edge falls within this monitor's bounds.
+            let in_x = x > pos.x - (w - margin) && x < pos.x + w - margin;
+            let in_y = y > pos.y - (h - margin) && y < pos.y + h - margin;
+            if in_x && in_y {
                 return true;
             }
         }
         false
     } else {
-        // Can't determine monitors, allow the position
+        // available_monitors() failed — allow the position rather than centering
         true
     }
 }
