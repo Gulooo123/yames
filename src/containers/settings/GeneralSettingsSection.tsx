@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 import { storeLoad, storeSave } from "../../ipc";
+import { getLanguages } from "../../i18n";
 
 /**
  * General settings — auto-update, always-on-top, button flash, active border,
@@ -31,18 +32,19 @@ export function GeneralSettingsSection({
   setDrillAutoCollapse: Dispatch<SetStateAction<boolean>>;
 }) {
   const { t, i18n } = useTranslation();
-  const [language, setLanguage] = useState<"en" | "zh-CN">("en");
+  const [language, setLanguage] = useState("en");
+  const languages = getLanguages();
 
   useEffect(() => {
     storeLoad<string>("language").then((l) => {
-      if (l === "en" || l === "zh-CN") {
+      if (l && i18n.hasResourceBundle(l, "translation")) {
         setLanguage(l);
         i18n.changeLanguage(l);
       }
     });
   }, [i18n]);
 
-  function applyLanguage(l: "en" | "zh-CN") {
+  function applyLanguage(l: string) {
     setLanguage(l);
     i18n.changeLanguage(l);
     storeSave("language", l);
@@ -58,18 +60,15 @@ export function GeneralSettingsSection({
             {t("common.languageHint")}
           </span>
         </div>
-        <button
-          className={`toggle-btn ${language === "zh-CN" ? "active" : ""}`}
-          onClick={() => applyLanguage("zh-CN")}
-        >
-          中文
-        </button>
-        <button
-          className={`toggle-btn ${language === "en" ? "active" : ""}`}
-          onClick={() => applyLanguage("en")}
-        >
-          English
-        </button>
+        {languages.map(({ code, name }) => (
+          <button
+            key={code}
+            className={`toggle-btn ${language === code ? "active" : ""}`}
+            onClick={() => applyLanguage(code)}
+          >
+            {name}
+          </button>
+        ))}
       </div>
       <div className="setting-row">
         <div className="setting-label">

@@ -23,7 +23,7 @@ export default function App() {
   useEffect(() => {
     // Apply the stored language preference once the settings store is ready.
     storeLoad<string>("language").then((l) => {
-      if (l === "en" || l === "zh-CN") i18n.changeLanguage(l);
+      if (l && i18n.hasResourceBundle(l, "translation")) i18n.changeLanguage(l);
     });
   }, []);
 
