@@ -61,7 +61,8 @@ describe("GeneralSettingsSection language select", () => {
   it("selecting a language applies it and closes the list", async () => {
     render(<GeneralSettingsSection {...baseProps} />);
     fireEvent.click(document.querySelector(".lang-select-btn")!);
-    const zhOption = screen.getByRole("option", { name: /中文/ });
+    // Exact match: "中文" must not also pick up "繁體中文".
+    const zhOption = screen.getByRole("option", { name: /^中文$/ });
     fireEvent.click(zhOption);
     await waitFor(() => expect(i18n.language).toBe("zh-CN"));
     expect(document.querySelector(".lang-options")).toBeNull();
