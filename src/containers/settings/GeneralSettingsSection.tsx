@@ -1,5 +1,7 @@
+import { useEffect, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { storeSave } from "../../ipc";
+import { useTranslation } from "react-i18next";
+import { storeLoad, storeSave } from "../../ipc";
 
 /**
  * General settings — auto-update, always-on-top, button flash, active border,
@@ -28,14 +30,52 @@ export function GeneralSettingsSection({
   drillAutoCollapse: boolean;
   setDrillAutoCollapse: Dispatch<SetStateAction<boolean>>;
 }) {
+  const { t, i18n } = useTranslation();
+  const [language, setLanguage] = useState<"en" | "zh-CN">("en");
+
+  useEffect(() => {
+    storeLoad<string>("language").then((l) => {
+      if (l === "en" || l === "zh-CN") {
+        setLanguage(l);
+        i18n.changeLanguage(l);
+      }
+    });
+  }, [i18n]);
+
+  function applyLanguage(l: "en" | "zh-CN") {
+    setLanguage(l);
+    i18n.changeLanguage(l);
+    storeSave("language", l);
+  }
+
   return (
     <section className="settings-section">
-      <h2>General</h2>
+      <h2>{t("settings.general.title")}</h2>
       <div className="setting-row">
         <div className="setting-label">
-          <label>Check for updates</label>
+          <label>{t("common.language")}</label>
           <span className="setting-hint">
-            Automatically check on launch
+            {t("common.languageHint")}
+          </span>
+        </div>
+        <button
+          className={`toggle-btn ${language === "zh-CN" ? "active" : ""}`}
+          onClick={() => applyLanguage("zh-CN")}
+        >
+          中文
+        </button>
+        <button
+          className={`toggle-btn ${language === "en" ? "active" : ""}`}
+          onClick={() => applyLanguage("en")}
+        >
+          English
+        </button>
+      </div>
+      <div className="setting-row">
+        <div className="setting-label">
+          <label>{t("settings.general.checkUpdates")}</label>
+          <span className="setting-hint">
+            {t("settings.general.checkUpdatesHint")}
           </span>
         </div>
         <button
@@ -46,28 +86,28 @@ export function GeneralSettingsSection({
             storeSave("autoCheckUpdates", next);
           }}
         >
-          {autoCheckUpdates ? "On" : "Off"}
+          {autoCheckUpdates ? t("common.on") : t("common.off")}
         </button>
       </div>
       <div className="setting-row">
         <div className="setting-label">
-          <label>Always on top</label>
+          <label>{t("settings.general.alwaysOnTop")}</label>
           <span className="setting-hint">
-            Keep main window above other apps
+            {t("settings.general.alwaysOnTopHint")}
           </span>
         </div>
         <button
           className={`toggle-btn ${alwaysOnTop ? "active" : ""}`}
           onClick={() => setAlwaysOnTop(!alwaysOnTop)}
         >
-          {alwaysOnTop ? "On" : "Off"}
+          {alwaysOnTop ? t("common.on") : t("common.off")}
         </button>
       </div>
       <div className="setting-row">
         <div className="setting-label">
-          <label>Button flash</label>
+          <label>{t("settings.general.buttonFlash")}</label>
           <span className="setting-hint">
-            Flash play button on accents
+            {t("settings.general.buttonFlashHint")}
           </span>
         </div>
         <button
@@ -78,13 +118,15 @@ export function GeneralSettingsSection({
             storeSave("buttonFlash", next);
           }}
         >
-          {buttonFlash ? "On" : "Off"}
+          {buttonFlash ? t("common.on") : t("common.off")}
         </button>
       </div>
       <div className="setting-row">
         <div className="setting-label">
-          <label>Active border</label>
-          <span className="setting-hint">Show border when playing</span>
+          <label>{t("settings.general.activeBorder")}</label>
+          <span className="setting-hint">
+            {t("settings.general.activeBorderHint")}
+          </span>
         </div>
         <button
           className={`toggle-btn ${activeBorder ? "active" : ""}`}
@@ -94,14 +136,14 @@ export function GeneralSettingsSection({
             storeSave("activeBorder", next);
           }}
         >
-          {activeBorder ? "On" : "Off"}
+          {activeBorder ? t("common.on") : t("common.off")}
         </button>
       </div>
       <div className="setting-row">
         <div className="setting-label">
-          <label>Drill auto-collapse</label>
+          <label>{t("settings.general.drillAutoCollapse")}</label>
           <span className="setting-hint">
-            Collapse drill config while playing
+            {t("settings.general.drillAutoCollapseHint")}
           </span>
         </div>
         <button
@@ -112,7 +154,7 @@ export function GeneralSettingsSection({
             storeSave("drillAutoCollapse", next);
           }}
         >
-          {drillAutoCollapse ? "On" : "Off"}
+          {drillAutoCollapse ? t("common.on") : t("common.off")}
         </button>
       </div>
     </section>
