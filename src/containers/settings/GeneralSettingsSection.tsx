@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 import { storeLoad, storeSave } from "../../ipc";
@@ -33,7 +33,9 @@ export function GeneralSettingsSection({
 }) {
   const { t, i18n } = useTranslation();
   const [language, setLanguage] = useState("en");
+  const [languageOpen, setLanguageOpen] = useState(false);
   const languages = getLanguages();
+  const langWrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     storeLoad<string>("language").then((l) => {
@@ -44,11 +46,32 @@ export function GeneralSettingsSection({
     });
   }, [i18n]);
 
+  // Close the language dropdown on outside click / Escape.
+  useEffect(() => {
+    if (!languageOpen) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (langWrapRef.current && !langWrapRef.current.contains(e.target as Node)) {
+        setLanguageOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setLanguageOpen(false);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [languageOpen]);
+
   function applyLanguage(l: string) {
     setLanguage(l);
     i18n.changeLanguage(l);
     storeSave("language", l);
   }
+
+  const currentLang = languages.find((l) => l.code === language) ?? languages[0];
 
   return (
     <section className="settings-section">
@@ -60,15 +83,53 @@ export function GeneralSettingsSection({
             {t("common.languageHint")}
           </span>
         </div>
-        {languages.map(({ code, name }) => (
+        <div className="lang-select-wrap" ref={langWrapRef}>
           <button
-            key={code}
-            className={`toggle-btn ${language === code ? "active" : ""}`}
-            onClick={() => applyLanguage(code)}
+            className={`toggle-btn lang-select-btn ${languageOpen ? "open" : ""}`}
+            aria-haspopup="listbox"
+            aria-expanded={languageOpen}
+            onClick={() => setLanguageOpen((open) => !open)}
           >
-            {name}
+            <span>{currentLang?.name ?? language}</span>
+            <svg
+              className="lang-select-chevron"
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M6 9l6 6 6-6" />
+            </svg>
           </button>
-        ))}
+          {languageOpen && (
+            <div className="lang-options" role="listbox">
+              {languages.map(({ code, name }) => (
+                <button
+                  key={code}
+                  role="option"
+                  aria-selected={code === language}
+                  className={`lang-option ${code === language ? "selected" : ""}`}
+                  onClick={() => {
+                    applyLanguage(code);
+                    setLanguageOpen(false);
+                  }}
+                >
+                  <span>{name}</span>
+                  {code === language && (
+                    <span className="lang-option-check" aria-hidden>
+                      ✓
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
       <div className="setting-row">
         <div className="setting-label">
