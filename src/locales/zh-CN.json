@@ -119,21 +119,21 @@
     "perfect": "完美",
     "good": "优秀",
     "ok": "良好",
-    "miss": "偏移"
+    "miss": "未命中"
   },
   "share": {
     "copyLink": "复制链接"
   },
   "nav": {
     "metronome": "节拍器",
-    "drill": "练习",
-    "pocketCheck": "口袋检查"
+    "drill": "变速练习",
+    "pocketCheck": "律动检查"
   },
   "pocketCheck": {
-    "title": "节拍自检",
-    "idleWithInstrument": "跟随节拍器演奏 {{beats}} 拍。你的乐器输入会被自动检测。",
-    "idleWithTaps": "跟随节拍器点击 {{beats}} 拍。点击目标区域记录每一拍。",
-    "calibratedHint": "已校准：{{offset}}ms 偏移",
+    "title": "律动检查",
+    "idleWithInstrument": "跟着节拍器演奏 {{beats}} 拍。你的乐器输入会被自动检测。",
+    "idleWithTaps": "跟着节拍器点击 {{beats}} 拍。点击目标区域记录每一拍。",
+    "calibratedHint": "已校准 —— 偏移 {{offset}}ms",
     "calibrateHint": "建议先校准，以获得本机最佳精度。",
     "start": "开始",
     "calibrate": "校准",
@@ -143,7 +143,7 @@
     "calibratingProgress": "校准中 {{count}}/{{total}}",
     "tapsCount": "{{count}} 次点击",
     "tap": "点击",
-    "calibratingHint": "跟着点击声自然拍打",
+    "calibratingHint": "跟着提示音自然拍打",
     "calibratedTitle": "校准完成！",
     "systemOffset": "你的系统偏移：",
     "offsetNote": "这包含了本机音频输出延迟和输入延迟。你可以随时重新校准。",
@@ -156,8 +156,8 @@
     "hits": "{{count}}% 命中",
     "warmupProgress": "热身 {{count}}/{{total}}",
     "getReady": "准备",
-    "playInstrumentHint": "跟随节拍演奏你的乐器",
-    "playTapHint": "点击目标区域跟随节奏点击",
+    "playInstrumentHint": "跟着节拍演奏你的乐器",
+    "playTapHint": "每拍点击目标区域",
     "yourTimingWas": "你的节奏是",
     "early": "偏快",
     "late": "偏慢",
@@ -226,7 +226,7 @@
     "delete": "删除"
   },
   "tooltip": {
-    "zen": "禅意模式",
+    "zen": "禅意",
     "enableVoice": "在设置中启用练习教练语音",
     "openWidget": "打开悬浮小窗",
     "copied": "已复制！",
@@ -313,20 +313,20 @@
       },
       "voiceSilentHint": "无音频 —— 反馈仅以文字呈现",
       "voiceSpeakHint": "每段练习后使用本地文字转语音播报反馈",
-      "verbosity": "啰嗦程度",
+      "verbosity": "说话频率",
       "verbosityHint": "教练说话的频率",
       "verbosityModes": {
         "less": "少",
         "default": "默认",
         "more": "多"
       },
-      "verbosityLessHint": "教练只说紧急事件；平静的提醒仅显示文字",
+      "verbosityLessHint": "教练只对紧急情况发声；一般提醒仅以文字显示",
       "verbosityDefaultHint": "教练只在门控选择口语档位时说话",
       "verbosityMoreHint": "教练也会把文字档提醒说出来（更话痨）",
       "voiceName": "声音",
       "voiceNameBrainOffHint": "启用 AI 大脑后可选择声音",
       "voiceNameSilentHint": "打开语音后可选择人格",
-      "voiceNameReadyHint": "选择声音人格",
+      "voiceNameReadyHint": "选择声音人设",
       "voiceNameDownloadHint": "下载语音后启用",
       "voiceNotDownloaded": "{{name}} — 未下载",
       "voiceEngineMissing": "{{name}} — 语音引擎缺失（点击下方下载按钮修复）",
@@ -352,8 +352,8 @@
       "buttonFlashHint": "重拍时闪烁播放按钮",
       "activeBorder": "播放指示边框",
       "activeBorderHint": "播放时显示边框",
-      "drillAutoCollapse": "练习自动折叠",
-      "drillAutoCollapseHint": "播放时自动收起练习设置"
+      "drillAutoCollapse": "变速练习自动折叠",
+      "drillAutoCollapseHint": "播放时自动收起变速练习设置"
     },
     "devices": {
       "title": "设备",
@@ -413,8 +413,8 @@
         "os-fullscreen": "系统全屏",
         "toggle-widget": "切换小窗",
         "tab-1": "节拍器页",
-        "tab-2": "练习页",
-        "tab-3": "口袋检查页",
+        "tab-2": "变速练习页",
+        "tab-3": "律动检查页",
         "settings": "设置",
         "toggle-sidebar": "切换预设",
         "toggle-coach": "切换教练"
@@ -437,8 +437,8 @@
         "os-fullscreen": "切换系统全屏",
         "toggle-widget": "切换到悬浮小窗",
         "tab-1": "切换到节拍器页",
-        "tab-2": "切换到练习页",
-        "tab-3": "切换到口袋检查页",
+        "tab-2": "切换到变速练习页",
+        "tab-3": "切换到律动检查页",
         "settings": "打开或关闭设置",
         "toggle-sidebar": "打开或关闭预设侧栏",
         "toggle-coach": "打开或关闭练习教练面板"
@@ -569,10 +569,10 @@
     "styleFreeTitle": "你的演奏没有严格贴合拍点——比较随性",
     "pocketRushing": "偏快",
     "pocketDragging": "偏慢",
-    "pocketOnBeat": "正拍",
-    "pocketEarly": "你平均提前 {{ms}}ms",
-    "pocketLate": "你平均滞后 {{ms}}ms",
-    "pocketCentred": "时值正好落在拍点上（平均 ±5ms）"
+    "pocketOnBeat": "在拍上",
+    "pocketEarly": "你平均提前 {{ms}} ms",
+    "pocketLate": "你平均滞后 {{ms}} ms",
+    "pocketCentred": "你的节奏正好落在拍点上（平均 ±5ms）"
   },
   "coachDownload": {
     "title": "下载 AI 模型",
